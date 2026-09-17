@@ -2,6 +2,16 @@
 
 Judgement calls made during the build, the alternative considered, and why. Newest first.
 
+## F3/F4/F5 shipped as commands, not explorer rows
+
+**Decision:** F3 (folder-units), F4 (Add block), and F5 (promoted blocks) ship their underlying mechanics now — interface-note lookup/creation, free-block creation + display-text derivation, promoted-block display-text + native navigation — each exposed as a command (`Atlas: Open folder-unit…`, `Atlas: Create interface note for folder…`, `Atlas: Add block`, `Atlas: Open promoted block…`) rather than waiting for F8's real explorer view to exist.
+
+**Why:** the hand-off doc's own ACs for these three features describe behavior "in the explorer," but the actual rendering surface — the `ItemView`, its icons, chevrons, drag-and-drop — is F8, grouped in a later PR. Building throwaway UI now to satisfy these ACs would mean redoing it in F8 anyway. A command is a legitimate stand-in: it exercises the exact same underlying code path a future explorer click/drag handler will call (`findInterfaceNote`/`createInterfaceNote`, `getFreeBlockDisplayText`, `workspace.openLinkText` for block navigation), so verifying it now is real verification, not a placeholder. TASKS.md marks each AC's UI-only half as deferred to F8 rather than silently skipped.
+
+## Found a reliable path through the flaky remote desktop: `xdotool`
+
+**Finding, not really a decision.** The Chrome-relayed VNC clicking that PR 2 struggled with (Settings gear intermittently no-opping) turned out to have a root cause: the container's real X11 display is 2052×1178, but the Chrome tab renders it scaled down to 1456×837 — clicks translated through that scaling were landing close to, but not exactly on, small targets. `xdotool` is installed in the `obsidian-development-template` image and can drive the container's X11 display directly (`docker exec -u abc -e DISPLAY=:1 desktop-atlas xdotool ...`), bypassing the VNC/Chrome relay and its scaling entirely. Coordinates still need converting from a Chrome screenshot (1456×837) to real screen space (×1.409, ×1.408), but once converted, clicks and keystrokes land reliably — used for all of PR 3's live verification, including discovering that `Ctrl+P` opens the command palette fine as long as focus isn't in the editor (the vault's `obsidian-editor-shortcuts` plugin has a real, registered conflict on the same hotkey — visible in Settings → Hotkeys' "Conflicts" filter — that only wins when the editor has focus).
+
 ## PR 2 review sign-off (A1)
 
 The delegate reviewer signed off on PR 2 after reading the actual diff (not just the PR description), independently re-derived the 24 folder-unit / 50 root-file counts from the fixture vault, and confirmed the Part 7 model checks (no disk moves, promotion computed live, "outside" scoped to top-level folder-unit) by tracing the code directly. Full detail in `_system/Notes/atlas/review/answers.md` A1.
