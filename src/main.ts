@@ -8,6 +8,9 @@ import {
 	registerOpenFolderUnitCommand,
 	registerOpenPromotedBlockCommand,
 } from "./commands";
+import { AtlasLinkSuggest } from "./link-suggest";
+import { applySuggesterPrecedence, removeSuggesterPrecedence } from "./suggester-precedence";
+import { FreeBlockTextCache, freeBlockLivePreviewPlugin, registerBlockLinkDisplayPostProcessor } from "./block-link-display";
 
 interface AtlasData {
 	settings: AtlasSettings;
@@ -18,6 +21,8 @@ export default class AtlasPlugin extends Plugin {
 	declare settings: AtlasSettings;
 	manualPromotions: UnitRef[];
 	unitIndex: UnitIndex;
+	private linkSuggest: AtlasLinkSuggest;
+	private freeBlockTextCache: FreeBlockTextCache;
 
 	async onload() {
 		await this.loadSettings();
@@ -25,8 +30,20 @@ export default class AtlasPlugin extends Plugin {
 		this.unitIndex = new UnitIndex(this.app, this.settings, this.manualPromotions);
 		this.addSettingTab(new AtlasSettingTab(this.app, this));
 
+		this.linkSuggest = new AtlasLinkSuggest(this);
+		this.registerEditorSuggest(this.linkSuggest);
+
+		this.freeBlockTextCache = new FreeBlockTextCache(this);
+		this.freeBlockTextCache.register();
+		registerBlockLinkDisplayPostProcessor(this);
+		this.registerEditorExtension([freeBlockLivePreviewPlugin(this, this.freeBlockTextCache)]);
+
 		this.app.workspace.onLayoutReady(() => {
 			this.unitIndex.rebuild();
+			void this.freeBlockTextCache.populateAll();
+			// Deferred until layout is ready so the native `[[` suggester is already registered —
+			// see docs/decisions.md for why this reorder is needed and how it degrades safely.
+			applySuggesterPrecedence(this.app, this.linkSuggest);
 		});
 
 		this.registerEvent(this.app.vault.on("create", (file) => this.unitIndex.onVaultCreate(file)));
@@ -85,6 +102,7 @@ export default class AtlasPlugin extends Plugin {
 	}
 
 	onunload() {
+		removeSuggesterPrecedence(this.app, this.linkSuggest);
 		console.debug("[Atlas] unloading");
 	}
 

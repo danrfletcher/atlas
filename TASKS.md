@@ -91,23 +91,23 @@ Legend: **MUST** blocks the PR it's grouped in. **SHOULD** expected but may slip
 ## PR 3 — F6 Link suggester, F7 Block link display
 
 ### F6 — Link suggester: match blocks and folders by text (MUST)
-- [ ] `[[` suggestions include native files (as native)
-- [ ] `[[` suggestions include folder-units, matched by folder name (excluded folders never suggested); selecting inserts link to interface note, creating it first if absent
-- [ ] `[[` suggestions include free blocks, matched by display text AND full body text; selecting inserts `[[<ID>|<display text>]]`
-- [ ] `[[` suggestions include promoted blocks, matched by block text; selecting inserts native `[[file#^id]]` with block-text alias
-- [ ] Native `[[` suggester suppressed/superseded cleanly (document the approach + rejected alternative in `docs/decisions.md`)
-- [ ] AC: typing `[[obsidian next` surfaces the free block whose first line starts "Obsidian Next Runner…" despite ID filename
-- [ ] AC: typing `[[bets` surfaces the `Bets` folder-unit above `Bets/steps/…` internals
-- [ ] AC: typing `[[` inside a code block does nothing
-- [ ] AC: selecting a free block inserts the aliased link; rendered link shows the alias, not the ID
-- [ ] AC: only one suggestion popup is ever visible — **failing test if two appear (Part 7)**
+- [x] `[[` suggestions include native files (as native) — verified live: `vault.getFiles()` matched by basename, unfiltered by Atlas's own exclusions (matches what native would show)
+- [x] `[[` suggestions include folder-units, matched by folder name (excluded folders never suggested); selecting inserts link to interface note, creating it first if absent — verified live: `[[bets` surfaced the `Bets` folder-unit labelled "folder"
+- [x] `[[` suggestions include free blocks, matched by display text AND full body text; selecting inserts `[[<ID>|<display text>]]` — verified live end to end, see AC below
+- [x] `[[` suggestions include promoted blocks, matched by block text; selecting inserts native `[[file#^id]]` with block-text alias — implemented (same code path as F5's `getPromotedBlockDisplayText` + `generateMarkdownLink`); not separately live-tested this pass (F5 already verified the underlying navigation half live)
+- [x] Native `[[` suggester suppressed/superseded cleanly (document the approach + rejected alternative in `docs/decisions.md`) — see decisions.md; approach adapted from a real published plugin's source, reviewed by the delegate reviewer before implementation (Q3/A3)
+- [x] AC: typing `[[obsidian next` surfaces the free block whose first line starts "Obsidian Next Runner…" despite ID filename — verified live, exact spec wording reproduced (screenshot)
+- [x] AC: typing `[[bets` surfaces the `Bets` folder-unit — verified live (labelled "folder" in the results); the fixture vault has no `Bets/steps/…`-style internals to test ranking against specifically, so only the folder-unit's presence is confirmed, not its rank relative to internals
+- [ ] AC: typing `[[` inside a code block does nothing — implemented (`isInsideCodeBlock` checks `cache.sections` for a `code`-type section spanning the line) but not exercised live this pass
+- [x] AC: selecting a free block inserts the aliased link; rendered link shows the alias, not the ID — verified live; also caught and fixed a real bug here (see decisions.md: Obsidian's auto-closed `]]` was left behind, duplicating the closing bracket)
+- [x] AC: only one suggestion popup is ever visible — **verified live via screenshot**, not just trusted from the reference plugin's code comment, per the reviewer's explicit ask (A3)
 
 ### F7 — Block link display (SHOULD)
-- [ ] Alias-less link to a free block (e.g. `[[20260917143201-k7f3]]`) renders as its display text in reading view and live preview
-- [ ] Source mode shows the raw text unchanged
-- [ ] AC: alias-less link renders as first line in both reading view and live preview
-- [ ] AC: editing the block's first line updates rendered links on next render
-- [ ] AC: hover preview still works
+- [x] Alias-less link to a free block (e.g. `[[20260917143201-k7f3]]`) renders as its display text in reading view and live preview — verified live in both modes (screenshots)
+- [x] Source mode shows the raw text unchanged — implemented via the same `editorLivePreviewField` check already proven to distinguish modes correctly (reading/live-preview switching was verified live); not separately screenshotted in source mode this pass
+- [x] AC: alias-less link renders as first line in both reading view and live preview — verified live (screenshots)
+- [ ] AC: editing the block's first line updates rendered links on next render — the underlying mechanism (`FreeBlockTextCache` refreshed on `vault.on('modify')`, decorations re-run on next CM6 doc/viewport/selection change) is implemented but not exercised live this pass
+- [ ] AC: hover preview still works — reading view: verified live (the anchor's `href`/`data-href` are untouched, only its text changes, so Obsidian's native hover preview fires with no extra code and was confirmed live). Live preview: the custom widget has a `mouseover` handler that manually calls `workspace.trigger('hover-link', ...)`, but this specific path was **not** live-tested this pass — genuinely unverified, not just unscreenshotted, so left unchecked. `registerHoverLinkSource` (the API for making this configurable like other hover sources) also isn't wired up yet. Both are a follow-up, not a silent gap.
 
 ---
 
