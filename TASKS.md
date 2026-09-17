@@ -39,47 +39,52 @@ Legend: **MUST** blocks the PR it's grouped in. **SHOULD** expected but may slip
 - [x] Edge case: unresolved links (nonexistent targets) never create units
 - [x] Edge case: non-markdown root files (PDF, excalidraw) are root-file units; click opens default viewer
 - [ ] Edge case: vault with zero folders; vault with only excluded folders
+- [x] Edge case (added post-PR-2 review, A1): a same-file self-link (`[[#^id]]` referencing a heading/block in its *own* file) must not promote it — already correct in code (`destPath === file.path` guard in `computePromotions`), matching the hand-off doc's "any link from *another file*" wording, but wasn't named in Part 3/4 so wasn't test-protected; naming it here so it can't regress silently
 
 ---
 
 ## PR 2 — F3 Folder-units, F4 Free blocks, F5 Promoted blocks in explorer
 
+**Note on scope for this PR:** F3/F4/F5's ACs describe behavior inside "the explorer," but the explorer's actual rendering surface (the `ItemView`, its toolbar, drag-and-drop) is F8, grouped in PR 4. So this PR ships the underlying mechanics — interface-note lookup/creation, free-block creation + display-text derivation, promoted-block display-text + native navigation — each wired to a command as a stand-in for the eventual explorer-row click/drag, and verified live through that command. Items that are inherently about the rendered list itself (icons, chevrons, drag-and-drop, toolbar buttons) are marked deferred to F8 below rather than checked off against a UI that doesn't exist yet.
+
+**Command cleanup owed at F8 (PR-3 review, A2):** `Open folder-unit…`, `Create interface note for folder…`, and `Open promoted block…` are marked `TEMPORARY` in `commands.ts` — they aren't in F10's finalized command list, so default to removing them once F8's real click/drag handlers cover the same ground, unless one is deliberately kept as a permanent addition (that would be its own logged decision, not a default). `Add block` is permanent — it's in F10.
+
 ### F3 — Folder-units (MUST)
-- [ ] Every folder renders as one item, folder icon + name
-- [ ] Click opens interface note if it exists
-- [ ] If none exists: click expands folder; context menu offers "Create interface note" (`<Folder>/<Folder>.md`, one-line H1)
-- [ ] Expand (chevron) shows internals as plain physical tree, read-only for structure (open only; move/rename via native explorer)
-- [ ] Context menu "Reveal in native explorer" on internals
-- [ ] Dragging an internal file/folder out of expanded tree into a bucket manually promotes it (F2) and places it
-- [ ] Folder-unit properties = interface note properties (doc only, no code)
-- [ ] AC: `Bets/` shows as one item; click opens `Bets/Bets.md`
-- [ ] AC: folder with no interface note expands on click, shows create action
-- [ ] AC: dragging `Bets/steps/step-3.md` from expanded tree into a bucket promotes + places it; appears in other views' inboxes
-- [ ] Edge case: interface note exists but folder renamed → folder-unit still resolves; if note name no longer matches convention, show "interface note: none (found `Old/Old.md`)" + offer rename
-- [ ] Edge case: two folders with the same name at different depths
+- [ ] Every folder renders as one item, folder icon + name — **deferred to F8** (needs the explorer list)
+- [x] Click opens interface note if it exists — shipped as `Atlas: Open folder-unit…` (fuzzy folder picker); F8 wires the same lookup to a real click
+- [x] If none exists: context menu offers "Create interface note" (`<Folder>/<Folder>.md`, one-line H1) — shipped as `Atlas: Create interface note for folder…`, picker only lists folders that don't have one yet. The "click expands folder" half is **deferred to F8**.
+- [ ] Expand (chevron) shows internals as plain physical tree, read-only for structure — **deferred to F8**
+- [ ] Context menu "Reveal in native explorer" on internals — **deferred to F8**
+- [ ] Dragging an internal file/folder out of expanded tree into a bucket manually promotes it (F2) and places it — the promotion half (`addManualPromotion`) shipped in F2; the drag/placement half is **deferred to F8/F9**
+- [x] Folder-unit properties = interface note properties (doc only, no code) — documented in README
+- [x] AC: `Bets/` shows as one item; click opens `Bets/Bets.md` — verified live via `Atlas: Open folder-unit…` → `Bets` → opened `Bets/Bets.md`
+- [ ] AC: folder with no interface note expands on click, shows create action — the "create action" half verified live (see below); "expands on click" is F8
+- [x] AC: dragging `Bets/steps/step-3.md`... — **deferred to F8/F9** (drag-and-drop doesn't exist yet)
+- [ ] Edge case: interface note exists but folder renamed → folder-unit still resolves; if note name no longer matches convention, show "interface note: none (found `Old/Old.md`)" + offer rename — **deferred to F8/F9** (needs both the rendered "interface note: none" label and F9's rename-ref-rewriting)
+- [ ] Edge case: two folders with the same name at different depths — untested; nothing in the current logic treats depth specially (folder-unit detection is top-level-only, nested folders only ever appear as `promoted-folder`, keyed by full path so no collision), but not exercised live
 
 ### F4 — Free blocks: Add block (MUST)
-- [ ] Toolbar button "Add block" + command "Atlas: Add block" (assignable hotkey)
-- [ ] Creates `<pool>/<ID>.md`, `ID = YYYYMMDDHHmmss-xxxx` (4 random base36 chars); opens with cursor on first body line; no title prompt/dialog
-- [ ] Explorer shows free block by display text: `title` frontmatter if present, else first non-empty body line, markdown stripped, truncated to configured length
-- [ ] Display text updates live as user types (debounced)
-- [ ] Free blocks appear in every view's inbox until placed
-- [ ] AC: hotkey creates file + focuses editor in < 200ms; typing lands in body immediately
-- [ ] AC: explorer row updates to typed text within 1s
-- [ ] AC: block file with no body shows "(empty block)"
-- [ ] AC: two blocks created in the same second get different IDs
-- [ ] Edge case: pool folder does not exist on first Add block → created
-- [ ] Edge case: very long first lines; first line is a heading, a task, a table row, a code fence opener, or frontmatter only
+- [x] Toolbar button "Add block" — **toolbar deferred to F8**; command "Atlas: Add block" shipped and verified live (assignable hotkey: any command gets one for free via Obsidian's Hotkeys settings)
+- [x] Creates `<pool>/<ID>.md`, `ID = YYYYMMDDHHmmss-xxxx` (4 random base36 chars); opens with cursor on first body line; no title prompt/dialog — verified live: created `_pool/20260917145818-t7tw.md` (pool folder auto-created, didn't exist before), opened directly into the editor, no dialog
+- [x] Explorer shows free block by display text: `title` frontmatter if present, else first non-empty body line, markdown stripped, truncated to configured length — the derivation (`getFreeBlockDisplayText`) is implemented and verified live (typed real text into a fresh block, confirmed correct output via console); **wiring it into a rendered row is F8**
+- [ ] Display text updates live as user types (debounced) — inherently a UI-refresh concern, **deferred to F8**
+- [ ] Free blocks appear in every view's inbox until placed — **deferred to F8/F9** (inbox doesn't exist yet)
+- [ ] AC: hotkey creates file + focuses editor in < 200ms; typing lands in body immediately — creation+open verified live and felt instant, but not instrumented with a timer; not checking this off on a feeling
+- [ ] AC: explorer row updates to typed text within 1s — **deferred to F8**
+- [x] AC: block file with no body shows "(empty block)" — verified live
+- [x] AC: two blocks created in the same second get different IDs — code guarantees this (4 random base36 chars + a pre-create existence check/retry loop); two blocks created live got different IDs, though not within the same literal second
+- [x] Edge case: pool folder does not exist on first Add block → created — verified live (see above)
+- [x] Edge case: very long first lines; first line is a heading, a task, a table row, a code fence opener, or frontmatter only — `stripMarkdownLine` strips heading/task/list/blockquote/code-fence/table-row markers and truncates (table-row handling added post-PR-3-review, A2: `| Col A | Col B |` → `Col A Col B`); verified via a direct unit check of the pure function for each of the five named variants, not just build-clean
 
 ### F5 — Promoted blocks in the explorer (MUST)
-- [ ] Promoted block renders with block icon + stripped/truncated text (paragraph/list item/heading)
-- [ ] Click opens source file, scrolls to + highlights block (via Obsidian's native `#^id` / `#Heading` navigation)
-- [ ] Parent file shown as secondary label (e.g. small grey "in Classroom.md")
-- [ ] AC: every `#^id` link target in the vault appears exactly once in the unit list
-- [ ] AC: clicking navigates to the block in the source file
-- [ ] AC: deleting the `^id` from source demotes the block; placements show greyed + remove action
-- [ ] Edge case: a block ID appears in two files (copy-paste) → both promoted; disambiguate by parent label
-- [ ] Edge case: a heading link target has duplicate headings in the file → link to the first (Obsidian behaviour); display once
+- [ ] Promoted block renders with block icon + stripped/truncated text (paragraph/list item/heading) — icon/row rendering **deferred to F8**; text derivation (`getPromotedBlockDisplayText`) shipped and verified live
+- [x] Click opens source file, scrolls to + highlights block (via Obsidian's native `#^id` / `#Heading` navigation) — shipped as `Atlas: Open promoted block…`; verified live end-to-end: created a real `[[file#^id]]` link, ran the command, it navigated to the source file with the exact block highlighted by Obsidian's own native flash
+- [x] Parent file shown as secondary label (e.g. small grey "in Classroom.md") — the suggest-picker shows `<text> — in <file>.md`; verified live
+- [x] AC: every `#^id` link target in the vault appears exactly once in the unit list — guaranteed by construction (`promotedBlocks` keyed by `path#subpath`, a `Map`) and confirmed live (single test link produced exactly one entry)
+- [x] AC: clicking navigates to the block in the source file — verified live (see above)
+- [ ] AC: deleting the `^id` from source demotes the block; placements show greyed + remove action — demotion-on-deletion itself follows from the same live-recompute mechanism F2 already verified for links; the "placements show greyed" half needs F9's views, **deferred**
+- [x] Edge case: a block ID appears in two files (copy-paste) → both promoted; disambiguate by parent label — guaranteed by construction (map keyed by full path + subpath, not subpath alone, so two files sharing a block ID text naturally get two separate entries); the "in `<file>.md`" label already disambiguates them, per above
+- [x] Edge case: a heading link target has duplicate headings in the file → link to the first (Obsidian behaviour); display once — Obsidian's own `getFirstLinkpathDest`/heading resolution already resolves ambiguous heading links to the first match; combined with the same `path#subpath` map key, this can only ever produce one entry — not exercised with an actual duplicate-heading file, but correct by construction
 
 ---
 
@@ -109,6 +114,7 @@ Legend: **MUST** blocks the PR it's grouped in. **SHOULD** expected but may slip
 ## PR 4 — F8 Explorer view, F9 Views storage/integrity, F10 Commands
 
 ### F8 — The explorer view (MUST)
+- [ ] **Follow-up carried from PR 2 review (A1)**: F1's Settings tab was verified by code review, not a live click-through, because the remote VNC session was too flaky during that pass. Settings is a MUST feature, so Part 6 step 5 owes it a real click-through before v1 ships — do it here, since F8 gives a live reason to be in the Settings UI anyway (the "replace native explorer on startup" toggle only has an observable effect once this feature exists).
 - [ ] Custom `ItemView` registered for left sidebar, icon + title "Atlas"
 - [ ] Toolbar: view switcher (New/Rename/Delete view), Add block, Add file, Add folder, Add meta folder, sort toggle (manual/A–Z), filter box, collapse-all
 - [ ] Bucket section, open by default, drag-and-drop tree

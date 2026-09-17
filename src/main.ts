@@ -2,6 +2,12 @@ import { Notice, Plugin, TFile, TFolder } from "obsidian";
 import { AtlasSettingTab, AtlasSettings, DEFAULT_SETTINGS, computeDefaultExcludedFolders } from "./settings";
 import { UnitIndex } from "./unit-index";
 import { UnitRef } from "./types";
+import {
+	registerAddBlockCommand,
+	registerCreateInterfaceNoteCommand,
+	registerOpenFolderUnitCommand,
+	registerOpenPromotedBlockCommand,
+} from "./commands";
 
 interface AtlasData {
 	settings: AtlasSettings;
@@ -27,6 +33,11 @@ export default class AtlasPlugin extends Plugin {
 		this.registerEvent(this.app.vault.on("delete", (file) => this.unitIndex.onVaultDelete(file.path)));
 		this.registerEvent(this.app.vault.on("rename", (file, oldPath) => this.unitIndex.onVaultRename(file, oldPath)));
 		this.registerEvent(this.app.metadataCache.on("resolved", () => this.unitIndex.onMetadataResolved()));
+
+		registerOpenFolderUnitCommand(this);
+		registerCreateInterfaceNoteCommand(this);
+		registerAddBlockCommand(this);
+		registerOpenPromotedBlockCommand(this);
 
 		this.addCommand({
 			id: "rebuild-index",

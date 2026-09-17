@@ -2,6 +2,31 @@
 
 Judgement calls made during the build, the alternative considered, and why. Newest first.
 
+## PR 3 review fixes (A2)
+
+Two small fixes applied before merging PR 3, per reviewer sign-off:
+
+1. **Marked three commands `TEMPORARY`** in `commands.ts` (`Open folder-unit…`, `Create interface note for folder…`, `Open promoted block…`) — none are in F10's finalized command list, so the default is removal once F8's real explorer covers the same ground. Not choosing to keep any of them permanently at this point; if that changes later, it gets its own logged decision rather than surviving by omission. `Add block` is unaffected — it's in F10, permanent regardless.
+2. **`stripMarkdownLine` now strips table-row syntax** — leading/trailing `|` and internal cell separators collapse to a space (`| Col A | Col B |` → `Col A Col B`). Missed on the first pass despite the hand-off doc naming table rows explicitly as one of five "very long first lines" variants in Part 4; caught by the reviewer reading the diff against that specific line, not by any test (there wasn't one — TASKS.md's checkbox covered it by a general "verified by code review" note that didn't call out this specific gap). Verified with a direct unit check of the pure function this time, one case per named variant, rather than repeating the same general checkmark.
+
+## F3/F4/F5 shipped as commands, not explorer rows
+
+**Decision:** F3 (folder-units), F4 (Add block), and F5 (promoted blocks) ship their underlying mechanics now — interface-note lookup/creation, free-block creation + display-text derivation, promoted-block display-text + native navigation — each exposed as a command (`Atlas: Open folder-unit…`, `Atlas: Create interface note for folder…`, `Atlas: Add block`, `Atlas: Open promoted block…`) rather than waiting for F8's real explorer view to exist.
+
+**Why:** the hand-off doc's own ACs for these three features describe behavior "in the explorer," but the actual rendering surface — the `ItemView`, its icons, chevrons, drag-and-drop — is F8, grouped in a later PR. Building throwaway UI now to satisfy these ACs would mean redoing it in F8 anyway. A command is a legitimate stand-in: it exercises the exact same underlying code path a future explorer click/drag handler will call (`findInterfaceNote`/`createInterfaceNote`, `getFreeBlockDisplayText`, `workspace.openLinkText` for block navigation), so verifying it now is real verification, not a placeholder. TASKS.md marks each AC's UI-only half as deferred to F8 rather than silently skipped.
+
+## Found a reliable path through the flaky remote desktop: `xdotool`
+
+**Finding, not really a decision.** The Chrome-relayed VNC clicking that PR 2 struggled with (Settings gear intermittently no-opping) turned out to have a root cause: the container's real X11 display is 2052×1178, but the Chrome tab renders it scaled down to 1456×837 — clicks translated through that scaling were landing close to, but not exactly on, small targets. `xdotool` is installed in the `obsidian-development-template` image and can drive the container's X11 display directly (`docker exec -u abc -e DISPLAY=:1 desktop-atlas xdotool ...`), bypassing the VNC/Chrome relay and its scaling entirely. Coordinates still need converting from a Chrome screenshot (1456×837) to real screen space (×1.409, ×1.408), but once converted, clicks and keystrokes land reliably — used for all of PR 3's live verification, including discovering that `Ctrl+P` opens the command palette fine as long as focus isn't in the editor (the vault's `obsidian-editor-shortcuts` plugin has a real, registered conflict on the same hotkey — visible in Settings → Hotkeys' "Conflicts" filter — that only wins when the editor has focus).
+
+## PR 2 review sign-off (A1)
+
+The delegate reviewer signed off on PR 2 after reading the actual diff (not just the PR description), independently re-derived the 24 folder-unit / 50 root-file counts from the fixture vault, and confirmed the Part 7 model checks (no disk moves, promotion computed live, "outside" scoped to top-level folder-unit) by tracing the code directly. Full detail in `_system/Notes/atlas/review/answers.md` A1.
+
+One correction to their independent count, for the record: they attributed the 24 figure to "25 real top-level folders minus 1 excluded (`_to_delete`)," reasoning that `_to_delete` already existed and was being actively excluded at PR-2 time. It wasn't — `_to_delete` didn't exist as a directory yet when the original 24/50 numbers were captured; I created it (via `mkdir`) only afterward, as the destination for the synthetic block-promotion test's throwaway files. So the original 24 was simply "24 real top-level folders, nothing to exclude yet," not an exercised exclusion check. Their *re-run*, done after my test scratch work, is still a valid and correct independent confirmation that the exclusion mechanism works — just not proof that the original PR-2 number specifically exercised it. Doesn't change the sign-off; logging it so the provenance is accurate if anyone re-derives these numbers again later.
+
+Two follow-ups from the review carried into `TASKS.md`: a live click-through of the Settings tab (owed before v1 ships, parked at F8 per the reviewer's suggestion), and naming the same-file self-link (`[[#^id]]`) non-promotion behavior as an explicit edge case (already correct in code, just wasn't named in Part 3/4).
+
 ## Delegate reviewer for day-to-day questions
 
 **Decision:** from PR 2 onward, judgement calls and "ready for review" pings go to a delegate reviewer via `_system/Notes/atlas/review/questions.md` / `answers.md` (append-only, format in that folder's `README.md`), not to Dan directly. Dan is only looped in for: publishing anywhere public, anything needing his GitHub/Obsidian sign-in, or a real product-scope change the reviewer chooses to escalate.
