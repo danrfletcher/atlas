@@ -9,6 +9,14 @@ import { addBlock } from "./commands";
 
 export const ATLAS_VIEW_TYPE = "atlas-explorer";
 
+/** F11: fixed row height assumed for inbox virtualization (all inbox rows are single-line,
+ * `white-space: nowrap` per `.atlas-row` in styles.css, so this holds across Obsidian's own font
+ * settings closely enough — a few px of slack either way just means a bit of overscan, not overlap). */
+const INBOX_ROW_HEIGHT = 28;
+/** Extra rows rendered above/below the visible window, so a fast scroll doesn't show blank gaps
+ * before the next frame's window recomputes. */
+const INBOX_OVERSCAN = 8;
+
 type DragPayload =
 	| { kind: "node"; nodeId: string; viewId: string }
 	| { kind: "inbox"; ref: UnitRef }
@@ -67,6 +75,12 @@ export class AtlasExplorerView extends ItemView {
 	private dragPayload: DragPayload | null = null;
 	private unsubscribers: (() => void)[] = [];
 	private renderQueued = false;
+	/** F11: rebuilt once per render from the flat unit list, so resolving a ref is O(1) instead of
+	 * an O(n) `find` per row — at thousands of units the naive scan-per-row was O(n^2) per render. */
+	private unitsByRefKey = new Map<string, Unit>();
+	/** Tracked so `render()` can restore focus/caret after rebuilding the toolbar — see the comment
+	 * in `render()` for why this is necessary at all. */
+	private filterInputEl: HTMLInputElement | null = null;
 
 	constructor(leaf: WorkspaceLeaf, private plugin: AtlasPlugin) {
 		super(leaf);
@@ -109,9 +123,9 @@ export class AtlasExplorerView extends ItemView {
 	// --- ref resolution (shared by bucket + inbox rendering) -------------------------------------
 
 	private async resolveRef(ref: UnitRef): Promise<RowInfo> {
-		const unit = this.plugin.unitIndex.getUnits().find((u) => unitRefsEqual(unitToRef(u), ref));
+		const unit = this.unitsByRefKey.get(unitRefKey(ref));
 		if (unit) {
-			const resolved = await resolveUnit(this.plugin.app, this.plugin.settings, unit);
+			const resolved = await resolveUnit(this.plugin.app, this.plugin.settings, unit, this.plugin.freeBlockTextCache);
 			if (resolved) return { text: resolved.text, secondary: resolved.secondary, icon: resolved.icon, promoted: resolved.promoted, missing: false };
 		}
 		// F9: refs are never deleted automatically — render greyed as missing rather than crash.
@@ -124,13 +138,28 @@ export class AtlasExplorerView extends ItemView {
 	private async render(): Promise<void> {
 		const container = this.containerEl.children[1] as HTMLElement;
 		const scrollTop = container.scrollTop;
+		// The filter input lives inside `container` and gets torn down by `container.empty()` below
+		// like everything else — every keystroke re-renders the whole view (index/view-change events
+		// and typing both go through this same `render()`). Capture focus/caret here and restore it
+		// on the freshly-created input after rebuilding, or every keystroke past the first would be
+		// silently lost as focus falls off the removed element.
+		const activeEl = document.activeElement;
+		const filterHadFocus = activeEl instanceof HTMLInputElement && activeEl.classList.contains("atlas-filter");
+		const filterSelectionStart = filterHadFocus ? activeEl.selectionStart : null;
+		const filterSelectionEnd = filterHadFocus ? activeEl.selectionEnd : null;
+
 		container.empty();
 		container.addClass("atlas-explorer");
 
 		const view = this.plugin.viewsManager.getActiveView();
 		const allUnits = this.plugin.unitIndex.getUnits();
+		this.unitsByRefKey = new Map(allUnits.map((u) => [unitRefKey(unitToRef(u)), u]));
 
 		this.renderToolbar(container, view);
+		if (filterHadFocus && this.filterInputEl) {
+			this.filterInputEl.focus();
+			this.filterInputEl.setSelectionRange(filterSelectionStart, filterSelectionEnd);
+		}
 
 		const bucketEl = container.createDiv({ cls: "atlas-section atlas-bucket" });
 		await this.renderBucketSection(bucketEl, view);
@@ -200,6 +229,7 @@ export class AtlasExplorerView extends ItemView {
 
 		const filterInput = toolbar.createEl("input", { cls: "atlas-filter", attr: { type: "text", placeholder: "Filter…" } });
 		filterInput.value = this.filterText;
+		this.filterInputEl = filterInput;
 		filterInput.addEventListener("input", () => {
 			this.filterText = filterInput.value;
 			void this.render();
@@ -381,26 +411,76 @@ export class AtlasExplorerView extends ItemView {
 						return ctimeB - ctimeA; // newest first, per spec default
 				  });
 
-		for (const { ref, info, unit } of sorted) {
-			const row = listEl.createDiv({ cls: "atlas-row atlas-row-unit" });
-			row.dataset.refKey = unitRefKey(ref);
-			row.setAttr("draggable", "true");
-			const iconEl = row.createDiv({ cls: "atlas-icon" });
-			setIcon(iconEl, info.icon);
-			row.createSpan({ cls: "atlas-row-text", text: info.text });
-			if (info.promoted) row.createSpan({ cls: "atlas-badge", text: "promoted" });
-			if (info.secondary) row.createSpan({ cls: "atlas-row-secondary", text: info.secondary });
-			if (unit.type === "folder-unit") this.addExpandChevron(row, unit.path, listEl, view);
-
-			this.setPlacementTooltip(row, ref);
-			row.addEventListener("click", () => void this.openRef(ref));
-			row.addEventListener("dragstart", () => (this.dragPayload = { kind: "inbox", ref }));
-			row.tabIndex = 0;
-			row.addEventListener("contextmenu", (evt) => {
-				evt.preventDefault();
-				this.showInboxUnitMenu(evt, ref);
-			});
+		// F11: the inbox can be thousands of rows (5,000 files + 2,000 free blocks scale target).
+		// Expanding a folder-unit's internals needs normal document flow (variable row heights),
+		// which the fixed-row-height virtualized path below can't represent — fall back to
+		// rendering every row in that case. Expansion is a deliberate, occasional action on one
+		// folder at a time, not a systemic thousands-of-rows scenario, so this fallback is fine.
+		if (this.expandedFolders.size > 0) {
+			for (const { ref, info, unit } of sorted) this.renderInboxRow(listEl, ref, info, unit, view);
+			return;
 		}
+		this.renderVirtualizedInboxRows(listEl, sorted, view);
+	}
+
+	private renderInboxRow(container: HTMLElement, ref: UnitRef, info: RowInfo, unit: Unit, view: View): HTMLElement {
+		const row = container.createDiv({ cls: "atlas-row atlas-row-unit" });
+		row.dataset.refKey = unitRefKey(ref);
+		row.setAttr("draggable", "true");
+		const iconEl = row.createDiv({ cls: "atlas-icon" });
+		setIcon(iconEl, info.icon);
+		row.createSpan({ cls: "atlas-row-text", text: info.text });
+		if (info.promoted) row.createSpan({ cls: "atlas-badge", text: "promoted" });
+		if (info.secondary) row.createSpan({ cls: "atlas-row-secondary", text: info.secondary });
+		if (unit.type === "folder-unit") this.addExpandChevron(row, unit.path, container, view);
+
+		this.setPlacementTooltip(row, ref);
+		row.addEventListener("click", () => void this.openRef(ref));
+		row.addEventListener("dragstart", () => (this.dragPayload = { kind: "inbox", ref }));
+		row.tabIndex = 0;
+		row.addEventListener("contextmenu", (evt) => {
+			evt.preventDefault();
+			this.showInboxUnitMenu(evt, ref);
+		});
+		return row;
+	}
+
+	/** F11: renders only the rows within the scrolled viewport (+ overscan) of a fixed-height,
+	 * absolutely-positioned window, with a full-height spacer so the scrollbar reflects the true
+	 * list length. Redraws on scroll (rAF-throttled) rather than re-running the whole view's
+	 * `render()`, so scrolling thousands of rows doesn't re-resolve/re-sort/re-render the toolbar
+	 * and bucket section on every frame. */
+	private renderVirtualizedInboxRows(
+		listEl: HTMLElement,
+		sorted: { ref: UnitRef; info: RowInfo; unit: Unit }[],
+		view: View
+	): void {
+		const viewport = listEl.createDiv({ cls: "atlas-inbox-viewport" });
+		const spacer = viewport.createDiv({ cls: "atlas-inbox-spacer" });
+		spacer.style.height = `${sorted.length * INBOX_ROW_HEIGHT}px`;
+
+		let frameQueued = false;
+		const drawWindow = () => {
+			frameQueued = false;
+			spacer.empty();
+			const viewportHeight = viewport.clientHeight || 300;
+			const start = Math.max(0, Math.floor(viewport.scrollTop / INBOX_ROW_HEIGHT) - INBOX_OVERSCAN);
+			const count = Math.ceil(viewportHeight / INBOX_ROW_HEIGHT) + INBOX_OVERSCAN * 2;
+			const end = Math.min(sorted.length, start + count);
+			for (let i = start; i < end; i++) {
+				const { ref, info, unit } = sorted[i];
+				const row = this.renderInboxRow(spacer, ref, info, unit, view);
+				row.addClass("atlas-row-virtual");
+				row.style.top = `${i * INBOX_ROW_HEIGHT}px`;
+			}
+		};
+
+		drawWindow();
+		viewport.addEventListener("scroll", () => {
+			if (frameQueued) return;
+			frameQueued = true;
+			window.requestAnimationFrame(drawWindow);
+		});
 	}
 
 	// --- F3: expanding a folder-unit's internals from the inbox -----------------------------------

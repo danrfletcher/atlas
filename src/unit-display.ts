@@ -2,6 +2,7 @@ import { App, TFile, TFolder } from "obsidian";
 import type { AtlasSettings } from "./settings";
 import { Unit } from "./types";
 import { getFreeBlockDisplayText, getPromotedBlockDisplayText } from "./display-text";
+import type { FreeBlockTextCache } from "./block-link-display";
 
 export interface ResolvedUnit {
 	unit: Unit;
@@ -29,8 +30,18 @@ function iconFor(unit: Unit): string {
 
 /** Resolves everything the explorer needs to render one row for a unit. Reads files where the
  * display text is derived from content (free blocks, promoted blocks) — done once per render pass
- * rather than per keystroke; virtualizing/caching this further is F11's job, not this one's. */
-export async function resolveUnit(app: App, settings: AtlasSettings, unit: Unit): Promise<ResolvedUnit | null> {
+ * rather than per keystroke. F11: free-block text is served from `freeBlockCache` (already kept
+ * current by vault events for F7's needs) when available, instead of re-reading the file fresh on
+ * every render pass — at a couple thousand free blocks, a fresh read per render per block is real,
+ * avoidable I/O. Promoted-block text has no equivalent cache yet (a smaller, bounded-impact gap —
+ * promoted blocks are explicit `#^id` links from elsewhere, typically far fewer than free blocks in
+ * a real vault — logged as a follow-up in decisions.md rather than built speculatively here). */
+export async function resolveUnit(
+	app: App,
+	settings: AtlasSettings,
+	unit: Unit,
+	freeBlockCache?: FreeBlockTextCache
+): Promise<ResolvedUnit | null> {
 	const file = app.vault.getAbstractFileByPath(unit.path);
 	if (!file) return null;
 	const promoted = unit.type === "promoted-file" || unit.type === "promoted-folder" || unit.type === "promoted-block";
@@ -46,7 +57,8 @@ export async function resolveUnit(app: App, settings: AtlasSettings, unit: Unit)
 			return { unit, text: file.name, icon: iconFor(unit), promoted, ctime: 0 };
 		case "free-block": {
 			if (!(file instanceof TFile)) return null;
-			const text = await getFreeBlockDisplayText(app, file, settings.blockDisplayLength);
+			const cached = freeBlockCache?.get(unit.path);
+			const text = cached ?? (await getFreeBlockDisplayText(app, file, settings.blockDisplayLength));
 			return { unit, text, icon: iconFor(unit), promoted, ctime: file.stat.ctime };
 		}
 		case "promoted-block": {
@@ -57,7 +69,12 @@ export async function resolveUnit(app: App, settings: AtlasSettings, unit: Unit)
 	}
 }
 
-export async function resolveUnits(app: App, settings: AtlasSettings, units: Unit[]): Promise<ResolvedUnit[]> {
-	const resolved = await Promise.all(units.map((unit) => resolveUnit(app, settings, unit)));
+export async function resolveUnits(
+	app: App,
+	settings: AtlasSettings,
+	units: Unit[],
+	freeBlockCache?: FreeBlockTextCache
+): Promise<ResolvedUnit[]> {
+	const resolved = await Promise.all(units.map((unit) => resolveUnit(app, settings, unit, freeBlockCache)));
 	return resolved.filter((r): r is ResolvedUnit => r !== null);
 }

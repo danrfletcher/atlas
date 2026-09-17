@@ -22,8 +22,9 @@ export default class AtlasPlugin extends Plugin {
 	manualPromotions: UnitRef[];
 	unitIndex: UnitIndex;
 	viewsManager: ViewsManager;
+	/** Public so the explorer (F8/F11) can reuse it instead of re-reading free-block files on every render. */
+	freeBlockTextCache: FreeBlockTextCache;
 	private linkSuggest: AtlasLinkSuggest;
-	private freeBlockTextCache: FreeBlockTextCache;
 	private persistDebounced: Debouncer<[], void>;
 
 	async onload() {
