@@ -22,6 +22,16 @@ type SuggestItem =
 	| { kind: "free-block"; file: TFile; text: string; match: SearchResult }
 	| { kind: "promoted-block"; file: TFile; subpath: string; text: string; match: SearchResult };
 
+/** Lower sorts first. A unit (folder-unit/free-block/promoted-block) only jumps the queue above
+ * plain files when its own match is *competitive* with the best file match in this result set —
+ * self-calibrating per query rather than a fixed score constant, so a unit that merely matched
+ * (e.g. "Kubernetes" weakly matching the query "bets") doesn't bury a strong file match, but a
+ * unit that's a genuinely good match (e.g. "Bets" matching "bets") still wins. See decisions.md. */
+function kindPriority(item: SuggestItem, bestFileScore: number): number {
+	if (item.kind === "file") return 1;
+	return item.match.score >= bestFileScore ? 0 : 1;
+}
+
 /**
  * F6 — one blended `[[` suggester covering native files, folder-units, free blocks, and promoted
  * blocks, matched by fuzzy text. Registered normally (public API); winning precedence over
@@ -90,7 +100,11 @@ export class AtlasLinkSuggest extends EditorSuggest<SuggestItem> {
 			}
 		}
 
-		items.sort((a, b) => b.match.score - a.match.score);
+		// A unit only jumps above files when it's a competitive match itself (see kindPriority) —
+		// otherwise a competing file (e.g. `Bets/notes-on-bets.md`) could out-score the `Bets`
+		// folder-unit for a query like "bets" and nothing would stop it ranking above the folder.
+		const bestFileScore = Math.max(-Infinity, ...items.filter((item) => item.kind === "file").map((item) => item.match.score));
+		items.sort((a, b) => kindPriority(a, bestFileScore) - kindPriority(b, bestFileScore) || b.match.score - a.match.score);
 		return items.slice(0, this.limit);
 	}
 
