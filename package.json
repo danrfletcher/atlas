@@ -1,0 +1,26 @@
+{
+	"name": "atlas",
+	"version": "0.1.0",
+	"description": "A replacement file explorer for Obsidian that arranges units into hierarchies without moving anything on disk.",
+	"main": "main.js",
+	"scripts": {
+		"dev": "node esbuild.config.mjs",
+		"build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production",
+		"lint": "eslint src",
+		"version": "node version-bump.mjs && git add manifest.json versions.json"
+	},
+	"keywords": [],
+	"author": "Dan Fletcher",
+	"license": "MIT",
+	"devDependencies": {
+		"@types/node": "^20.0.0",
+		"@typescript-eslint/eslint-plugin": "^8.70.0",
+		"@typescript-eslint/parser": "^8.70.0",
+		"builtin-modules": "^5.0.0",
+		"esbuild": "^0.28.2",
+		"eslint": "^10.10.0",
+		"obsidian": "^1.13.1",
+		"tslib": "^2.6.0",
+		"typescript": "^5.9.3"
+	}
+}

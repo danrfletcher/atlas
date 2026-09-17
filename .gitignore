@@ -1,0 +1,17 @@
+# Build output
+main.js
+main.js.map
+*.js.map
+
+# Dependencies
+node_modules/
+
+# Obsidian plugin runtime data (per-vault settings/views — never committed)
+data.json
+
+# Editors / OS
+.DS_Store
+.vscode/
+
+# Conductor
+.conductor/
