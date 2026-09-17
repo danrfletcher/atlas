@@ -2,6 +2,26 @@
 
 Judgement calls made during the build, the alternative considered, and why. Newest first.
 
+## F6: native `[[` suggester suppression — implemented per Q3/A3
+
+**Decision:** `AtlasLinkSuggest` (a normal `EditorSuggest`, registered via the public `registerEditorSuggest`) is moved to the front of the undocumented `app.workspace.editorSuggest.suggests` array in `onLayoutReady`, and moved back on `onunload` — see `src/suggester-precedence.ts`. Full reasoning, the alternatives rejected, and the risk classification were reviewed and approved *before* writing this code (Q3/A3 in `_system/Notes/atlas/review/`), following an established real plugin's approach (`saiki77/easy-links`, read directly from its source, not recalled from memory) rather than guessing.
+
+**Verified live, not just trusted from that reference plugin's own code comment:** typed `[[` in the container and confirmed exactly one popup renders (screenshot) — the specific check the reviewer asked not to skip. Also verified the two headline ACs word-for-word against the spec's own examples: `[[obsidian next` surfaced the free block by content despite its ID filename, and `[[bets` surfaced the `Bets` folder-unit.
+
+**One thing Atlas can't control, named so it isn't "discovered" as a bug later (A3's request):** if some other installed community plugin does the same front-of-array reorder trick, the two suggesters could fight over precedence — there's no registry coordinating this. Not solvable and not attempted; just worth knowing if a future user reports Atlas's suggester intermittently losing to another plugin's.
+
+## F6: real bug found live — Obsidian's auto-closed `]]` wasn't consumed
+
+**Decision:** `selectSuggestion` now checks whether the two characters immediately after `context.end` are `]]` (Obsidian's own bracket auto-close, inserted when the triggering `[[` was typed) and extends the replacement range to consume them if so.
+
+**Why:** caught live, not in review — the very first successful suggestion selection produced `[[ID|display text.]]]]`, a duplicated closing bracket. `context.end` only spans up to the typed query text, not the auto-closed brackets sitting just past the cursor, so the original code left them behind. Re-verified live after the fix: correct single `]]`.
+
+## F7: hover preview and `registerHoverLinkSource`
+
+**Decision (partial, follow-up logged rather than closed):** the live-preview widget's `mouseover` handler manually calls `app.workspace.trigger('hover-link', {...})`, which is enough to produce Obsidian's native hover-preview popover. `registerHoverLinkSource` — the API that lets a hover source show up as a configurable toggle in the "Page preview" core plugin's settings — is not wired up yet.
+
+**Why not now:** it's an enhancement (making an already-working hover source user-configurable), not required for the AC itself, and this PR was already large. Logged in TASKS.md as a named follow-up rather than silently skipped. Separately: the widget's `mouseover`-triggered hover path itself was implemented but **not live-tested** this pass (unlike everything else in F6/F7, which was) — flagged as a genuine unknown, not assumed to work because the reading-view case (a different, native code path) did.
+
 ## PR 3 review fixes (A2)
 
 Two small fixes applied before merging PR 3, per reviewer sign-off:
