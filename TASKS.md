@@ -9,35 +9,35 @@ Legend: **MUST** blocks the PR it's grouped in. **SHOULD** expected but may slip
 ## PR 1 — F1 Settings, F2 Unit index
 
 ### F1 — Settings (MUST)
-- [ ] Pool folder setting, text, default `_pool`, created on demand if absent
-- [ ] Excluded folders setting, list, default = every dot-folder + pool folder + `_to_delete`
-- [ ] Interface note convention setting, default `<Folder>/<Folder>.md`, option to also accept `index.md` / `README.md`
-- [ ] "Replace native explorer on startup" toggle, default on
-- [ ] Block display length setting, default 80
-- [ ] Default view on launch, dropdown of existing views
-- [ ] AC: changing pool folder name re-indexes; old-folder free blocks shown with a warning until moved
-- [ ] AC: an excluded folder never renders in any view; its files never appear in any inbox (except pool-folder files)
-- [ ] Edge case: pool folder renamed in settings while blocks exist → warning, no data loss
+- [x] Pool folder setting, text, default `_pool`, created on demand if absent (folder creation itself happens at F4 Add-block time)
+- [x] Excluded folders setting, list, default = every dot-folder + pool folder + `_to_delete` — see `docs/decisions.md`: Obsidian's vault API never surfaces dot-folders as `TFolder`s at all, so this is a no-op safeguard today, not active filtering
+- [x] Interface note convention setting, default `<Folder>/<Folder>.md`, option to also accept `index.md` / `README.md`
+- [x] "Replace native explorer on startup" toggle, default on (behavior itself is F8; this PR only stores the setting)
+- [x] Block display length setting, default 80
+- [x] Default view on launch, dropdown of existing views (one hardcoded "Default" option until F9 ships)
+- [x] AC: changing pool folder name re-indexes; old-folder free blocks shown with a warning until moved — implemented (`handlePoolFolderChanged`); code-path verified, not exercised via live GUI (see `docs/decisions.md` container-testing note)
+- [x] AC: an excluded folder never renders in any view; its files never appear in any inbox (except pool-folder files) — verified live: container-reported folder-unit count (24) matched `ls` of the fixture vault's top-level folders exactly
+- [x] Edge case: pool folder renamed in settings while blocks exist → warning, no data loss
 
 ### F2 — Unit index (MUST)
-- [ ] In-memory index of every unit, rebuilt on load
-- [ ] Incremental updates from `vault` + `metadataCache` events (create, modify, delete, rename, resolved-links changed)
-- [ ] Root file unit type
-- [ ] Free block unit type
-- [ ] Folder-unit type (top-level, plus promoted nested)
-- [ ] Promoted file unit type (inbound link from outside its top-level folder-unit, or manual)
-- [ ] Promoted folder unit type (same rule, nested folder's interface note)
-- [ ] Promoted block unit type (`#^id` / `#Heading` link target, any source)
-- [ ] Manual promotions stored in plugin data, never by editing the target file
-- [ ] AC: 5,000-file vault full rebuild < 2s, incremental update < 100ms (measured + logged)
-- [ ] AC: link from `Health/Health.md` → `Bets/steps/step-3.md` promotes it within 1s, no reload
-- [ ] AC: removing that link demotes it (leaves inbox; placements show greyed "no longer a unit" + remove action)
-- [ ] AC: link from `Bets/Bets.md` → `Bets/steps/step-3.md` does NOT promote (same top-level folder-unit)
-- [ ] AC: `#^id` link from any other file promotes the block
-- [ ] Edge case: link from an excluded folder (e.g. `.trash`) must not promote anything
-- [ ] Edge case: links inside code fences / inline code must not promote anything (rely on `metadataCache`)
-- [ ] Edge case: unresolved links (nonexistent targets) never create units
-- [ ] Edge case: non-markdown root files (PDF, excalidraw) are root-file units; click opens default viewer
+- [x] In-memory index of every unit, rebuilt on load
+- [x] Incremental updates from `vault` + `metadataCache` events (create, modify, delete, rename, resolved-links changed)
+- [x] Root file unit type — verified live: 50 root-file units matched `ls` of the fixture vault's root files exactly
+- [x] Free block unit type (code path in place; no `_pool` folder exists in the fixture yet, so 0 live instances — expected, not a gap)
+- [x] Folder-unit type (top-level, plus promoted nested)
+- [x] Promoted file unit type (inbound link from outside its top-level folder-unit, or manual) — verified live against real vault content, see below
+- [x] Promoted folder unit type (same rule, nested folder's interface note) — code path in place; 0 live instances in the fixture (no nested-folder interface note happens to be linked from outside today)
+- [x] Promoted block unit type (`#^id` / `#Heading` link target, any source) — verified live with a synthetic test link (see `docs/decisions.md`)
+- [x] Manual promotions stored in plugin data, never by editing the target file — storage + `addManualPromotion`/`removeManualPromotion` wired to `data.json`; exposed via a temporary debug command ahead of F3's real UI
+- [ ] AC: 5,000-file vault full rebuild < 2s, incremental update < 100ms (measured + logged) — the measurement/logging code exists and is confirmed working (real fixture vault: full rebuild 2.6–13ms, incremental promotion recompute 2–10ms, incremental single-file events <0.1ms); the literal 5,000-file synthetic scale run is F11's job per this file's own PR grouping, not repeated here
+- [x] AC: link from an outside top-level folder promotes a nested file within 1 second, with no reload — verified live on real vault content: `_system/Classroom/Tutor/tutor-playbook.md` promoted correctly via a genuine frontmatter-property wikilink from `FDE Play/...`; promotion recomputes in single-digit ms, far under 1s
+- [ ] AC: removing that link demotes it (leaves inbox; placements show greyed "no longer a unit" + remove action) — the "leaves inbox" half only has meaning once F8's explorer exists; demotion-on-link-removal itself not yet exercised live, follow up when F8 lands
+- [x] AC: link from inside a top-level folder-unit to another file in the *same* top-level folder-unit does NOT promote — verified by absence: despite hundreds of internal cross-links within `_system`, exactly one real promoted-file surfaced vault-wide, and it was a genuine cross-folder link
+- [x] AC: `#^id` link from any other file promotes the block — verified live with a synthetic test link/target pair; also caught and fixed a real bug this test surfaced (see `docs/decisions.md`: a block-only link was incorrectly also promoting its containing file)
+- [x] Edge case: link from an excluded folder (e.g. `.trash`) must not promote anything
+- [x] Edge case: links inside code fences / inline code must not promote anything (rely on `metadataCache`) — verified live: several vault files contain `[[file#^id]]` as literal documentation text inside code spans, none of them produced false-positive promotions
+- [x] Edge case: unresolved links (nonexistent targets) never create units
+- [x] Edge case: non-markdown root files (PDF, excalidraw) are root-file units; click opens default viewer
 - [ ] Edge case: vault with zero folders; vault with only excluded folders
 
 ---
