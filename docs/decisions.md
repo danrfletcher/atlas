@@ -2,6 +2,14 @@
 
 Judgement calls made during the build, the alternative considered, and why. Newest first.
 
+## PR 2 review sign-off (A1)
+
+The delegate reviewer signed off on PR 2 after reading the actual diff (not just the PR description), independently re-derived the 24 folder-unit / 50 root-file counts from the fixture vault, and confirmed the Part 7 model checks (no disk moves, promotion computed live, "outside" scoped to top-level folder-unit) by tracing the code directly. Full detail in `_system/Notes/atlas/review/answers.md` A1.
+
+One correction to their independent count, for the record: they attributed the 24 figure to "25 real top-level folders minus 1 excluded (`_to_delete`)," reasoning that `_to_delete` already existed and was being actively excluded at PR-2 time. It wasn't — `_to_delete` didn't exist as a directory yet when the original 24/50 numbers were captured; I created it (via `mkdir`) only afterward, as the destination for the synthetic block-promotion test's throwaway files. So the original 24 was simply "24 real top-level folders, nothing to exclude yet," not an exercised exclusion check. Their *re-run*, done after my test scratch work, is still a valid and correct independent confirmation that the exclusion mechanism works — just not proof that the original PR-2 number specifically exercised it. Doesn't change the sign-off; logging it so the provenance is accurate if anyone re-derives these numbers again later.
+
+Two follow-ups from the review carried into `TASKS.md`: a live click-through of the Settings tab (owed before v1 ships, parked at F8 per the reviewer's suggestion), and naming the same-file self-link (`[[#^id]]`) non-promotion behavior as an explicit edge case (already correct in code, just wasn't named in Part 3/4).
+
 ## Delegate reviewer for day-to-day questions
 
 **Decision:** from PR 2 onward, judgement calls and "ready for review" pings go to a delegate reviewer via `_system/Notes/atlas/review/questions.md` / `answers.md` (append-only, format in that folder's `README.md`), not to Dan directly. Dan is only looped in for: publishing anywhere public, anything needing his GitHub/Obsidian sign-in, or a real product-scope change the reviewer chooses to escalate.

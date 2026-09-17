@@ -39,6 +39,7 @@ Legend: **MUST** blocks the PR it's grouped in. **SHOULD** expected but may slip
 - [x] Edge case: unresolved links (nonexistent targets) never create units
 - [x] Edge case: non-markdown root files (PDF, excalidraw) are root-file units; click opens default viewer
 - [ ] Edge case: vault with zero folders; vault with only excluded folders
+- [x] Edge case (added post-PR-2 review, A1): a same-file self-link (`[[#^id]]` referencing a heading/block in its *own* file) must not promote it — already correct in code (`destPath === file.path` guard in `computePromotions`), matching the hand-off doc's "any link from *another file*" wording, but wasn't named in Part 3/4 so wasn't test-protected; naming it here so it can't regress silently
 
 ---
 
@@ -109,6 +110,7 @@ Legend: **MUST** blocks the PR it's grouped in. **SHOULD** expected but may slip
 ## PR 4 — F8 Explorer view, F9 Views storage/integrity, F10 Commands
 
 ### F8 — The explorer view (MUST)
+- [ ] **Follow-up carried from PR 2 review (A1)**: F1's Settings tab was verified by code review, not a live click-through, because the remote VNC session was too flaky during that pass. Settings is a MUST feature, so Part 6 step 5 owes it a real click-through before v1 ships — do it here, since F8 gives a live reason to be in the Settings UI anyway (the "replace native explorer on startup" toggle only has an observable effect once this feature exists).
 - [ ] Custom `ItemView` registered for left sidebar, icon + title "Atlas"
 - [ ] Toolbar: view switcher (New/Rename/Delete view), Add block, Add file, Add folder, Add meta folder, sort toggle (manual/A–Z), filter box, collapse-all
 - [ ] Bucket section, open by default, drag-and-drop tree
