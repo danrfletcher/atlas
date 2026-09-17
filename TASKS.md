@@ -47,6 +47,8 @@ Legend: **MUST** blocks the PR it's grouped in. **SHOULD** expected but may slip
 
 **Note on scope for this PR:** F3/F4/F5's ACs describe behavior inside "the explorer," but the explorer's actual rendering surface (the `ItemView`, its toolbar, drag-and-drop) is F8, grouped in PR 4. So this PR ships the underlying mechanics — interface-note lookup/creation, free-block creation + display-text derivation, promoted-block display-text + native navigation — each wired to a command as a stand-in for the eventual explorer-row click/drag, and verified live through that command. Items that are inherently about the rendered list itself (icons, chevrons, drag-and-drop, toolbar buttons) are marked deferred to F8 below rather than checked off against a UI that doesn't exist yet.
 
+**Command cleanup owed at F8 (PR-3 review, A2):** `Open folder-unit…`, `Create interface note for folder…`, and `Open promoted block…` are marked `TEMPORARY` in `commands.ts` — they aren't in F10's finalized command list, so default to removing them once F8's real click/drag handlers cover the same ground, unless one is deliberately kept as a permanent addition (that would be its own logged decision, not a default). `Add block` is permanent — it's in F10.
+
 ### F3 — Folder-units (MUST)
 - [ ] Every folder renders as one item, folder icon + name — **deferred to F8** (needs the explorer list)
 - [x] Click opens interface note if it exists — shipped as `Atlas: Open folder-unit…` (fuzzy folder picker); F8 wires the same lookup to a real click
@@ -72,7 +74,7 @@ Legend: **MUST** blocks the PR it's grouped in. **SHOULD** expected but may slip
 - [x] AC: block file with no body shows "(empty block)" — verified live
 - [x] AC: two blocks created in the same second get different IDs — code guarantees this (4 random base36 chars + a pre-create existence check/retry loop); two blocks created live got different IDs, though not within the same literal second
 - [x] Edge case: pool folder does not exist on first Add block → created — verified live (see above)
-- [x] Edge case: very long first lines; first line is a heading, a task, a table row, a code fence opener, or frontmatter only — `stripMarkdownLine` strips heading/task/list/blockquote/code-fence markers and truncates; verified live for a plain long line, the syntax-stripping itself verified by code review (pure string function, low risk) rather than one live case per variant
+- [x] Edge case: very long first lines; first line is a heading, a task, a table row, a code fence opener, or frontmatter only — `stripMarkdownLine` strips heading/task/list/blockquote/code-fence/table-row markers and truncates (table-row handling added post-PR-3-review, A2: `| Col A | Col B |` → `Col A Col B`); verified via a direct unit check of the pure function for each of the five named variants, not just build-clean
 
 ### F5 — Promoted blocks in the explorer (MUST)
 - [ ] Promoted block renders with block icon + stripped/truncated text (paragraph/list item/heading) — icon/row rendering **deferred to F8**; text derivation (`getPromotedBlockDisplayText`) shipped and verified live

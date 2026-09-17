@@ -47,8 +47,8 @@ class PromotedBlockSuggestModal extends FuzzySuggestModal<PromotedBlockItem> {
 	}
 }
 
-/** F3 — click opens the interface note if one exists; this is the command stand-in for that click
- * ahead of F8's real explorer list. */
+/** TEMPORARY — not in F10's finalized command list. Stands in for clicking a folder-unit row
+ * (opens its interface note if one exists) until F8's real explorer list exists; remove then. */
 export function registerOpenFolderUnitCommand(plugin: AtlasPlugin): void {
 	plugin.addCommand({
 		id: "open-folder-unit",
@@ -67,7 +67,8 @@ export function registerOpenFolderUnitCommand(plugin: AtlasPlugin): void {
 	});
 }
 
-/** F3 — the context-menu "Create interface note" action, as a command ahead of F8's real menu. */
+/** TEMPORARY — not in F10's finalized command list. Stands in for the "Create interface note"
+ * context-menu action until F8's real menu exists; remove then. */
 export function registerCreateInterfaceNoteCommand(plugin: AtlasPlugin): void {
 	plugin.addCommand({
 		id: "create-interface-note",
@@ -111,8 +112,10 @@ export function registerAddBlockCommand(plugin: AtlasPlugin): void {
 	});
 }
 
-/** F5 — click navigates to the block/heading via Obsidian's own `#^id` / `#Heading` resolution;
- * this is the command stand-in for that click ahead of F8's real explorer list. */
+/** TEMPORARY — not in F10's finalized command list. Stands in for clicking a promoted-block row
+ * (navigates via Obsidian's own `#^id` / `#Heading` resolution) until F8's real explorer list
+ * exists; remove then, unless it's deliberately kept as a permanent quick-jump — that would be its
+ * own decision to log, not a default. */
 export function registerOpenPromotedBlockCommand(plugin: AtlasPlugin): void {
 	plugin.addCommand({
 		id: "open-promoted-block",

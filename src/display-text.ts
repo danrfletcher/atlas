@@ -15,7 +15,7 @@ export function generateBlockId(now: Date): string {
 }
 
 /** Strips the markdown syntax a first line commonly carries (heading, task, list bullet,
- * blockquote, code fence opener) down to its plain text, for display purposes only. */
+ * blockquote, code fence opener, table row) down to its plain text, for display purposes only. */
 export function stripMarkdownLine(line: string): string {
 	let text = line.trim();
 	text = text.replace(/^#+\s*/, ""); // heading
@@ -24,6 +24,8 @@ export function stripMarkdownLine(line: string): string {
 	text = text.replace(/^\d+\.\s+/, ""); // numbered list
 	text = text.replace(/^>+\s*/, ""); // blockquote
 	text = text.replace(/^`{3,}\s*/, ""); // code fence opener
+	text = text.replace(/^\|\s*/, "").replace(/\s*\|\s*$/, ""); // table row's outer pipes
+	text = text.replace(/\s*\|\s*/g, " "); // table row cell separators
 	text = text.replace(/\*\*([^*]+)\*\*/g, "$1"); // bold
 	text = text.replace(/\*([^*]+)\*/g, "$1"); // italic
 	text = text.replace(/`([^`]+)`/g, "$1"); // inline code

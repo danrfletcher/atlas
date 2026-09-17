@@ -2,6 +2,13 @@
 
 Judgement calls made during the build, the alternative considered, and why. Newest first.
 
+## PR 3 review fixes (A2)
+
+Two small fixes applied before merging PR 3, per reviewer sign-off:
+
+1. **Marked three commands `TEMPORARY`** in `commands.ts` (`Open folder-unit…`, `Create interface note for folder…`, `Open promoted block…`) — none are in F10's finalized command list, so the default is removal once F8's real explorer covers the same ground. Not choosing to keep any of them permanently at this point; if that changes later, it gets its own logged decision rather than surviving by omission. `Add block` is unaffected — it's in F10, permanent regardless.
+2. **`stripMarkdownLine` now strips table-row syntax** — leading/trailing `|` and internal cell separators collapse to a space (`| Col A | Col B |` → `Col A Col B`). Missed on the first pass despite the hand-off doc naming table rows explicitly as one of five "very long first lines" variants in Part 4; caught by the reviewer reading the diff against that specific line, not by any test (there wasn't one — TASKS.md's checkbox covered it by a general "verified by code review" note that didn't call out this specific gap). Verified with a direct unit check of the pure function this time, one case per named variant, rather than repeating the same general checkmark.
+
 ## F3/F4/F5 shipped as commands, not explorer rows
 
 **Decision:** F3 (folder-units), F4 (Add block), and F5 (promoted blocks) ship their underlying mechanics now — interface-note lookup/creation, free-block creation + display-text derivation, promoted-block display-text + native navigation — each exposed as a command (`Atlas: Open folder-unit…`, `Atlas: Create interface note for folder…`, `Atlas: Add block`, `Atlas: Open promoted block…`) rather than waiting for F8's real explorer view to exist.
