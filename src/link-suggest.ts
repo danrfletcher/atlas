@@ -22,6 +22,12 @@ type SuggestItem =
 	| { kind: "free-block"; file: TFile; text: string; match: SearchResult }
 	| { kind: "promoted-block"; file: TFile; subpath: string; text: string; match: SearchResult };
 
+/** Lower sorts first. Atlas units (folder-unit/free-block/promoted-block) all outrank plain
+ * files deterministically — see the sort call in `getSuggestions` for why. */
+function kindPriority(kind: SuggestItem["kind"]): number {
+	return kind === "file" ? 1 : 0;
+}
+
 /**
  * F6 — one blended `[[` suggester covering native files, folder-units, free blocks, and promoted
  * blocks, matched by fuzzy text. Registered normally (public API); winning precedence over
@@ -90,7 +96,11 @@ export class AtlasLinkSuggest extends EditorSuggest<SuggestItem> {
 			}
 		}
 
-		items.sort((a, b) => b.match.score - a.match.score);
+		// Atlas units outrank plain files deterministically, not by fuzzy-score luck — the whole
+		// point of F6 is surfacing units over raw files, and a competing internal file (e.g.
+		// `Bets/notes-on-bets.md`) could otherwise out-score the `Bets` folder-unit itself for a
+		// query like "bets". Sort by kind tier first, fuzzy score only breaks ties within a tier.
+		items.sort((a, b) => (kindPriority(a.kind) - kindPriority(b.kind)) || (b.match.score - a.match.score));
 		return items.slice(0, this.limit);
 	}
 

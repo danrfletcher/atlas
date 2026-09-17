@@ -2,6 +2,14 @@
 
 Judgement calls made during the build, the alternative considered, and why. Newest first.
 
+## F6: deterministic kind-tier sort for suggestions (post-PR-4 review, A4)
+
+**Decision:** `getSuggestions` now sorts by a kind tier first (`folder-unit`/`free-block`/`promoted-block` all rank above plain `file` matches, unconditionally) and only falls back to fuzzy-match score to break ties within a tier.
+
+**Why:** the reviewer caught that the "`[[bets` surfaces the `Bets` folder-unit" AC was checked off but not actually guaranteed by the code — pure fuzzy-score sort meant a real competing file (e.g. `Bets/notes-on-bets.md`) could out-rank the folder-unit, and the fixture just happened not to have one at the time. Two fixes were offered (a margin-based tiebreak, or an unconditional tier); took the unconditional tier since it makes the AC true by construction and matches F6's own stated purpose (surfacing units over raw files). Verified live by adding a real competing file to the fixture and confirming `Bets`/folder now sorts first.
+
+**Trade-off, noted rather than hidden:** because the tier is unconditional, a folder-unit with only a *weak* fuzzy match can now outrank a file with a much *stronger* match — confirmed live: typing `bets` surfaced `Kubernetes` and `Objectives` (both folder-units, both weak subsequence matches) above an exact-ish `bets` filename match. This is a real quality cost, not just a hypothetical. Accepted for now because the reviewer explicitly named "just always" as one of the two acceptable resolutions and the alternative (a score-margin threshold) introduces its own arbitrary tuning constant with no obviously-correct value. Worth revisiting if this surfaces as an actual complaint once there's a real explorer to observe suggestion quality in day-to-day use, rather than guessing at a margin now.
+
 ## F6: native `[[` suggester suppression — implemented per Q3/A3
 
 **Decision:** `AtlasLinkSuggest` (a normal `EditorSuggest`, registered via the public `registerEditorSuggest`) is moved to the front of the undocumented `app.workspace.editorSuggest.suggests` array in `onLayoutReady`, and moved back on `onunload` — see `src/suggester-precedence.ts`. Full reasoning, the alternatives rejected, and the risk classification were reviewed and approved *before* writing this code (Q3/A3 in `_system/Notes/atlas/review/`), following an established real plugin's approach (`saiki77/easy-links`, read directly from its source, not recalled from memory) rather than guessing.
