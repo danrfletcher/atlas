@@ -23,7 +23,7 @@ Judgement calls made during the build, the alternative considered, and why. Newe
 
 **Decision:** scaffold from the standard `obsidian-sample-plugin` layout (esbuild + TypeScript + `manifest.json`/`versions.json`/`version-bump.mjs`) rather than copying `_system/Notes/obsidian-file-folder-status-icons-git-repo/`, which the hand-off doc names as the convention to follow.
 
-**Why:** that folder does not exist in this vault snapshot (git status shows several plugin folders under `.obsidian/plugins/` were recently deleted, `file-folder-status-icons` among them — the `-git-repo` dev-repo folder it would have pointed to was never present here either). The sample-plugin layout is what that convention folder would itself have been built from, so the result should be equivalent.
+**Why:** `pangyo` (this fixture vault) is a deliberately stripped-down test copy of Dan's real vault — dev-repo folders like `_system/Notes/obsidian-file-folder-status-icons-git-repo/` were never copied into it in the first place; they exist only in the real vault at `/Users/danfletcher/Documents/Notes`. Not a deletion, just outside this fixture's scope. The sample-plugin layout is what that convention folder would itself have been built from, so the result should be equivalent.
 
 ## Build tooling versions
 
