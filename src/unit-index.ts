@@ -1,6 +1,6 @@
 import { App, TAbstractFile, TFile, TFolder } from "obsidian";
 import type { AtlasSettings } from "./settings";
-import { Unit, UnitRef, unitRefsEqual } from "./types";
+import { Unit, UnitRef, rewriteRefPath, unitRefsEqual } from "./types";
 
 /**
  * In-memory index of every unit in the vault (F2). Rebuilt fully on load, then kept current by
@@ -234,18 +234,24 @@ export class UnitIndex {
 		this.logIncremental("delete", start);
 	}
 
-	onVaultRename(file: TAbstractFile, oldPath: string): void {
+	/** Returns whether any manual promotion's path was rewritten, so callers know to persist. */
+	onVaultRename(file: TAbstractFile, oldPath: string): boolean {
 		const start = performance.now();
+		const rewritten = this.manualPromotions.map((ref) => rewriteRefPath(ref, oldPath, file.path));
+		const promotionsChanged = rewritten.some((ref, i) => ref !== this.manualPromotions[i]);
+		this.manualPromotions = rewritten;
+
 		if (file instanceof TFolder) {
 			// A folder rename can move every nested unit's path at once — re-derive from scratch
 			// rather than remapping each map entry by hand. Rare event, correctness over the last ms.
 			this.rebuild();
 			this.logIncremental("rename (folder, full rebuild)", start);
-			return;
+			return promotionsChanged;
 		}
 		this.onVaultDelete(oldPath);
 		this.onVaultCreate(file);
 		this.logIncremental("rename", start);
+		return promotionsChanged;
 	}
 
 	private logIncremental(kind: string, start: number): void {

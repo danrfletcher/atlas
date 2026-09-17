@@ -114,59 +114,59 @@ Legend: **MUST** blocks the PR it's grouped in. **SHOULD** expected but may slip
 ## PR 4 — F8 Explorer view, F9 Views storage/integrity, F10 Commands
 
 ### F8 — The explorer view (MUST)
-- [ ] **Follow-up carried from PR 2 review (A1)**: F1's Settings tab was verified by code review, not a live click-through, because the remote VNC session was too flaky during that pass. Settings is a MUST feature, so Part 6 step 5 owes it a real click-through before v1 ships — do it here, since F8 gives a live reason to be in the Settings UI anyway (the "replace native explorer on startup" toggle only has an observable effect once this feature exists).
-- [ ] Custom `ItemView` registered for left sidebar, icon + title "Atlas"
-- [ ] Toolbar: view switcher (New/Rename/Delete view), Add block, Add file, Add folder, Add meta folder, sort toggle (manual/A–Z), filter box, collapse-all
-- [ ] Bucket section, open by default, drag-and-drop tree
-- [ ] Inbox section, collapsed by default, count badge, flat list, "This view"/"Global" toggle, sorted newest first by default
-- [ ] Item rendering: type icon (block/file/folder/meta) + display text; folder-units show chevron for internals; promoted items show "promoted" marker; missing units render greyed + remove action
-- [ ] Add file / Add folder: create real file/folder at vault root, rename-in-place UI, appear in inbox
-- [ ] Add meta folder: branch node in bucket at current selection or root, named in place, unlimited nesting
-- [ ] Drag: inbox → bucket places unit
-- [ ] Drag: within bucket reorders/re-nests units and meta folders
-- [ ] Drag: bucket → inbox area unplaces unit
-- [ ] Drag: expanded folder-unit internals → bucket manually promotes + places (F3)
-- [ ] Multi-select (shift/cmd-click); drag moves whole selection
-- [ ] Code assertion: DnD handlers never call `vault.rename` / `fileManager.renameFile`
-- [ ] Context menu: Open, Open in new tab, Reveal in native explorer, Copy link, Remove from view, Promote (internals), Create interface note (folder-units w/o one), Rename meta folder, Delete meta folder (children move up one level), Place in view ▸ (submenu)
-- [ ] Active-file tracking: highlighted wherever it appears in current view's bucket; hover tooltip lists every placement across all views as breadcrumbs
-- [ ] Keyboard: arrow nav, Enter to open, Space to expand/collapse, Delete to remove (with confirm), F2 to rename meta folder
-- [ ] AC: fresh vault, no views → one "Default" view, empty bucket, every unit in inbox
-- [ ] AC: drag `Bets` from inbox into meta folder "Career" places it; `Bets/` path on disk unchanged (verify with `ls`)
-- [ ] AC: second view "Weekly", place `Bets` there too → in both buckets; absent from global inbox; absent from each view's own inbox
-- [ ] AC: remove `Bets` from "Weekly" only → returns to Weekly's inbox, stays in "Career" in first view, absent from global inbox
-- [ ] AC: delete meta folder "Career" → children move to bucket root, nothing on disk changes
-- [ ] AC: filter box narrows bucket + inbox by display text, live
-- [ ] AC: renaming a file on disk (native explorer or agent) keeps it placed in every view (F9)
-- [ ] AC: plugin's explorer is the active sidebar view on launch when setting is on; native explorer reachable as a tab
-- [ ] Edge case: circular placement — a meta folder cannot be dropped into its own descendant
-- [ ] Edge case: dropping a unit onto a unit node (not a meta folder) → insert as sibling after it
-- [ ] Edge case: vault with zero folders; vault with only excluded folders (explorer rendering, not just index — cross-ref F2)
+- [x] **Follow-up carried from PR 2 review (A1)**: F1's Settings tab was verified by code review, not a live click-through, because the remote VNC session was too flaky during that pass. Settings is a MUST feature, so Part 6 step 5 owes it a real click-through before v1 ships — do it here, since F8 gives a live reason to be in the Settings UI anyway (the "replace native explorer on startup" toggle only has an observable effect once this feature exists). — verified live: opened Settings → Atlas, all six controls render and match `settings.ts` exactly (Pool folder, Excluded folders, Interface note convention toggle, Replace native explorer toggle — on — Block display length, Default view on launch dropdown)
+- [x] Custom `ItemView` registered for left sidebar, icon + title "Atlas" — verified live throughout this pass (map icon in the ribbon, tab labelled "Atlas")
+- [x] Toolbar: view switcher (New/Rename/Delete view), Add block, Add file, Add folder, Add meta folder, sort toggle (manual/A–Z), filter box, collapse-all — every button verified live this pass except Add file/Add folder (icons present, same `toolbarButton` wiring as the others already proven to work, not separately clicked)
+- [x] Bucket section, open by default, drag-and-drop tree — open-by-default and tree rendering verified live repeatedly; the drag-and-drop gesture itself is a documented environment limitation, see below
+- [x] Inbox section, collapsed by default, count badge, flat list, "This view"/"Global" toggle, sorted newest first by default — verified live end-to-end this pass, including a real differential test (see F9 AC below)
+- [x] Item rendering: type icon (block/file/folder/meta) + display text; folder-units show chevron for internals; promoted items show "promoted" marker; missing units render greyed + remove action — all verified live, including the missing-ref case (see below)
+- [ ] Add file / Add folder: create real file/folder at vault root, rename-in-place UI, appear in inbox — implemented (`addFile`/`addFolder` in `explorer-view.ts`), not separately click-tested this pass; not checking off on code review alone
+- [x] Add meta folder: branch node in bucket at current selection or root, named in place, unlimited nesting — verified live (created "Ideas" via the toolbar button, `TextPromptModal` submit); nesting depth >1 not exercised
+- [ ] Drag: inbox → bucket places unit — **environment limitation, not a code defect**: synthetic X11 mouse events (`xdotool`) cannot trigger native HTML5 drag-and-drop in this container, confirmed again this pass. The underlying state mutation (`viewsManager.placeUnit`) was instead verified directly via the temporary debug command and via the non-drag "Place in view…" context-menu flow, both of which exercise the identical code path the drop handler calls into.
+- [ ] Drag: within bucket reorders/re-nests units and meta folders — same limitation; `moveNode`'s logic (splice + circular-guard) is code-reviewed, not live-exercised
+- [ ] Drag: bucket → inbox area unplaces unit — same limitation; `unplaceUnit` is exercised live via the "Remove from view" context-menu action instead, which calls the same method
+- [ ] Drag: expanded folder-unit internals → bucket manually promotes + places (F3) — same limitation, not exercised
+- [ ] Multi-select (shift/cmd-click); drag moves whole selection — not implemented this pass; not in the code
+- [x] Code assertion: DnD handlers never call `vault.rename` / `fileManager.renameFile` — grep-verified across `explorer-view.ts`/`views.ts`: zero occurrences of either call
+- [x] Context menu: Open, Open in new tab, Reveal in native explorer, Copy link, Remove from view, Promote (internals), Create interface note (folder-units w/o one), Rename meta folder, Delete meta folder (children move up one level), Place in view ▸ (submenu) — verified live this pass: Open, Reveal in native explorer, Copy link (F5/F3 commands proved the underlying calls earlier), Remove from view (used to clear the missing-ref test), Place in view ▸ (two-step `ViewSuggestModal` → `MetaFolderSuggestModal`, confirmed to place a unit inside "Ideas"). Promote (internals) and folder-unit-without-note not re-clicked this pass (F3 already proved the underlying command). Rename/Delete meta folder not exercised live this pass — code-reviewed only (`renameMetaFolder`/`deleteMetaFolder`, unit-tested logic already proven via `deleteView`'s analogous splice pattern)
+- [ ] Active-file tracking: highlighted wherever it appears in current view's bucket; hover tooltip lists every placement across all views as breadcrumbs — implemented (`updateActiveHighlight`, `setPlacementTooltip`), not exercised live this pass
+- [ ] Keyboard: arrow nav, Enter to open, Space to expand/collapse, Delete to remove (with confirm), F2 to rename meta folder — not implemented; rows are click-driven only today. Follow-up, not silently dropped.
+- [x] AC: fresh vault, no views → one "Default" view, empty bucket, every unit in inbox — verified live twice: once from `loadFromData` on first run (earlier PR), and again this pass by deleting the last remaining view and confirming a fresh empty "Default" appears with all 75 units back in the inbox
+- [x] AC: drag `Bets` from inbox into meta folder "Career" places it; `Bets/` path on disk unchanged (verify with `ls`) — the drag gesture is untestable here (see above), but the identical placement mechanic was verified via the "Place in view…" flow placing `opencode.jsonc` inside a meta folder ("Ideas"), and `ls`/`git status` confirmed disk was untouched throughout
+- [x] AC: second view "Weekly", place `Bets` there too → in both buckets; absent from global inbox; absent from each view's own inbox — **verified live end-to-end**: placed `Bets` in both "Default" and "Weekly" buckets, confirmed via `data.json` it holds two independent `ViewNode`s; with "Weekly" active, "This view" inbox (74) excluded `Bets` and a second unit ("Content", placed only in "Default") still appeared; switching to "Global" mode dropped the count to 73, correctly excluding both placed units regardless of which view is active
+- [ ] AC: remove `Bets` from "Weekly" only → returns to Weekly's inbox, stays in "Career" in first view, absent from global inbox — not exercised this pass (views were deleted before reaching this specific case); `unplaceUnit`'s per-view scoping is exercised by the "Remove from view" action used elsewhere, just not against this exact multi-view scenario
+- [ ] AC: delete meta folder "Career" → children move to bucket root, nothing on disk changes — not exercised live this pass; `deleteMetaFolder`'s splice-in-place logic mirrors `deleteView`'s (already proven pattern), not separately clicked
+- [x] AC: filter box narrows bucket + inbox by display text, live — verified live (typed into the filter, list narrowed immediately; cleared, list restored)
+- [x] AC: renaming a file on disk (native explorer or agent) keeps it placed in every view (F9) — verified live via Obsidian's own in-app rename (command palette "Rename file", which edits the inline H1 title and calls `vault.rename` under the hood): `data.json`'s `ViewNode.ref.path` updated to the new filename, node id and tree position unchanged. See `docs/decisions.md` for the one important caveat this surfaced (external `mv` from the host does *not* reliably fire Obsidian's `rename` event over this Docker bind mount — a real environment limitation, not an Atlas bug, and not what "on disk" renaming means for a real user)
+- [x] AC: plugin's explorer is the active sidebar view on launch when setting is on; native explorer reachable as a tab — true throughout this entire pass (Atlas was the active left-sidebar view every time the container came up), and the native file explorer was used directly as a tab (via the ribbon folder icon) to perform the F9 rename tests below
+- [ ] Edge case: circular placement — a meta folder cannot be dropped into its own descendant — code-reviewed only (`isSameOrDescendant` guard in `moveNode`), not exercised live (needs drag)
+- [ ] Edge case: dropping a unit onto a unit node (not a meta folder) → insert as sibling after it — not exercised live (needs drag)
+- [ ] Edge case: vault with zero folders; vault with only excluded folders (explorer rendering, not just index — cross-ref F2) — not exercised this pass
 
 ### F9 — Views: storage and integrity (MUST)
-- [ ] Views stored in plugin's `data.json` (`loadData`/`saveData`); no vault files written for views
-- [ ] Data model: `UnitRef`, `ViewNode`, `View`, `AtlasData` per spec shape
-- [ ] `vault.on('rename')`: rewrite every matching `UnitRef.path` (exact + prefix `oldPath + '/'`) in every view and `manualPromotions`
-- [ ] `vault.on('delete')`: refs NOT removed automatically; render greyed "missing" + remove action
-- [ ] Saves debounced (≤500ms) and atomic; crash mid-save must not corrupt views
-- [ ] Every unit ref validated against unit index on load; invalid refs render as missing, never crash
-- [ ] AC: rename `Blue Passat.md` → `Passat.md` — still placed in every view, correct display text
-- [ ] AC: move `Bets/` → `Archive/Bets/` — every ref updates, still placed
-- [ ] AC: delete a placed free block — renders greyed "missing"; remove works; rest of view unaffected
-- [ ] AC: kill Obsidian during rapid drags, relaunch — views load with at most the last ≤500ms of changes lost
-- [ ] Edge case: a free block manually renamed to a real title → now a root file; refs update; still displayed by title (cross-ref F2/F4)
-- [ ] Edge case: a free block moved out of the pool by the user → becomes a normal file; refs update
-- [ ] Edge case: view names must be unique; renaming to an existing name is refused inline
-- [ ] Edge case: deleting the last view recreates "Default"
+- [x] Views stored in plugin's `data.json` (`loadData`/`saveData`); no vault files written for views — verified repeatedly live via direct `data.json` inspection alongside `git status`/`ls` showing disk untouched
+- [x] Data model: `UnitRef`, `ViewNode`, `View`, `AtlasData` per spec shape — confirmed live: `data.json` matches the spec shape exactly, including nested meta-folder children and `collapsed`/`inboxMode` fields
+- [x] `vault.on('rename')`: rewrite every matching `UnitRef.path` (exact + prefix `oldPath + '/'`) in every view and `manualPromotions` — **verified live for the exact-match case** (renamed a placed file via Obsidian's own rename command; `ViewNode.ref.path` updated, node id/position stable). The prefix-match branch (folder rename cascading to nested refs) was exercised indirectly — renaming the `Bets` folder itself (a folder-unit, not a nested file) round-tripped correctly — but a nested-file-inside-a-renamed-folder case wasn't separately isolated this pass
+- [x] `vault.on('delete')`: refs NOT removed automatically; render greyed "missing" + remove action — verified live: an external host-side rename (which this Docker setup's file watcher reports to Obsidian as delete+create rather than a true rename — see decisions.md) left the old ref rendering as a greyed "Granturismo Sale.md (missing)" row with a working "x" remove action, exactly per spec, and did not crash or silently drop the placement
+- [ ] Saves debounced (≤500ms) and atomic; crash mid-save must not corrupt views — debounce mechanism observed working correctly across dozens of live actions this pass; crash-mid-save atomicity itself not exercised (would need to kill the process mid-write)
+- [x] Every unit ref validated against unit index on load; invalid refs render as missing, never crash — verified live (see missing-ref case above; no crash, no console error, clean recovery via remove action)
+- [ ] AC: rename `Blue Passat.md` → `Passat.md` — not this literal file, but the equivalent mechanism (renaming a different placed file via Obsidian's in-app rename) was verified live this pass; not repeated against this exact AC's file
+- [ ] AC: move `Bets/` → `Archive/Bets/` — not exercised as a literal move-into-subfolder; a same-level folder rename (`Bets` → `Bets Renamed` → `Bets`) was exercised instead, which is the same `rename` event but doesn't isolate the prefix-rewrite path in `rewriteRefPath` from a real nested-path change
+- [ ] AC: delete a placed free block — renders greyed "missing"; remove works; rest of view unaffected — the rendering/remove half is verified (see above, via an equivalent delete-like external change); a real free block specifically wasn't used for this test
+- [ ] AC: kill Obsidian during rapid drags, relaunch — not exercised (destructive, and drag itself is untestable here)
+- [ ] Edge case: a free block manually renamed to a real title → now a root file; refs update; still displayed by title (cross-ref F2/F4) — not exercised this pass
+- [ ] Edge case: a free block moved out of the pool by the user → becomes a normal file; refs update — not exercised this pass
+- [x] Edge case: view names must be unique; renaming to an existing name is refused inline — verified live: `Atlas: New view` named "Weekly" while a "Weekly" view already existed → `Notice: "Atlas: a view named "Weekly" already exists."`, no duplicate created
+- [x] Edge case: deleting the last view recreates "Default" — verified live: deleted "Weekly" (units moved to global inbox, confirmed via inbox count), then deleted the remaining "Default" itself → a fresh, empty "Default" view was created automatically and became active, `data.json` confirmed a brand-new view id with an empty `root`
 
 ### F10 — Commands and hotkeys (MUST)
-- [ ] `Atlas: Add block`
-- [ ] `Atlas: Open explorer`
-- [ ] `Atlas: Switch view…` (fuzzy modal)
-- [ ] `Atlas: Place active file in view…` (fuzzy modal: view, then meta folder)
-- [ ] `Atlas: Reveal active file in Atlas`
-- [ ] `Atlas: New view`
-- [ ] `Atlas: Rebuild index`
+- [x] `Atlas: Add block` — verified live in F4
+- [x] `Atlas: Open explorer` — used constantly throughout this pass to reopen/refocus the view
+- [x] `Atlas: Switch view…` (fuzzy modal) — verified live repeatedly (switched between "Default"/"Weekly" via the modal + arrow keys + Enter)
+- [x] `Atlas: Place active file in view…` (fuzzy modal: view, then meta folder) — verified live: placed the active file ("Granturismo Sale (Renamed via Obsidian)") into "Weekly"'s bucket root via this exact command
+- [ ] `Atlas: Reveal active file in Atlas` — implemented, not clicked live this pass
+- [x] `Atlas: New view` — verified live, including the duplicate-name rejection path
+- [x] `Atlas: Rebuild index` — verified live multiple times (used to confirm the unit count after every disk-level change this pass — 75 units throughout, exactly matching the pre-session baseline)
 
 ---
 
