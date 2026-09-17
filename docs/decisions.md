@@ -2,13 +2,17 @@
 
 Judgement calls made during the build, the alternative considered, and why. Newest first.
 
-## F6: deterministic kind-tier sort for suggestions (post-PR-4 review, A4)
+## F6: self-calibrating suggestion sort (post-PR-4 review A4, refined post-PR-5 review A5)
 
-**Decision:** `getSuggestions` now sorts by a kind tier first (`folder-unit`/`free-block`/`promoted-block` all rank above plain `file` matches, unconditionally) and only falls back to fuzzy-match score to break ties within a tier.
+**Decision (final form):** a unit (`folder-unit`/`free-block`/`promoted-block`) only sorts above plain `file` matches when its own fuzzy-match score is at least as good as the best `file`-kind score in that same result set. Otherwise it's sorted by score alongside files, same as before. No fixed tier, no magic-number margin — the threshold is the query's own best file match, recomputed per query.
 
-**Why:** the reviewer caught that the "`[[bets` surfaces the `Bets` folder-unit" AC was checked off but not actually guaranteed by the code — pure fuzzy-score sort meant a real competing file (e.g. `Bets/notes-on-bets.md`) could out-rank the folder-unit, and the fixture just happened not to have one at the time. Two fixes were offered (a margin-based tiebreak, or an unconditional tier); took the unconditional tier since it makes the AC true by construction and matches F6's own stated purpose (surfacing units over raw files). Verified live by adding a real competing file to the fixture and confirming `Bets`/folder now sorts first.
+**How this evolved (two rounds, both driven by live evidence, not review-only back-and-forth):**
+1. **A4** caught that "`[[bets` surfaces the `Bets` folder-unit" was checked off but not actually guaranteed — pure fuzzy-score sort meant a real competing file (e.g. `Bets/notes-on-bets.md`) could out-rank the folder-unit. First fix: an unconditional kind tier (all units always outrank all files). Verified live, closed the gap.
+2. **A5** pushed back on that fix after seeing its own live evidence: the unconditional tier meant *any* unit, however weak its match, now outranked *every* file. Confirmed live: typing `bets` surfaced `Kubernetes` and `Objectives` — both incidental weak subsequence matches — above an exact-ish `bets` filename match. The reviewer judged this a bigger behavior change than the hand-off doc's two narrow examples called for, and asked for a margin/threshold instead, suggesting the self-calibrating form specifically to avoid picking an arbitrary constant.
 
-**Trade-off, noted rather than hidden:** because the tier is unconditional, a folder-unit with only a *weak* fuzzy match can now outrank a file with a much *stronger* match — confirmed live: typing `bets` surfaced `Kubernetes` and `Objectives` (both folder-units, both weak subsequence matches) above an exact-ish `bets` filename match. This is a real quality cost, not just a hypothetical. Accepted for now because the reviewer explicitly named "just always" as one of the two acceptable resolutions and the alternative (a score-margin threshold) introduces its own arbitrary tuning constant with no obviously-correct value. Worth revisiting if this surfaces as an actual complaint once there's a real explorer to observe suggestion quality in day-to-day use, rather than guessing at a margin now.
+**Why the self-calibrating form over a fixed margin:** a fixed threshold (e.g. "unit score must be within 10 points of the best file score") requires guessing a constant with no principled value, and would need re-tuning if Obsidian's fuzzy-search scoring ever changes. Comparing directly against the best file score in the same query's result set has no constant to pick and degrades sensibly (no files matched → every unit clears the bar trivially, since there's nothing to bury).
+
+**Verified live, both directions, with the same fixture file (`Bets/notes-on-bets.md`) that exposed the original gap:** `Bets`/folder still sorts first (its match against "bets" is competitive with the best file match) — the case A4 cared about. `Kubernetes`/`Objectives` no longer outrank the exact `bets`/`Bets` file matches — the case A5 cared about. Both confirmed in the same test run, not assumed from the code alone.
 
 ## F6: native `[[` suggester suppression — implemented per Q3/A3
 

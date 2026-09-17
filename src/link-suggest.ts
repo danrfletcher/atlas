@@ -22,10 +22,14 @@ type SuggestItem =
 	| { kind: "free-block"; file: TFile; text: string; match: SearchResult }
 	| { kind: "promoted-block"; file: TFile; subpath: string; text: string; match: SearchResult };
 
-/** Lower sorts first. Atlas units (folder-unit/free-block/promoted-block) all outrank plain
- * files deterministically — see the sort call in `getSuggestions` for why. */
-function kindPriority(kind: SuggestItem["kind"]): number {
-	return kind === "file" ? 1 : 0;
+/** Lower sorts first. A unit (folder-unit/free-block/promoted-block) only jumps the queue above
+ * plain files when its own match is *competitive* with the best file match in this result set —
+ * self-calibrating per query rather than a fixed score constant, so a unit that merely matched
+ * (e.g. "Kubernetes" weakly matching the query "bets") doesn't bury a strong file match, but a
+ * unit that's a genuinely good match (e.g. "Bets" matching "bets") still wins. See decisions.md. */
+function kindPriority(item: SuggestItem, bestFileScore: number): number {
+	if (item.kind === "file") return 1;
+	return item.match.score >= bestFileScore ? 0 : 1;
 }
 
 /**
@@ -96,11 +100,11 @@ export class AtlasLinkSuggest extends EditorSuggest<SuggestItem> {
 			}
 		}
 
-		// Atlas units outrank plain files deterministically, not by fuzzy-score luck — the whole
-		// point of F6 is surfacing units over raw files, and a competing internal file (e.g.
-		// `Bets/notes-on-bets.md`) could otherwise out-score the `Bets` folder-unit itself for a
-		// query like "bets". Sort by kind tier first, fuzzy score only breaks ties within a tier.
-		items.sort((a, b) => (kindPriority(a.kind) - kindPriority(b.kind)) || (b.match.score - a.match.score));
+		// A unit only jumps above files when it's a competitive match itself (see kindPriority) —
+		// otherwise a competing file (e.g. `Bets/notes-on-bets.md`) could out-score the `Bets`
+		// folder-unit for a query like "bets" and nothing would stop it ranking above the folder.
+		const bestFileScore = Math.max(-Infinity, ...items.filter((item) => item.kind === "file").map((item) => item.match.score));
+		items.sort((a, b) => kindPriority(a, bestFileScore) - kindPriority(b, bestFileScore) || b.match.score - a.match.score);
 		return items.slice(0, this.limit);
 	}
 
