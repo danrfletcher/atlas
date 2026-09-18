@@ -21,6 +21,35 @@
 	min-height: 0;
 }
 
+/* PR 11: while collapsed, the section should shrink to its header's natural height instead of
+ * continuing to claim all remaining vertical space as blank void — the flex-grow above is only
+ * correct while there's content filling it. */
+.atlas-section.atlas-inbox.is-collapsed {
+	flex: 0 0 auto;
+}
+
+/* PR 11: the inbox's own fold wrapper needs to participate in the same "fill remaining space" flex
+ * chain `.atlas-inbox-viewport` already relies on (PR 9 issue 3) — the generic `.atlas-meta-children`
+ * rule below is shared with the bucket section and meta-folders, none of which need to fill
+ * anything, so these overrides are scoped to the inbox specifically. */
+.atlas-section.atlas-inbox > .atlas-meta-children {
+	flex: 1 1 auto;
+	min-height: 0;
+}
+
+.atlas-section.atlas-inbox > .atlas-meta-children > .atlas-meta-children-inner {
+	display: flex;
+	flex-direction: column;
+	height: 100%;
+}
+
+.atlas-section.atlas-inbox .atlas-node-list {
+	display: flex;
+	flex-direction: column;
+	flex: 1 1 auto;
+	min-height: 0;
+}
+
 .atlas-toolbar {
 	display: flex;
 	align-items: center;
