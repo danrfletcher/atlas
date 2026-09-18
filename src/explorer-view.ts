@@ -16,6 +16,15 @@ const INBOX_ROW_HEIGHT = 28;
 /** Extra rows rendered above/below the visible window, so a fast scroll doesn't show blank gaps
  * before the next frame's window recomputes. */
 const INBOX_OVERSCAN = 8;
+/** A bucket unit row has no `.atlas-chevron` before its icon (only meta rows do); this offset
+ * stands in for one so unit-row icons line up with meta-row icons at the same depth. Must match
+ * `.atlas-chevron`'s width (14px) + `.atlas-row`'s gap (6px) exactly, or the icons drift apart —
+ * this was previously 16, 4px short of the real 20, which is exactly the misalignment reported. */
+const UNIT_ROW_CHEVRON_OFFSET = 20;
+/** Must match `.atlas-meta-children`'s `transition-duration` in styles.css — the state-persisting
+ * `setNodeCollapsed` call (which triggers a full re-render) is delayed by this long so the CSS
+ * collapse/expand transition finishes playing before the DOM gets rebuilt out from under it. */
+const META_COLLAPSE_TRANSITION_MS = 160;
 
 type DragPayload =
 	| { kind: "node"; nodeId: string; viewId: string }
@@ -252,12 +261,13 @@ export class AtlasExplorerView extends ItemView {
 		await this.plugin.app.vault.createFolder(await this.uniquePath("New folder", null));
 	}
 
-	private async uniquePath(base: string, ext: string | null): Promise<string> {
+	private async uniquePath(base: string, ext: string | null, folder = ""): Promise<string> {
 		const suffix = ext ? `.${ext}` : "";
-		let candidate = `${base}${suffix}`;
+		const prefix = folder ? `${folder}/` : "";
+		let candidate = `${prefix}${base}${suffix}`;
 		let i = 1;
 		while (this.plugin.app.vault.getAbstractFileByPath(candidate)) {
-			candidate = `${base} ${++i}${suffix}`;
+			candidate = `${prefix}${base} ${++i}${suffix}`;
 		}
 		return candidate;
 	}
@@ -282,8 +292,14 @@ export class AtlasExplorerView extends ItemView {
 
 		if (this.bucketCollapsed) return;
 
+		// The whole section (not just the list of existing rows) is the bucket-root drop target —
+		// registering it on `listEl` alone left almost no reliable empty area to hit once a few
+		// rows existed (the div's own height hugs its content in normal block flow, so dropping
+		// just below the last row landed on `container`, which had no drop handler at all). Any
+		// specific row still wins first via its own drop handler's `stopPropagation`.
+		this.makeDropZone(container, { kind: "bucket-root", viewId: view.id });
+
 		const listEl = container.createDiv({ cls: "atlas-node-list" });
-		this.makeDropZone(listEl, { kind: "bucket-root", viewId: view.id });
 		await this.renderNodeList(view.root, listEl, view, 0);
 	}
 
@@ -305,10 +321,6 @@ export class AtlasExplorerView extends ItemView {
 			row.setAttr("draggable", "true");
 			const chevron = row.createDiv({ cls: "atlas-chevron" });
 			setIcon(chevron, node.collapsed ? "chevron-right" : "chevron-down");
-			chevron.addEventListener("click", (evt) => {
-				evt.stopPropagation();
-				this.plugin.viewsManager.setNodeCollapsed(view.id, node.id, !node.collapsed);
-			});
 			const iconEl = row.createDiv({ cls: "atlas-icon" });
 			setIcon(iconEl, "layers");
 			row.createSpan({ cls: "atlas-row-text", text: node.label ?? "" });
@@ -322,9 +334,25 @@ export class AtlasExplorerView extends ItemView {
 				this.showMetaFolderMenu(evt, node, view);
 			});
 
-			if (!node.collapsed) {
-				await this.renderNodeList(node.children, container, view, depth + 1);
-			}
+			// Children always render (regardless of collapsed state) inside a dedicated wrapper, so
+			// collapsing/expanding can be a CSS transition on that wrapper (grid-template-rows 1fr↔0fr,
+			// the standard height:auto-safe collapse technique) instead of the row disappearing from
+			// the DOM outright. The state-persisting call (which triggers a full re-render via
+			// `onChange`) is deliberately delayed to let the transition actually play first — firing
+			// it immediately would rebuild the DOM from scratch on the next tick and cut the animation
+			// short with a hard snap instead of a slide.
+			const childrenWrap = container.createDiv({ cls: "atlas-meta-children" });
+			childrenWrap.toggleClass("is-collapsed", !!node.collapsed);
+			const childrenInner = childrenWrap.createDiv({ cls: "atlas-meta-children-inner" });
+			await this.renderNodeList(node.children, childrenInner, view, depth + 1);
+
+			chevron.addEventListener("click", (evt) => {
+				evt.stopPropagation();
+				const collapsing = !node.collapsed;
+				setIcon(chevron, collapsing ? "chevron-right" : "chevron-down");
+				childrenWrap.toggleClass("is-collapsed", collapsing);
+				window.setTimeout(() => this.plugin.viewsManager.setNodeCollapsed(view.id, node.id, collapsing), META_COLLAPSE_TRANSITION_MS);
+			});
 			return;
 		}
 
@@ -336,7 +364,7 @@ export class AtlasExplorerView extends ItemView {
 		const row = container.createDiv({ cls: "atlas-row atlas-row-unit" });
 		if (info.missing) row.addClass("atlas-missing");
 		row.dataset.refKey = unitRefKey(ref);
-		row.style.paddingLeft = `${depth * 16 + 16}px`;
+		row.style.paddingLeft = `${depth * 16 + UNIT_ROW_CHEVRON_OFFSET}px`;
 		row.setAttr("draggable", "true");
 
 		const iconEl = row.createDiv({ cls: "atlas-icon" });
@@ -556,8 +584,9 @@ export class AtlasExplorerView extends ItemView {
 		});
 	}
 
-	/** Never calls `vault.rename`/`fileManager.renameFile` — every branch here only touches
-	 * plugin-owned view/promotion data (Part 7). */
+	/** The only branch that ever calls `fileManager.renameFile` in the whole explorer — dropping a
+	 * file/block directly onto a folder-unit (see `handleAddToModule`), a deliberate, confirmable
+	 * exception to Part 7's "never touches disk" rule for everything else here. */
 	private handleDrop(target: { kind: "node"; nodeId: string; viewId: string } | { kind: "bucket-root"; viewId: string } | { kind: "inbox-area"; viewId: string }): void {
 		const payload = this.dragPayload;
 		this.dragPayload = null;
@@ -569,6 +598,22 @@ export class AtlasExplorerView extends ItemView {
 		}
 
 		const viewId = target.viewId;
+		if (target.kind === "node" && payload.kind !== "internal") {
+			const view = this.plugin.viewsManager.getView(viewId);
+			const found = view && this.findNodeAnywhere(view.root, target.nodeId);
+			if (found?.node.type === "unit" && found.node.ref?.kind === "folder") {
+				const ref = payload.kind === "inbox" ? payload.ref : this.refOfNode(payload);
+				// Only a file/block being dropped onto a folder-unit is "add to module" — dropping
+				// one folder-unit onto another would mean moving a whole folder's worth of content
+				// and internals wholesale, out of scope for what was asked; falls through to the
+				// ordinary sibling-insert behavior below instead.
+				if (ref && ref.kind !== "folder") {
+					void this.handleAddToModule(ref, found.node.ref.path, payload.kind === "node" ? { viewId: payload.viewId } : null);
+					return;
+				}
+			}
+		}
+
 		let parentId: string | null = null;
 		let index = 0;
 		if (target.kind === "node") {
@@ -597,6 +642,50 @@ export class AtlasExplorerView extends ItemView {
 		this.plugin.viewsManager.placeUnit(viewId, ref, parentId);
 		if (payload.kind === "node" && parentId !== undefined) {
 			this.plugin.viewsManager.moveNode(viewId, this.nodeIdForRef(viewId, ref) ?? "", parentId, index);
+		}
+	}
+
+	/** Files/blocks are opaque internals to a folder-unit until something links to them — dropping
+	 * one directly onto the module is the one deliberate way this explorer lets you physically file
+	 * something into it, since Atlas otherwise never rearranges a module's internal organization.
+	 * Gated by a confirm dialog (toggleable in settings) precisely because it's the one exception.
+	 * Whether the moved file stays visible as its own addressable unit afterward is decided entirely
+	 * by the existing link-graph promotion recompute (does it have a real backlink from outside the
+	 * module?) — this never force-promotes it; a file with no backlinks simply becomes ordinary,
+	 * invisible internals, matching the rest of the model. */
+	private async handleAddToModule(ref: UnitRef, folderPath: string, priorPlacement: { viewId: string } | null): Promise<void> {
+		const file = this.plugin.app.vault.getAbstractFileByPath(ref.path);
+		const folder = this.plugin.app.vault.getAbstractFileByPath(folderPath);
+		if (!(file instanceof TFile) || !(folder instanceof TFolder)) return;
+
+		const perform = async (): Promise<void> => {
+			const dotIndex = file.name.lastIndexOf(".");
+			const base = dotIndex > 0 ? file.name.slice(0, dotIndex) : file.name;
+			const ext = dotIndex > 0 ? file.name.slice(dotIndex + 1) : null;
+			const newPath = await this.uniquePath(base, ext, folderPath);
+			await this.plugin.app.fileManager.renameFile(file, newPath);
+
+			const newRef: UnitRef = ref.kind === "block" ? { kind: "block", path: newPath, subpath: ref.subpath } : { kind: "file", path: newPath };
+			// Promotion status only settles once Obsidian's own link graph re-resolves after the
+			// move (rewritten backlink text elsewhere needs a metadataCache pass) — wait for exactly
+			// that event once, then clean up a now-stale placement rather than leave a "missing" ghost
+			// if it turned out to have no real backlinks and isn't a unit anymore.
+			const offRef = this.plugin.app.metadataCache.on("resolved", () => {
+				this.plugin.app.metadataCache.offref(offRef);
+				const stillAUnit = this.plugin.unitIndex.getUnits().some((u) => unitRefKey(unitToRef(u)) === unitRefKey(newRef));
+				if (!stillAUnit && priorPlacement) this.plugin.viewsManager.unplaceUnit(priorPlacement.viewId, newRef);
+			});
+		};
+
+		if (this.plugin.settings.confirmAddToModule) {
+			new ConfirmModal(
+				this.plugin.app,
+				`Add "${file.basename}" to "${folder.name}"? This moves the file on disk into that folder — Atlas doesn't otherwise touch a module's internal organization.`,
+				"Add",
+				() => void perform()
+			).open();
+		} else {
+			await perform();
 		}
 	}
 

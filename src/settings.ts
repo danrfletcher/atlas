@@ -8,6 +8,10 @@ export interface AtlasSettings {
 	replaceNativeExplorerOnStartup: boolean;
 	blockDisplayLength: number;
 	defaultViewId: string;
+	/** F8 follow-up (Dan's live drag-and-drop testing feedback): folders/modules are first-class
+	 * citizens whose internal organization Atlas doesn't otherwise touch, so filing a file/block
+	 * into one via drag is a deliberate exception — gated by a confirm dialog when this is on. */
+	confirmAddToModule: boolean;
 }
 
 export const DEFAULT_TO_DELETE_FOLDER = "_to_delete";
@@ -20,6 +24,7 @@ export const DEFAULT_SETTINGS: AtlasSettings = {
 	replaceNativeExplorerOnStartup: true,
 	blockDisplayLength: 80,
 	defaultViewId: "default",
+	confirmAddToModule: true,
 };
 
 /** Dot-folders + the pool folder + `_to_delete`, computed once against the live vault root. */
@@ -107,6 +112,18 @@ export class AtlasSettingTab extends PluginSettingTab {
 						this.plugin.settings.blockDisplayLength = parsed;
 						await this.plugin.saveSettings();
 					}
+				})
+			);
+
+		new Setting(containerEl)
+			.setName("Confirm before adding a unit to a module")
+			.setDesc(
+				"Dragging a file or block onto a folder-unit (module) files it into that folder on disk — a deliberate exception to Atlas never otherwise touching folder internals. When on, asks first. When off, it happens immediately."
+			)
+			.addToggle((toggle) =>
+				toggle.setValue(this.plugin.settings.confirmAddToModule).onChange(async (value) => {
+					this.plugin.settings.confirmAddToModule = value;
+					await this.plugin.saveSettings();
 				})
 			);
 
