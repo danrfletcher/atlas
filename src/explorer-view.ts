@@ -443,9 +443,19 @@ export class AtlasExplorerView extends ItemView {
 		// `.atlas-filter-wrap` never had a persisting element to animate from/to. `filterWrap` is
 		// declared further down (still fine — this closure only reads it at click time, long after
 		// the `const` has run), and the actual state change + re-render is delayed the same way.
+		//
+		// Review follow-up (A14): the first version of this fix read `!this.filterRevealed` directly
+		// inside the click handler — but that field only actually updates once the delayed block
+		// below runs, so a second click inside the 160ms window read the same stale value as the
+		// first and re-applied the same direction instead of toggling back. Exactly the race
+		// A11/A12 already fixed once for the meta-folder chevron; `localRevealed` here is that same
+		// fix — seeded once, flipped from its own prior value on every click, never re-read from
+		// `this.filterRevealed` until the eventual `render()` replaces this whole closure anyway.
+		let localRevealed = this.filterRevealed;
 		let filterRevealTimer: number | undefined;
 		this.toolbarButton(toolbar, "search", "Filter", () => {
-			const nowRevealed = !this.filterRevealed;
+			localRevealed = !localRevealed;
+			const nowRevealed = localRevealed;
 			filterWrap.toggleClass("is-revealed", nowRevealed);
 			if (filterRevealTimer !== undefined) window.clearTimeout(filterRevealTimer);
 			filterRevealTimer = window.setTimeout(() => {
