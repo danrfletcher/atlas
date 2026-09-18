@@ -86,6 +86,13 @@ export interface ModuleContentsModalCallbacks {
 	 * drop target for the drag still in progress, and dropping skips the usual confirm dialog. */
 	dropTarget?: { onDrop: (targetFolderPath: string) => void };
 	onCloseCallback?: () => void;
+	/** PR 10: whether a subfolder (by vault path) should render expanded — backed by
+	 * `AtlasPlugin.isModuleFolderExpanded`, persisted across modal close/reopen and Obsidian
+	 * restarts. Defaults to collapsed for any path never toggled before. */
+	isFolderExpanded: (path: string) => boolean;
+	/** PR 10: called when the user clicks a subfolder's chevron, so the explorer view can persist
+	 * the new state via `AtlasPlugin.setModuleFolderExpanded`. */
+	onToggleFolder: (path: string, expanded: boolean) => void;
 }
 
 export class ModuleContentsModal extends Modal {
@@ -109,6 +116,7 @@ export class ModuleContentsModal extends Modal {
 		}
 
 		this.renderTree(this.folder, treeEl, 0);
+		if (this.filterText) this.setFilterText(this.filterText);
 	}
 
 	onClose(): void {
@@ -126,10 +134,22 @@ export class ModuleContentsModal extends Modal {
 		}
 	}
 
+	/** PR 10: a folder child gets its own chevron and a dedicated children-wrapper (the same
+	 * `.atlas-meta-children`/`-inner` grid-collapse technique used everywhere else in the plugin),
+	 * so fold/unfold animates and each subfolder's state is independent. Toggling here has no
+	 * re-render side effect to worry about (unlike the main tree's meta-folder collapse, whose
+	 * persist call triggers a full external re-render) — it's just a class toggle plus a debounced
+	 * write, so no delayed-persist trick is needed. */
 	private renderTree(folder: TFolder, container: HTMLElement, depth: number): void {
 		for (const child of folder.children) {
 			const row = container.createDiv({ cls: "atlas-row atlas-row-internal" });
 			row.style.paddingLeft = `${depth * 16 + 16}px`;
+			// Always reserve the chevron's slot, even for a file (which never gets one) — otherwise
+			// a file's icon sits flush against the row's edge while a folder's icon is pushed right
+			// by its chevron, so icons at the same depth don't line up (found in Dan's own testing
+			// of this PR). An empty same-width spacer keeps every icon at a depth aligned regardless
+			// of which rows happen to be folders.
+			const chevron = row.createDiv({ cls: "atlas-chevron" });
 			const iconEl = row.createDiv({ cls: "atlas-icon" });
 			setIcon(iconEl, child instanceof TFolder ? "folder" : "file");
 			row.createSpan({ cls: "atlas-row-text", text: child.name });
@@ -164,9 +184,24 @@ export class ModuleContentsModal extends Modal {
 				menu.showAtMouseEvent(evt);
 			});
 
-			if (child instanceof TFolder) this.renderTree(child, container, depth + 1);
+			if (child instanceof TFolder) {
+				let expanded = this.callbacks.isFolderExpanded(child.path);
+				setIcon(chevron, expanded ? "chevron-down" : "chevron-right");
+
+				const childrenWrap = container.createDiv({ cls: "atlas-meta-children" });
+				childrenWrap.toggleClass("is-collapsed", !expanded);
+				const childrenInner = childrenWrap.createDiv({ cls: "atlas-meta-children-inner" });
+				this.renderTree(child, childrenInner, depth + 1);
+
+				chevron.addEventListener("click", (evt) => {
+					evt.stopPropagation();
+					expanded = !expanded;
+					setIcon(chevron, expanded ? "chevron-down" : "chevron-right");
+					childrenWrap.toggleClass("is-collapsed", !expanded);
+					this.callbacks.onToggleFolder(child.path, expanded);
+				});
+			}
 		}
-		if (this.filterText) this.setFilterText(this.filterText);
 	}
 
 	private wireDropZone(row: HTMLElement, folderPath: string): void {
@@ -211,6 +246,13 @@ export class AtlasExplorerView extends ItemView {
 	 * that was active at the moment it was opened. */
 	private openModuleModal: ModuleContentsModal | null = null;
 	private dragPayload: DragPayload | null = null;
+	/** Review follow-up (retroactive PR 9 finding): cancels whichever module row's dwell timer is
+	 * currently pending, if any — invoked from the window-level `dragend` backstop below. At most
+	 * one dwell timer is ever pending at a time in practice (only one row can be mid-hover during a
+	 * single drag), so a single reference is enough; each `wireModuleRow` call points this at its
+	 * own `cancelDwell` while its timer is live and clears it again once the timer fires or cancels
+	 * normally via `dragleave`/`drop`. */
+	private cancelActiveDwell: (() => void) | null = null;
 	private unsubscribers: (() => void)[] = [];
 	private renderQueued = false;
 	/** F11: rebuilt once per render from the flat unit list, so resolving a ref is O(1) instead of
@@ -241,6 +283,18 @@ export class AtlasExplorerView extends ItemView {
 		this.unsubscribers.push(this.plugin.viewsManager.onChange(() => this.queueRender()));
 		this.registerEvent(this.plugin.app.workspace.on("active-leaf-change", () => this.updateActiveHighlight()));
 		this.registerEvent(this.plugin.app.workspace.on("file-open", () => this.updateActiveHighlight()));
+		// Review follow-up (retroactive PR 9 finding): `dragPayload` was only ever cleared by a
+		// specific row's own `drop` handler or a Module Contents modal closing — never by a drag
+		// ending abnormally (dropped outside the window, over an uninstrumented area, cancelled via
+		// Escape). A stale `dragPayload` was harmless before PR 9 (nothing read it outside an active
+		// drop), but PR 9's dwell timer treats its mere presence as proof a drag is live, so a later,
+		// unrelated drag hovering a module row within the dwell window could pop the Contents modal
+		// using stale drag data. This window-level backstop clears it (and cancels any pending dwell
+		// timer) whenever a drag ends, regardless of how.
+		this.registerDomEvent(window, "dragend", () => {
+			this.dragPayload = null;
+			this.cancelActiveDwell?.();
+		});
 		await this.render();
 	}
 
@@ -1068,11 +1122,14 @@ export class AtlasExplorerView extends ItemView {
 			if (dwellTimer === undefined) return;
 			window.clearTimeout(dwellTimer);
 			dwellTimer = undefined;
+			if (this.cancelActiveDwell === cancelDwell) this.cancelActiveDwell = null;
 		};
 		const startDwell = () => {
 			if (!this.dragPayload || dwellTimer !== undefined) return;
+			this.cancelActiveDwell = cancelDwell;
 			dwellTimer = window.setTimeout(() => {
 				dwellTimer = undefined;
+				this.cancelActiveDwell = null;
 				this.openModuleContentsModalForDrag(folderPath);
 			}, MODULE_HOVER_DWELL_MS);
 		};
@@ -1093,6 +1150,8 @@ export class AtlasExplorerView extends ItemView {
 			onOpenFile: (file) => void this.openRef({ kind: "file", path: file.path }),
 			onRevealInNative: (path) => this.revealInNativeExplorer(path),
 			onPromoteAndPlace: (path, isFolder) => this.promoteAndPlaceFlow(path, isFolder),
+			isFolderExpanded: (path) => this.plugin.isModuleFolderExpanded(path),
+			onToggleFolder: (path, expanded) => this.plugin.setModuleFolderExpanded(path, expanded),
 			onCloseCallback: () => {
 				if (this.openModuleModal === modal) this.openModuleModal = null;
 			},
@@ -1114,6 +1173,8 @@ export class AtlasExplorerView extends ItemView {
 			onOpenFile: (file) => void this.openRef({ kind: "file", path: file.path }),
 			onRevealInNative: (path) => this.revealInNativeExplorer(path),
 			onPromoteAndPlace: (path, isFolder) => this.promoteAndPlaceFlow(path, isFolder),
+			isFolderExpanded: (path) => this.plugin.isModuleFolderExpanded(path),
+			onToggleFolder: (path, expanded) => this.plugin.setModuleFolderExpanded(path, expanded),
 			dropTarget: { onDrop: (targetFolderPath) => void this.handleAddToModule(ref, targetFolderPath, true) },
 			onCloseCallback: () => {
 				if (this.openModuleModal === modal) this.openModuleModal = null;
