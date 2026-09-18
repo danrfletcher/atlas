@@ -241,6 +241,13 @@ export class AtlasExplorerView extends ItemView {
 	 * that was active at the moment it was opened. */
 	private openModuleModal: ModuleContentsModal | null = null;
 	private dragPayload: DragPayload | null = null;
+	/** Review follow-up (retroactive PR 9 finding): cancels whichever module row's dwell timer is
+	 * currently pending, if any — invoked from the window-level `dragend` backstop below. At most
+	 * one dwell timer is ever pending at a time in practice (only one row can be mid-hover during a
+	 * single drag), so a single reference is enough; each `wireModuleRow` call points this at its
+	 * own `cancelDwell` while its timer is live and clears it again once the timer fires or cancels
+	 * normally via `dragleave`/`drop`. */
+	private cancelActiveDwell: (() => void) | null = null;
 	private unsubscribers: (() => void)[] = [];
 	private renderQueued = false;
 	/** F11: rebuilt once per render from the flat unit list, so resolving a ref is O(1) instead of
@@ -271,6 +278,18 @@ export class AtlasExplorerView extends ItemView {
 		this.unsubscribers.push(this.plugin.viewsManager.onChange(() => this.queueRender()));
 		this.registerEvent(this.plugin.app.workspace.on("active-leaf-change", () => this.updateActiveHighlight()));
 		this.registerEvent(this.plugin.app.workspace.on("file-open", () => this.updateActiveHighlight()));
+		// Review follow-up (retroactive PR 9 finding): `dragPayload` was only ever cleared by a
+		// specific row's own `drop` handler or a Module Contents modal closing — never by a drag
+		// ending abnormally (dropped outside the window, over an uninstrumented area, cancelled via
+		// Escape). A stale `dragPayload` was harmless before PR 9 (nothing read it outside an active
+		// drop), but PR 9's dwell timer treats its mere presence as proof a drag is live, so a later,
+		// unrelated drag hovering a module row within the dwell window could pop the Contents modal
+		// using stale drag data. This window-level backstop clears it (and cancels any pending dwell
+		// timer) whenever a drag ends, regardless of how.
+		this.registerDomEvent(window, "dragend", () => {
+			this.dragPayload = null;
+			this.cancelActiveDwell?.();
+		});
 		await this.render();
 	}
 
@@ -1098,11 +1117,14 @@ export class AtlasExplorerView extends ItemView {
 			if (dwellTimer === undefined) return;
 			window.clearTimeout(dwellTimer);
 			dwellTimer = undefined;
+			if (this.cancelActiveDwell === cancelDwell) this.cancelActiveDwell = null;
 		};
 		const startDwell = () => {
 			if (!this.dragPayload || dwellTimer !== undefined) return;
+			this.cancelActiveDwell = cancelDwell;
 			dwellTimer = window.setTimeout(() => {
 				dwellTimer = undefined;
+				this.cancelActiveDwell = null;
 				this.openModuleContentsModalForDrag(folderPath);
 			}, MODULE_HOVER_DWELL_MS);
 		};

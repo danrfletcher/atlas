@@ -76,6 +76,7 @@ export default class AtlasPlugin extends Plugin {
 			this.app.vault.on("rename", (file, oldPath) => {
 				const promotionsChanged = this.unitIndex.onVaultRename(file, oldPath);
 				this.viewsManager.onVaultRename(oldPath, file.path); // saves itself if anything changed
+				if (this.onModuleFolderRename(oldPath, file.path)) this.persistDebounced();
 				if (promotionsChanged) this.persistDebounced();
 			})
 		);
@@ -135,6 +136,26 @@ export default class AtlasPlugin extends Plugin {
 		if (expanded) this.expandedModuleFolders.add(path);
 		else this.expandedModuleFolders.delete(path);
 		this.persistDebounced();
+	}
+
+	/** PR 10 review follow-up: rewrites (exact match or `oldPath/...` prefix, same rule
+	 * `rewriteRefPath` applies to `UnitRef`s elsewhere) any tracked fold-state path affected by a
+	 * vault rename, so a renamed subfolder keeps its remembered state instead of silently losing it
+	 * at the new path while the old path leaks forever in `data.json`. Returns whether anything
+	 * changed, so the caller only persists when needed. */
+	private onModuleFolderRename(oldPath: string, newPath: string): boolean {
+		let changed = false;
+		for (const path of Array.from(this.expandedModuleFolders)) {
+			let rewritten: string | null = null;
+			if (path === oldPath) rewritten = newPath;
+			else if (path.startsWith(`${oldPath}/`)) rewritten = `${newPath}${path.slice(oldPath.length)}`;
+			if (rewritten !== null) {
+				this.expandedModuleFolders.delete(path);
+				this.expandedModuleFolders.add(rewritten);
+				changed = true;
+			}
+		}
+		return changed;
 	}
 
 	/** Settings changes are deliberate, infrequent user actions — save immediately rather than
