@@ -56,7 +56,9 @@
 	gap: 4px;
 	padding: 6px 8px;
 	flex-wrap: wrap;
-	border-bottom: 1px solid var(--background-modifier-border);
+	/* No border-bottom here — the divider lives on `.atlas-filter-row` below instead, so it stays
+	 * anchored to the bottom of the (possibly-animating) filter row rather than always sitting
+	 * right below the icon row, regardless of whether the filter is revealed. */
 }
 
 /* PR 9 (issue 5): replaces the native <select> view-switcher with a section-header-styled button
@@ -111,15 +113,21 @@
  * mid-animation, the toolbar wrapped to a second line, an instant, un-animatable reflow that made
  * the bucket/inbox sections below jump down abruptly instead of moving smoothly (Dan caught this
  * live testing PR 11). A separate block-level row sidesteps the icon row's wrapping entirely — the
- * row's own height animating 0 → auto is what makes the content below move down smoothly instead. */
+ * row's own height animating 0 → auto is what makes the content below move down smoothly instead.
+ * The divider between the toolbar/filter area and the bucket section lives here too (not on
+ * `.atlas-toolbar`), so it sits right above the bucket at all times and slides down with the row as
+ * it opens, instead of always sitting right below the icon row. */
 .atlas-filter-row {
 	padding: 0 8px;
+	border-bottom: 1px solid var(--background-modifier-border);
 }
 
-.atlas-filter-row .atlas-meta-children-inner {
-	padding-bottom: 6px;
-}
-
+/* Deliberately no padding/margin on `.atlas-meta-children-inner` here (the grid item the collapse
+ * animation stretches to the row's track size) — found live: padding on that element is *additive*
+ * to the 0fr-collapsed track size, not absorbed by it, so the row never fully reached 0 height and
+ * left a persistent, glitchy-looking sliver when "closed". The `.atlas-filter` input's own margin
+ * below provides the same breathing room instead, since margin on a descendant *inside* the
+ * overflow-hidden wrapper does correctly disappear when the row collapses. */
 .atlas-filter {
 	width: 100%;
 	font-size: var(--font-ui-smaller);
@@ -127,6 +135,7 @@
 	border: 1px solid var(--background-modifier-border);
 	border-radius: 4px;
 	padding: 2px 6px;
+	margin: 6px 0;
 }
 
 .atlas-section-header {
