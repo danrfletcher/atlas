@@ -87,6 +87,24 @@
 	min-height: 8px;
 }
 
+/* F11: bounded, independently-scrollable viewport so the inbox can hold thousands of rows without
+ * every row living in the DOM at once — see `renderVirtualizedInboxRows` in explorer-view.ts. */
+.atlas-inbox-viewport {
+	max-height: 45vh;
+	overflow-y: auto;
+	position: relative;
+}
+
+.atlas-inbox-spacer {
+	position: relative;
+}
+
+.atlas-row-virtual {
+	position: absolute;
+	left: 0;
+	right: 0;
+}
+
 .atlas-row {
 	display: flex;
 	align-items: center;
