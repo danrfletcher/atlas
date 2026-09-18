@@ -252,6 +252,111 @@ From Dan's second live-testing pass, after PR 8 merged the first round of drag-a
 
 ---
 
+## PR 10 — Module Contents modal: manual fold/unfold + persisted state
+
+From Dan's third live-testing pass. The Module Contents modal (PR 9) currently has no fold/unfold at all — it's a single flat always-expanded tree. Grilled with Dan directly (see chat log around 2026-09-18); the one open question (in-memory vs. persisted fold state) was settled in favor of persistence.
+
+- [ ] Modal opens **fully collapsed** the first time a given module has ever been opened (no saved state yet)
+- [ ] Every subfolder row inside the modal gets its own chevron; clicking toggles fold/unfold for that subfolder only, reusing the `grid-template-rows` animation technique already established for meta-folder/bucket collapse
+- [ ] Fold state is **persisted to the plugin's saved data** (survives an Obsidian restart), keyed per-module (e.g. by module path + each subfolder's relative path), not just in-memory
+- [ ] Reopening the modal for a module that *has* been opened before restores whatever fold state was left when it was last closed — this is the "retain state" half; it does not contradict the "fully collapsed" default above, which only applies the first time
+- [ ] Edge case: a subfolder present in the saved fold state no longer exists on disk (renamed/deleted since last visit) — stale entries are simply unused, no active cleanup needed
+- [ ] Edge case: deeply nested subfolders (3+ levels) each retain independent fold state
+
+## PR 11 — Fix bucket/inbox section + filter-reveal animations
+
+PR 9 added fold/unfold for the bucket section, the inbox section, and the filter-reveal toggle, but none of them actually animate live — Dan confirmed this testing in the container. Diagnosed (not yet verified) root cause: `renderSectionHeader`'s collapse handler and the filter-toggle's `render()` call both trigger an **immediate full re-render**, so the DOM node carrying the CSS transition is destroyed and rebuilt already in its new state within the same tick — the browser never gets a paint frame showing the "before" state to animate from. Meta-folder collapse (PR 8) avoids this via `META_COLLAPSE_TRANSITION_MS`: toggle the class on the *existing* node first, defer the state-persisting full re-render until after the transition has had time to play.
+
+- [ ] Bucket section header collapse/expand animates smoothly in the container (not just toggles instantly)
+- [ ] Inbox section header collapse/expand animates smoothly in the container
+- [ ] Filter-reveal toggle (show/hide the filter input) animates smoothly in the container
+- [ ] Root cause confirmed and fixed using the same pre-toggle-then-delayed-rerender pattern meta-folder collapse already uses (or another fix, if the diagnosis turns out wrong once in the code)
+- [ ] Verified live in `desktop-atlas-modules` (or a fresh equivalent) — motion actually observed, not just before/after state screenshots, since that's exactly what shipped broken last time despite passing state-based checks
+
+## PR 12 — Meta-folders via drop-anywhere-except-icon
+
+New feature: any block/file/module/folder can become the organizational parent of any other bucket item, entirely independent of disk location — completing meta-organization alongside the existing on-disk-independent bucket/view model. Grilled with Dan directly; the original "drop on the right side of the row" idea was simplified during grilling to an icon/non-icon split.
+
+- [ ] **Data model:** every `ViewNode` type (block/file/module/folder) gains optional `children`/`collapsed` fields, unifying with how Folder nodes already work — a promoted node keeps its own identity/content (clicking it still opens the file/interface note, etc.), it just additionally gains a chevron + children area. This is what distinguishes it from a plain Folder, which stays purely organizational with no content of its own.
+- [ ] **Modules:** the icon is reserved exclusively for the existing real disk-move interactions — the plain drop-confirm (PR 8) *and* the dwell-timer-opens-modal flow (PR 9, moved here from whole-row per this PR's grilling). Dropping anywhere else on a module's row (label included) creates a meta-nest relationship instead — organizational only, no disk move.
+- [ ] **Files/blocks/folders:** no disk-move capability exists for these in the bucket, so the entire row is eligible as a meta-nest drop target — no icon carve-out needed.
+- [ ] A node shows no chevron until it actually gains its first child — no pre-emptive chevrons on every row
+- [ ] Un-nesting: dragging a nested child out to the bucket root, or onto another row's non-icon zone, re-parents/un-nests it via the existing reorder mechanics — no new UI needed
+- [ ] Fold/unfold for these new chevrons reuses the existing `grid-template-rows` animation technique
+- [ ] Edge case: nesting a module under a file (and every other cross-type combination)
+- [ ] Edge case: deeply nested chains (3+ levels)
+- [ ] Edge case: dragging a node onto itself, or onto one of its own descendants — must be prevented (cycle prevention)
+- [ ] Edge case: a module's icon-only disk-move zone coexists correctly with its now-narrower meta-nest zone — verify dropping on the label specifically nests rather than files-into-module
+
+## PR 13 — Duplicate (Meta)
+
+New feature: place the same unit in multiple spots in a view's tree without duplicating it on disk. Grilled with Dan directly — his first proposed naming scheme (numbered suffixes) turned out to have no real answer to "how do two sibling nodes pointing at the same disk path get different names without a fake 'meta name'", so the scheme was dropped entirely in favor of allowing duplicate labels outright.
+
+- [ ] Right-click "Duplicate (Meta)" appears on every bucket item (any block/file/module/folder)
+- [ ] Clicking it creates a new sibling `ViewNode` referencing the **exact same underlying unit**, inserted adjacent to the original
+- [ ] **No naming/numbering logic** — the duplicate displays with the identical label as the original; two (or more) siblings with the same visible name is expected and fine
+- [ ] If the duplicated item has children (via PR 12's meta-nesting), the **entire child subtree is recursively cloned** too — new node IDs throughout, each still referencing the same underlying units as its original counterpart — and placed under the new duplicate
+- [ ] The clone is fully independent post-creation: further meta-nesting changes under one copy do not affect the other
+- [ ] Technical check (not a user-facing AC): grep the codebase for any place that assumes one-`ViewNode`-per-unit-per-view uniqueness (e.g. a `Map`/`Set` keyed only by path) that would break once two sibling nodes can reference the same unit — fix if found
+- [ ] Edge case: duplicating an item with no children (simple clone, no subtree to walk)
+- [ ] Edge case: duplicating an item that is itself already a duplicate — clones again the same way, no special-casing
+- [ ] Edge case: duplicating a deeply-nested item — the clone is reinserted as a sibling at the **same nesting depth**, not promoted to root
+
+## PR 14 — Status data model + Settings UI restructure
+
+First slice of the File Folder Status Sets port (Dan's item 5) — foundation only, no tree rendering or assignment UI yet. Porting ideas from `danrfletcher/obsidian-file-folder-status-icons` (inspected live via a `desktop-cancun` container + its real `data.json`) into Atlas natively, not as a dependency or standalone plugin. Should be self-contained and testable via the Settings panel alone, per Dan's own per-PR container-testing requirement.
+
+- [ ] Settings tab restructured with switchable tabs: **"Basic"** (everything currently in Atlas settings) and **"Status"** (new)
+- [ ] **Status Sets** section under "Status": create/edit/delete named status sets, each a list of statuses with `label`, `color`, `isCompleted`, `isCancelled`, and a `defaultStatusId` for the set — ported 1:1 from the reference plugin's model (`statusSets` shape confirmed live from its `data.json`)
+- [ ] **Colour palette** section: a shared/global palette array used by status-color pickers, ported across
+- [ ] **Design** section with the **glow** toggle, ported across (`glowEnabled` in the reference plugin)
+- [ ] The reference plugin's "Folder assignments" settings section does **not** come across — Atlas assigns statuses per-item via right-click instead (PR 15/16), not via a settings-panel folder picker
+- [ ] No sort/group-by-status anywhere in this port (grilled and explicitly dropped — Atlas's existing manual/A-Z sort toggle is a different axis and stays as-is; may revisit as a future PR)
+
+## PR 15 — Visual status rendering + minimal assignment
+
+Second slice — intentionally reordered ahead of the full assignment modal (grilled: rendering first, so this PR is self-contained/testable on its own rather than shipping an assignment toggle with no visible effect).
+
+- [ ] When a bucket/inbox row has a status assigned, its normal icon is replaced by a **traffic-light-style status dot**, colored per the assigned status
+- [ ] **Glow** effect applied per the Status settings' glow toggle
+- [ ] **"Retain Icons"** setting (Status → Design section): when on, the item's normal type icon (block/file/module/folder) shrinks down and sits inside the status dot instead of disappearing; when off, the icon disappears entirely while a status is active
+- [ ] Minimal assignment mechanism so this PR has real data to render against: right-click → **"Statuses"** opens a small modal with just a master on/off toggle and a status-set picker — no inherit/hide/apply-to/truncate fields yet, those land in PR 16
+- [ ] Edge case: an item with no status assigned keeps its normal icon, unaffected
+
+## PR 16 — Full "Statuses" modal + root-level assignment
+
+Third slice — the remaining fields from the reference plugin's per-folder config, now applied per-item via the right-click modal from PR 15, plus root-level (whole-view) assignment.
+
+- [ ] All settings in the "Statuses" modal are greyed out until the master toggle (from PR 15) is turned on
+- [ ] **Inherit to subfolders** toggle — defaults to **off** (the reference plugin defaults this to on; Dan explicitly wants the opposite default for Atlas) — determines whether the assigned status set applies only to direct children or all the way down the tree
+- [ ] **Hide completed** / **Hide cancelled** toggles — items whose assigned status has `isCompleted`/`isCancelled` set are hidden from the tree when the corresponding toggle is on
+- [ ] **"Apply statuses to"** — checkboxes/options for block, file, module, folder, controlling which unit types under this item actually receive the status treatment
+- [ ] **Truncate statuses** — per status in the set, toggle whether that status's matching items collapse down to a single placeholder row instead of listing each individually (ported from the reference plugin's `truncatedStatuses` shape: `{ [statusId]: { enabled, label } }`)
+- [ ] If an item has no children, it gets **no** "Statuses" right-click option at all (nothing to apply a status *to* underneath it)
+- [ ] Right-click on the **view-name** selector (e.g. "Default") surfaces the same "Statuses" option, applying to the root level of that view
+- [ ] Edge case: turning the master toggle off doesn't discard the rest of the modal's configured values, just deactivates them (so turning it back on restores the prior setup)
+
+## PR 17 — Inheritance + move semantics
+
+Fourth slice — how statuses behave as the bucket tree is reorganized (drag/drop, meta-nesting from PR 12, duplication from PR 13).
+
+- [ ] Moving an item that has its own status assigned: the status **moves with it**, unaffected by the move, regardless of where it lands
+- [ ] Moving an item that only has a status because it **inherits** one from a parent: if the new parent also has statuses turned on (with inheritance covering this item), it keeps working under the new parent; if the new parent does **not** have statuses turned on, the item **loses its status display** (it was never its own assignment, just inherited)
+- [ ] Edge case: an item duplicated via PR 13 — does the duplicate inherit/keep the same status as the original at time of duplication? (Not yet grilled — resolve during this PR's build, default assumption: yes, since it's a full clone including whatever it would inherit at its new position, same as any other item landing under an inheriting parent)
+- [ ] Edge case: meta-nesting (PR 12) a plain item under a status-inheriting parent — it should pick up the inherited status the same way a physically-nested item would
+
+## PR 18 — Truncated-status collapsing + hide filtering in the live tree
+
+Fifth slice — wiring PR 16's truncate/hide-completed/hide-cancelled settings into the actual live bucket/inbox rendering (PR 16 only captured the settings; this PR makes them do something).
+
+- [ ] Items whose status is truncated (per PR 16's per-status toggle) collapse down to a single placeholder row in the live tree instead of listing each individually
+- [ ] Items whose status has `isCompleted` set are hidden from the tree when the containing item's "Hide completed" toggle is on
+- [ ] Items whose status has `isCancelled` set are hidden from the tree when the containing item's "Hide cancelled" toggle is on
+- [ ] Edge case: an item that's both truncated *and* would be hidden by hide-completed/cancelled — hide wins, it doesn't show up even as part of a truncated placeholder count
+- [ ] Edge case: truncate/hide interacting with the filter box (PR 9) — a filtered-in match under a truncated or hidden status should still surface somehow rather than silently vanishing (exact behavior not yet grilled — flag for Dan during this PR's build if it's not obvious once in the code)
+
+---
+
 ## Cross-cutting (verify at the end, not tied to one PR)
 
 - [x] Nothing in the plugin's DnD/promotion/placement code path ever calls `vault.rename` or `fileManager.renameFile` for the bucket/view mechanics (Part 7 — grep-verify across the whole codebase, not just F8) — grepped the entire `src/` tree for both calls: zero matches other than the code comment in `explorer-view.ts` documenting the constraint
