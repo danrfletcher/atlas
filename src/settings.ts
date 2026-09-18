@@ -118,7 +118,7 @@ export class AtlasSettingTab extends PluginSettingTab {
 		new Setting(containerEl)
 			.setName("Confirm before adding a unit to a module")
 			.setDesc(
-				"Dragging a file or block onto a folder-unit (module) files it into that folder on disk — a deliberate exception to Atlas never otherwise touching folder internals. When on, asks first. When off, it happens immediately."
+				"Dragging a file or block onto a module files it into that module on disk — a deliberate exception to Atlas never otherwise touching a module's internal organization. When on, asks first. When off, it happens immediately."
 			)
 			.addToggle((toggle) =>
 				toggle.setValue(this.plugin.settings.confirmAddToModule).onChange(async (value) => {

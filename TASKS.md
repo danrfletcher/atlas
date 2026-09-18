@@ -204,6 +204,54 @@ All five planned PRs were merged and the container could never exercise real dra
 
 ---
 
+## PR 9 — Modules/Folders terminology, toolbar redesign, module-contents modal, filter UX
+
+From Dan's second live-testing pass, after PR 8 merged the first round of drag-and-drop polish. Built in a dedicated worktree + container (`desktop-atlas-modules`, branch `modules-toolbar-and-filter-ux`) rather than the shared one, per Dan's explicit request, so this doesn't disturb his own vault mid-build.
+
+### Terminology (foundational — touches every issue below)
+- [x] Every **user-facing** string for a physical folder-unit says **"Module"** (buttons, tooltips, confirm/prompt dialogs, context menu items, settings descriptions, README) — confirmed with Dan directly (not guessed): "Add Folder" (physical) → "Add Module" — verified live: toolbar icon tooltip reads "Add module"
+- [x] Every **user-facing** string for what was "meta folder" says plain **"Folder"** (the "meta" qualifier is dropped because the word is now free — "Add meta folder" → "Add Folder", "Rename meta folder" → "Rename folder", "Delete meta folder" → "Delete folder", etc.) — verified live: toolbar icon tooltip reads "Add folder"
+- [x] **Scope decision, logged not silently assumed:** internal code identifiers (the `ViewNode.type: "meta"` discriminant, function names like `addMetaFolder`/`renameMetaFolder`, CSS classes like `atlas-meta-children`) stay as-is — renaming those too is a much larger, purely-cosmetic mechanical change across the whole codebase with real risk of introducing bugs for zero user-visible benefit. Code says "meta"/"folder-unit" internally, UI says "Folder"/"Module" externally — documented explicitly in `docs/decisions.md` so it doesn't read as an inconsistency later.
+- [x] Historical `TASKS.md`/`docs/decisions.md` entries from PRs 1–8 are **not** rewritten to match new terminology — they're a log of what was true at the time, not living docs
+
+### Issue 1 — Fold/unfold animation extended beyond meta folders
+- [x] Bucket section header (collapse/expand the whole bucket) animates the same way meta folders do (PR 8's `grid-template-rows` technique) — same `renderSectionHeader`/`.atlas-meta-children` code path exercised live via the Inbox header below; Bucket was empty in the test vault's Default view so its own visible collapse had nothing to animate, but it's the identical code path
+- [x] Inbox section header (collapse/expand the whole inbox) animates the same way — verified live in `desktop-atlas-modules`: clicking the Inbox chevron collapsed/re-expanded its full 76-row list
+- [ ] Folders (formerly "meta folders") keep the PR 8 animation, now consistent with the two above — not re-verified live this pass (no Folder existed in the test view's bucket to expand/collapse); code path unchanged from PR 8
+- [x] Modules have no inline fold/unfold at all anymore (superseded by the Module Contents modal, issue 2) — nothing to animate inline; not a gap — verified live: clicking a module's icon opens the modal, never expands inline
+
+### Issue 2 — Module Contents modal replaces inline folder expansion in the inbox
+- [x] Inbox no longer inline-expands a module's internals on click (removes `addExpandChevron`'s inbox usage) — the bucket already never had this, so both surfaces are now consistent: modules never expand inline anywhere — verified live
+- [x] New `ModuleContentsModal`: shows the module's name as title, a read-only recursive tree of its physical children (reusing the existing `renderInternals` tree-building, relocated into the modal), each row click-to-open (closes modal), right-click → "Reveal in native explorer" (same as today) — verified live against the real "Bets" module (nested `.app` bundle and subfolders rendered correctly); right-click menu confirmed
+- [ ] Clicking a module's **text/label** still opens its interface note directly (unchanged behavior) — not re-verified live this pass; code path unchanged from before this PR
+- [x] Clicking a module's **icon** opens the Module Contents modal instead of opening anything — verified live
+- [x] Module icon default state is a **closed** folder (was open) — signals "click to look inside," not "already open" — verified live
+- [x] Hovering the icon animates closed→open folder icon + shows a tooltip reading "View module contents" — verified live
+- [ ] Existing drop-directly-on-a-module-row confirm flow (PR 8) is unchanged for a plain drop — not confirmed this pass: every drag attempted via browser automation ran long enough to trigger the new dwell timer instead of a fast plain drop; needs a hands-on mouse check
+- [x] **New, higher-risk (see `docs/decisions.md` for the explicit risk call with Dan):** dragging a file/block onto a module (text or icon) and holding without dropping (dwell timer, no `dragleave`/`drop` first) opens the Module Contents modal *while the drag is still in progress*; the modal's own rows (module root + each nested subfolder shown) become live drop targets for that same drag, letting the file land at any specific nested location in the module's on-disk layout — and skips the confirm dialog entirely, since the deliberate hold-to-open gesture already is the confirmation — **verified live**: dragging a file onto the "Bets" module opened the Contents modal mid-drag with a "Bets (module root)" drop row; completing a drop *inside* the now-open modal wasn't exercisable via the browser-automation tooling used (no way to hold a mouse button across a modal-open event), so that specific sub-step still wants a hands-on check
+- [ ] Edge case: releasing the drag (dropping) *before* the dwell timer completes — falls back to the existing direct-drop-with-confirm behavior, dwell timer never fires — not exercisable via the automation tooling used (couldn't produce a sub-650ms drop); needs a hands-on mouse check
+- [ ] Edge case: dragging out of the row before the dwell timer completes (`dragleave`) cancels the pending modal-open — not exercisable via the automation tooling used; needs a hands-on mouse check
+- [x] Edge case: closing the modal (Escape, or clicking outside) mid-drag — the drag payload is cleared the same way any other cancelled drop is — verified live: closed a dwell-opened modal with Escape, confirmed the source file was left untouched and unplaced afterward
+
+### Issue 3 — Inbox height
+- [x] Inbox section (and its virtualized viewport) extends to fill the remaining vertical space in the explorer panel instead of being cut off partway down — verified live: 76-row inbox list now runs to the bottom of the panel instead of stopping ~halfway
+
+### Issues 4 & 5 — Toolbar redesign: one line, three sections
+- [x] **Section 1 (view identity):** view-name button restyled to match `.atlas-section-header`'s font (same family/weight as "Bucket"/"Inbox"), slightly larger, padding trimmed to fit a single dense toolbar row. Left-click still switches/selects the view (opens the existing view-picker). Right-click surfaces New/Rename/Delete view (moved out of always-visible buttons, was three separate toolbar icons) — verified live, including the "Click to switch views, right-click for more" tooltip
+- [x] Divider
+- [x] **Section 2 (create):** exactly four buttons — Add Block, Add File, Add Module, Add Folder (no separate "Add meta folder" icon anymore, folded into "Add Folder") — verified live via tooltips
+- [x] Divider
+- [x] **Section 3 (view controls):** Sort toggle, Collapse-all, and a new filter-reveal toggle button that shows/hides the filter text input with a reveal/hide animation (filter box is no longer permanently visible taking up row space) — verified live
+- [x] Whole toolbar fits one line (no wrapping) at a normal sidebar width — verify live, not just reasoned about, since this is exactly the kind of thing that looks fine in code and wraps awkwardly in the real panel — verified live at the container's native 1024×768-derived sidebar width: all nine toolbar elements sit on one row
+
+### Issue 6 — Filter behavior with Folders vs. Modules
+- [ ] A Folder (meta folder) containing a filter match is auto-revealed (expanded) while filtering is active, even if the user had it manually collapsed — a match must never be hidden by a stale collapsed state — not re-verified live this pass (no Folder existed in the test view's bucket); code reviewed (`subtreeHasMatch`/`effectiveCollapsed`)
+- [ ] Clearing the filter restores each Folder's fold state to whatever it was *before* the filter started overriding it (not "everything stays expanded because filtering touched it") — not re-verified live this pass for the Folder case specifically; filter-clear restoring the full unfiltered *Inbox* list was verified live
+- [x] Modules have no inline reveal (per issue 2) — filtering does not expand anything inline for a module; instead, opening a module's Contents modal while a filter is active shows/highlights which of its internals match that same filter text — verified live: filtering "bets" then opening the "Bets" module highlighted every internally-matching row
+- [ ] Edge case: filter text changes *while* a Module Contents modal is already open — the modal's own match-highlighting updates live, not just on next open — not exercised this pass (modal was opened after the filter was already set, not edited while open); code reviewed (`filterInput`'s `input` handler calls `openModuleModal?.setFilterText`)
+
+---
+
 ## Cross-cutting (verify at the end, not tied to one PR)
 
 - [x] Nothing in the plugin's DnD/promotion/placement code path ever calls `vault.rename` or `fileManager.renameFile` for the bucket/view mechanics (Part 7 — grep-verify across the whole codebase, not just F8) — grepped the entire `src/` tree for both calls: zero matches other than the code comment in `explorer-view.ts` documenting the constraint

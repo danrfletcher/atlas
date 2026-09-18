@@ -32,19 +32,19 @@ So `Bets/steps/step-3.md` isn't a unit today. The day something outside `Bets/` 
 
 A thought too small to deserve a filename still needs to exist. These are **free blocks**: markdown files in a **pool folder** (default `_pool/`, configurable) whose filenames are auto-generated IDs the user never types or sees. The explorer shows a free block by its first line, never by its ID. Under the hood it's a file; to the user it's a block. A free block that grows into a full document just keeps growing — nothing has to happen at the moment it crosses from "block" to "file".
 
-### Folder-units
+### Modules
 
-Every folder is a unit — a module whose **interface** is a note saying what the folder is and what it's responsible for, with everything else inside as internals.
+Every folder is a unit — a **module** whose **interface** is a note saying what the folder is and what it's responsible for, with everything else inside as internals. (Internally the codebase still calls this a "folder-unit" — the model is the same one from the original spec, just renamed in the UI.)
 
-- The interface note is `<Folder>/<Folder>.md` by default. A folder without one is still a unit; the explorer offers to create it.
-- Clicking a folder-unit opens its interface note. Expanding it shows internals.
-- A folder-unit's properties are its interface note's properties.
-- Atlas never rearranges folder-units on disk. Physical moves stay in Obsidian's native explorer (still available as a tab).
+- The interface note is `<Folder>/<Folder>.md` by default. A module without one is still a unit; the explorer offers to create it.
+- Clicking a module's name opens its interface note. Clicking its icon opens a "Module contents" view of its internals instead.
+- A module's properties are its interface note's properties.
+- Atlas never rearranges a module's internal organization on disk — with one deliberate, always-confirmable exception: dragging a file or block directly onto a module. Physical moves otherwise stay in Obsidian's native explorer (still available as a tab).
 
 ### Views, bucket, inbox
 
 - A **view** is one arrangement of units into a hierarchy. There can be many; the same unit can sit in many at once; no view is "the real one."
-- Inside a view, the **bucket** is the arranged tree, and **meta folders** are its branches — labels, not folders on disk.
+- Inside a view, the **bucket** is the arranged tree, and **folders** are its branches — labels, not folders on disk (not to be confused with modules, which *are* real folders on disk).
 - A view's **inbox** is every unit not placed in that view. The **global inbox** is every unit placed in no view at all.
 - Placing or removing a unit in the bucket never touches disk.
 
@@ -70,6 +70,7 @@ Then enable "Atlas" under Settings → Community plugins, in a vault where this 
 | Interface note convention | `<Folder>/<Folder>.md` | Toggle to also accept `index.md` / `README.md` as a folder's interface note. |
 | Replace native explorer on startup | on | Makes Atlas the active view in the left sidebar on launch. The native explorer stays available as a tab. |
 | Block display length | 80 | How many characters of a free block's first line to show in the explorer. |
+| Confirm before adding a unit to a module | on | Ask before a drag-onto-a-module physically files something into it. Off skips the confirmation, not the move. |
 | Default view on launch | — | Which view Atlas opens to when the vault loads. |
 
 ## Commands
@@ -79,12 +80,12 @@ Then enable "Atlas" under Settings → Community plugins, in a vault where this 
 | `Atlas: Add block` | Creates a new free block in the pool folder and opens it with the cursor ready to type — no filename prompt. |
 | `Atlas: Open explorer` | Opens/focuses the Atlas view in the left sidebar. |
 | `Atlas: Switch view…` | Fuzzy-picks another view and makes it active. |
-| `Atlas: Place active file in view…` | Fuzzy-picks a view, then a meta folder (or the bucket root) within it, and places the active file there — the keyboard/mobile equivalent of dragging it in. |
+| `Atlas: Place active file in view…` | Fuzzy-picks a view, then a folder (or the bucket root) within it, and places the active file there — the keyboard/mobile equivalent of dragging it in. |
 | `Atlas: Reveal active file in Atlas` | Opens the explorer and, if the active file isn't placed anywhere, says so. |
 | `Atlas: New view` | Prompts for a name and creates a new, empty view. |
 | `Atlas: Rebuild index` | Forces a full re-scan of every unit in the vault; logs timings to the console. |
 
-Every row in the explorer also has a right-click menu (Open, Open in new tab, Reveal in native explorer, Copy link, Remove from view, Place in view…), and meta folders can be renamed or deleted from the same menu.
+Every row in the explorer also has a right-click menu (Open, Open in new tab, Reveal in native explorer, Copy link, Remove from view, Place in view…), and folders can be renamed or deleted from the same menu.
 
 ## Documentation
 
