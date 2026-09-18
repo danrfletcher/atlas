@@ -2,6 +2,14 @@
 
 Judgement calls made during the build, the alternative considered, and why. Newest first.
 
+## F8: keyboard Delete unplaces without a confirmation step — deliberate, not an oversight
+
+**Decision:** `handleRowKeydown`'s `Delete` case calls `unplaceUnit` immediately, with no `ConfirmModal` in between — unlike "Delete view" and (implicitly) any other genuinely destructive action in the explorer, which do confirm first.
+
+**Why no confirm here specifically (per review, A8):** unplacing a unit isn't destructive under this model — the unit doesn't disappear, it just returns to the inbox (its own view, or the global one), fully recoverable with the same "Place in view…" flow used to place it in the first place. Nothing on disk changes and no data is lost, unlike deleting a view (which orphans every placement only that view held) or deleting a meta folder with children (which is non-destructive too, for the same reason, and also doesn't confirm — consistent with this same reasoning, not a separate exception). A confirmation step earns its place when an action is hard to undo or loses something; reversing an unplace is exactly as easy as the placement that caused it, so a confirm dialog here would be friction without a corresponding safety benefit — the kind of interruption real spec systems (and Part 7's own spirit) warn against adding reflexively.
+
+**What this means for the spec's "Delete to remove (with confirm)" wording:** read as describing the general shape of a delete-like action in the explorer, not a literal requirement that this specific keyboard shortcut must always confirm — the shape holds (destructive actions confirm; this isn't one).
+
 ## F8: real bug fixed post-review (A6) — drop-onto-nested-unit escaped to bucket root
 
 **Decision:** `handleDrop`'s branch for "dropped onto a unit node, not a meta folder" (the Part 4 edge case where dropping a unit onto another unit should insert it as a sibling right after the target) hardcoded `parentId = null` regardless of where the target unit actually lived in the tree. `indexInParent` already did the equivalent recursive search to find the right *index* within whatever array the target lives in; this branch just never did the analogous lookup for the right *parent*. Fixed by adding `parentIdOf` — a recursive search returning the id of the meta folder a node lives in, or `null` for the bucket root — and using its result instead of the hardcoded `null`.
