@@ -1,4 +1,4 @@
-import { FuzzySuggestModal, ItemView, Menu, Notice, TFile, TFolder, WorkspaceLeaf, setIcon, setTooltip } from "obsidian";
+import { App, FuzzySuggestModal, ItemView, Menu, Modal, Notice, TFile, TFolder, WorkspaceLeaf, setIcon, setTooltip } from "obsidian";
 import type AtlasPlugin from "./main";
 import { Unit, UnitRef, View, ViewNode, unitRefKey, unitRefsEqual, unitToRef } from "./types";
 import { MetaTarget, flattenMetaFolders } from "./views";
@@ -25,11 +25,12 @@ const UNIT_ROW_CHEVRON_OFFSET = 20;
  * `setNodeCollapsed` call (which triggers a full re-render) is delayed by this long so the CSS
  * collapse/expand transition finishes playing before the DOM gets rebuilt out from under it. */
 const META_COLLAPSE_TRANSITION_MS = 160;
+/** PR 9 (issue 2, point 5): how long a drag has to hover a module (without dropping) before its
+ * Contents modal opens automatically, mirroring the "hover a folder while dragging to expand it"
+ * pattern most native file managers use. */
+const MODULE_HOVER_DWELL_MS = 650;
 
-type DragPayload =
-	| { kind: "node"; nodeId: string; viewId: string }
-	| { kind: "inbox"; ref: UnitRef }
-	| { kind: "internal"; path: string; isFolder: boolean };
+type DragPayload = { kind: "node"; nodeId: string; viewId: string } | { kind: "inbox"; ref: UnitRef };
 
 interface RowInfo {
 	text: string;
@@ -69,6 +70,120 @@ export class MetaFolderSuggestModal extends FuzzySuggestModal<MetaTarget> {
 	}
 }
 
+/** PR 9 (issue 2): replaces inline fold/unfold for modules with a browsable read-only tree of the
+ * module's physical internals — modules are opaque, first-class units whose internal organization
+ * Atlas doesn't otherwise rearrange, so this is look-don't-touch by default (clicking a file opens
+ * it and closes the modal; right-click still offers "Reveal in native explorer", same as before).
+ * In `dropTarget` mode (only ever passed when opened via the hover-during-drag gesture, issue 2
+ * point 5) every folder shown — including the module's own root — becomes a live drop target for
+ * whatever's still being dragged, skipping the usual confirm dialog entirely, since choosing an
+ * exact destination inside this modal already *is* the confirmation. */
+export interface ModuleContentsModalCallbacks {
+	onOpenFile: (file: TFile) => void;
+	onRevealInNative: (path: string) => void;
+	onPromoteAndPlace: (path: string, isFolder: boolean) => void;
+	/** Set only when opened via the hover-during-drag gesture — every folder shown becomes a live
+	 * drop target for the drag still in progress, and dropping skips the usual confirm dialog. */
+	dropTarget?: { onDrop: (targetFolderPath: string) => void };
+	onCloseCallback?: () => void;
+}
+
+export class ModuleContentsModal extends Modal {
+	private filterText = "";
+	private rows: { el: HTMLElement; name: string }[] = [];
+
+	constructor(app: App, private folder: TFolder, private callbacks: ModuleContentsModalCallbacks) {
+		super(app);
+	}
+
+	onOpen(): void {
+		this.titleEl.setText(this.folder.name);
+		this.contentEl.addClass("atlas-module-modal-content");
+		const treeEl = this.contentEl.createDiv({ cls: "atlas-module-modal-tree" });
+
+		if (this.callbacks.dropTarget) {
+			const rootRow = treeEl.createDiv({ cls: "atlas-row atlas-row-internal atlas-module-modal-root" });
+			rootRow.createSpan({ cls: "atlas-row-text", text: `${this.folder.name} (module root)` });
+			this.wireDropZone(rootRow, this.folder.path);
+			this.rows.push({ el: rootRow, name: this.folder.name });
+		}
+
+		this.renderTree(this.folder, treeEl, 0);
+	}
+
+	onClose(): void {
+		this.contentEl.empty();
+		this.callbacks.onCloseCallback?.();
+	}
+
+	/** Re-applies match highlighting against a (possibly changed) filter without closing/reopening —
+	 * called live by the explorer view while this modal is open and the filter text changes. */
+	setFilterText(text: string): void {
+		this.filterText = text;
+		const needle = text.trim().toLowerCase();
+		for (const { el, name } of this.rows) {
+			el.toggleClass("atlas-row-filter-match", needle.length > 0 && name.toLowerCase().includes(needle));
+		}
+	}
+
+	private renderTree(folder: TFolder, container: HTMLElement, depth: number): void {
+		for (const child of folder.children) {
+			const row = container.createDiv({ cls: "atlas-row atlas-row-internal" });
+			row.style.paddingLeft = `${depth * 16 + 16}px`;
+			const iconEl = row.createDiv({ cls: "atlas-icon" });
+			setIcon(iconEl, child instanceof TFolder ? "folder" : "file");
+			row.createSpan({ cls: "atlas-row-text", text: child.name });
+			this.rows.push({ el: row, name: child.name });
+
+			if (child instanceof TFile) {
+				row.addEventListener("click", () => {
+					this.callbacks.onOpenFile(child);
+					this.close();
+				});
+			} else if (this.callbacks.dropTarget) {
+				this.wireDropZone(row, child.path);
+			}
+			row.addEventListener("contextmenu", (evt) => {
+				evt.preventDefault();
+				const menu = new Menu();
+				menu.addItem((item) =>
+					item
+						.setTitle("Reveal in native explorer")
+						.setIcon("folder-open")
+						.onClick(() => this.callbacks.onRevealInNative(child.path))
+				);
+				menu.addItem((item) =>
+					item
+						.setTitle("Promote and place in view…")
+						.setIcon("arrow-right-left")
+						.onClick(() => {
+							this.callbacks.onPromoteAndPlace(child.path, child instanceof TFolder);
+							this.close();
+						})
+				);
+				menu.showAtMouseEvent(evt);
+			});
+
+			if (child instanceof TFolder) this.renderTree(child, container, depth + 1);
+		}
+		if (this.filterText) this.setFilterText(this.filterText);
+	}
+
+	private wireDropZone(row: HTMLElement, folderPath: string): void {
+		row.addEventListener("dragover", (evt) => {
+			evt.preventDefault();
+			row.addClass("atlas-drop-target");
+		});
+		row.addEventListener("dragleave", () => row.removeClass("atlas-drop-target"));
+		row.addEventListener("drop", (evt) => {
+			evt.preventDefault();
+			row.removeClass("atlas-drop-target");
+			this.callbacks.dropTarget?.onDrop(folderPath);
+			this.close();
+		});
+	}
+}
+
 /**
  * F8 — the explorer view. A flat unit index (F2) arranged into a bucket tree per view (F9). This
  * view never moves anything on disk — the only filesystem writes anywhere in it are `vault.create`
@@ -80,7 +195,21 @@ export class AtlasExplorerView extends ItemView {
 	private sortMode: "manual" | "alphabetical" = "manual";
 	private bucketCollapsed = false;
 	private inboxCollapsed = true;
-	private expandedFolders = new Set<string>();
+	/** PR 9: filter input is hidden behind a reveal toggle now instead of always shown. */
+	private filterRevealed = false;
+	/** One-shot: set when the reveal toggle is clicked open, consumed by the very next
+	 * `renderToolbar` call so the newly-created input is auto-focused exactly once, not on every
+	 * render while revealed (which would fight the existing focus-preservation logic in `render()`). */
+	private focusFilterOnNextRender = false;
+	/** PR 9: a folder's collapsed state as it was *before* the current filter run started
+	 * auto-revealing folders that contain a match — restored verbatim once the filter clears, so
+	 * filtering never permanently changes what the user had manually folded/unfolded. `undefined`
+	 * (rather than absent from the map) is a valid stored value, so presence-checking uses `has`. */
+	private preFilterCollapsedState: Map<string, boolean | undefined> | null = null;
+	/** PR 9 (issue 6): tracked so the filter input's handler can push a live update into an
+	 * already-open Module Contents modal, rather than the modal only ever seeing the filter text
+	 * that was active at the moment it was opened. */
+	private openModuleModal: ModuleContentsModal | null = null;
 	private dragPayload: DragPayload | null = null;
 	private unsubscribers: (() => void)[] = [];
 	private renderQueued = false;
@@ -183,66 +312,103 @@ export class AtlasExplorerView extends ItemView {
 
 	// --- toolbar -------------------------------------------------------------------------------
 
+	/** PR 9: one dense row, three sections (view identity | create | view controls) — replaces the
+	 * previous always-visible New/Rename/Delete-view icon trio (moved to the view-name button's
+	 * right-click menu) and the always-visible filter input (now behind a reveal toggle), per Dan's
+	 * live-testing feedback that the old toolbar was too cluttered to fit one line comfortably. */
 	private renderToolbar(container: HTMLElement, view: View): void {
 		const toolbar = container.createDiv({ cls: "atlas-toolbar" });
 
-		const viewSelect = toolbar.createEl("select", { cls: "atlas-view-select" });
-		for (const v of this.plugin.viewsManager.getViews()) {
-			const option = viewSelect.createEl("option", { text: v.name, value: v.id });
-			if (v.id === view.id) option.selected = true;
-		}
-		viewSelect.addEventListener("change", () => {
-			this.plugin.viewsManager.setActiveViewId(viewSelect.value);
-		});
-
-		this.toolbarButton(toolbar, "plus", "New view", () => {
-			new TextPromptModal(this.plugin.app, "New view", "", (name) => {
-				if (!name.trim()) return;
-				const created = this.plugin.viewsManager.createView(name);
-				if (!created) return new Notice(`Atlas: a view named "${name}" already exists.`);
-				this.plugin.viewsManager.setActiveViewId(created.id);
+		// --- section 1: view identity ---------------------------------------------------------
+		const viewName = toolbar.createDiv({ cls: "atlas-view-name" });
+		viewName.setText(view.name);
+		setTooltip(viewName, "Click to switch views, right-click for more");
+		viewName.addEventListener("click", () => {
+			new ViewSuggestModal(this.plugin.app, this.plugin.viewsManager.getViews(), (v) => {
+				this.plugin.viewsManager.setActiveViewId(v.id);
 			}).open();
 		});
-
-		this.toolbarButton(toolbar, "pencil", "Rename view", () => {
-			new TextPromptModal(this.plugin.app, "Rename view", view.name, (name) => {
-				if (!this.plugin.viewsManager.renameView(view.id, name)) {
-					new Notice(`Atlas: a view named "${name}" already exists.`);
-				}
-			}).open();
-		});
-
-		this.toolbarButton(toolbar, "trash-2", "Delete view", () => {
-			new ConfirmModal(
-				this.plugin.app,
-				`Delete the view "${view.name}"? Units placed only in this view move to the global inbox — nothing on disk changes.`,
-				"Delete",
-				() => this.plugin.viewsManager.deleteView(view.id)
-			).open();
+		viewName.addEventListener("contextmenu", (evt) => {
+			evt.preventDefault();
+			const menu = new Menu();
+			menu.addItem((item) =>
+				item.setTitle("New view").setIcon("plus").onClick(() => {
+					new TextPromptModal(this.plugin.app, "New view", "", (name) => {
+						if (!name.trim()) return;
+						const created = this.plugin.viewsManager.createView(name);
+						if (!created) return new Notice(`Atlas: a view named "${name}" already exists.`);
+						this.plugin.viewsManager.setActiveViewId(created.id);
+					}).open();
+				})
+			);
+			menu.addItem((item) =>
+				item.setTitle("Rename view").setIcon("pencil").onClick(() => {
+					new TextPromptModal(this.plugin.app, "Rename view", view.name, (name) => {
+						if (!this.plugin.viewsManager.renameView(view.id, name)) {
+							new Notice(`Atlas: a view named "${name}" already exists.`);
+						}
+					}).open();
+				})
+			);
+			menu.addItem((item) =>
+				item.setTitle("Delete view").setIcon("trash-2").onClick(() => {
+					new ConfirmModal(
+						this.plugin.app,
+						`Delete the view "${view.name}"? Units placed only in this view move to the global inbox — nothing on disk changes.`,
+						"Delete",
+						() => this.plugin.viewsManager.deleteView(view.id)
+					).open();
+				})
+			);
+			menu.showAtMouseEvent(evt);
 		});
 
 		toolbar.createDiv({ cls: "atlas-toolbar-sep" });
 
+		// --- section 2: create ------------------------------------------------------------------
 		this.toolbarButton(toolbar, "square-plus", "Add block", () => void addBlock(this.plugin));
 		this.toolbarButton(toolbar, "file-plus", "Add file", () => void this.addFile());
-		this.toolbarButton(toolbar, "folder-plus", "Add folder", () => void this.addFolder());
-		this.toolbarButton(toolbar, "layers", "Add meta folder", () => this.addMetaFolder(view, null));
+		this.toolbarButton(toolbar, "folder-plus", "Add module", () => void this.addFolder());
+		this.toolbarButton(toolbar, "layers", "Add folder", () => this.addMetaFolder(view, null));
 
 		toolbar.createDiv({ cls: "atlas-toolbar-sep" });
 
+		// --- section 3: view controls ------------------------------------------------------------
 		this.toolbarButton(toolbar, this.sortMode === "manual" ? "arrow-up-down" : "arrow-down-a-z", "Sort: manual / A–Z", () => {
 			this.sortMode = this.sortMode === "manual" ? "alphabetical" : "manual";
 			void this.render();
 		});
 		this.toolbarButton(toolbar, "chevrons-down-up", "Collapse all", () => this.plugin.viewsManager.collapseAll(view.id));
+		this.toolbarButton(toolbar, "search", "Filter", () => {
+			this.filterRevealed = !this.filterRevealed;
+			if (this.filterRevealed) {
+				this.focusFilterOnNextRender = true;
+			} else if (this.filterText) {
+				// Closing the reveal always returns to the unfiltered view — a hidden input still
+				// silently filtering the list would be confusing, with no visible query to explain it.
+				this.filterText = "";
+				this.restoreFoldStateAfterFilterClear();
+			}
+			void this.render();
+		});
 
-		const filterInput = toolbar.createEl("input", { cls: "atlas-filter", attr: { type: "text", placeholder: "Filter…" } });
+		const filterWrap = toolbar.createDiv({ cls: "atlas-filter-wrap" });
+		filterWrap.toggleClass("is-revealed", this.filterRevealed);
+		const filterInner = filterWrap.createDiv({ cls: "atlas-filter-wrap-inner" });
+		const filterInput = filterInner.createEl("input", { cls: "atlas-filter", attr: { type: "text", placeholder: "Filter…" } });
 		filterInput.value = this.filterText;
 		this.filterInputEl = filterInput;
 		filterInput.addEventListener("input", () => {
+			const wasActive = !!this.filterText.trim();
 			this.filterText = filterInput.value;
+			if (wasActive && !this.filterText.trim()) this.restoreFoldStateAfterFilterClear();
+			this.openModuleModal?.setFilterText(this.filterText);
 			void this.render();
 		});
+		if (this.focusFilterOnNextRender) {
+			this.focusFilterOnNextRender = false;
+			window.setTimeout(() => filterInput.focus(), 0);
+		}
 	}
 
 	private toolbarButton(toolbar: HTMLElement, icon: string, tooltip: string, onClick: () => void): void {
@@ -258,7 +424,7 @@ export class AtlasExplorerView extends ItemView {
 	}
 
 	private async addFolder(): Promise<void> {
-		await this.plugin.app.vault.createFolder(await this.uniquePath("New folder", null));
+		await this.plugin.app.vault.createFolder(await this.uniquePath("New module", null));
 	}
 
 	private async uniquePath(base: string, ext: string | null, folder = ""): Promise<string> {
@@ -273,7 +439,7 @@ export class AtlasExplorerView extends ItemView {
 	}
 
 	private addMetaFolder(view: View, parentId: string | null): void {
-		new TextPromptModal(this.plugin.app, "New meta folder", "New folder", (label) => {
+		new TextPromptModal(this.plugin.app, "New folder", "New folder", (label) => {
 			if (label.trim()) this.plugin.viewsManager.addMetaFolder(view.id, parentId, label);
 		}).open();
 	}
@@ -314,13 +480,38 @@ export class AtlasExplorerView extends ItemView {
 		return text.toLowerCase().includes(this.filterText.trim().toLowerCase());
 	}
 
+	/** PR 9 (issue 6): does this subtree contain a unit whose resolved text matches the active
+	 * filter? Used to force-reveal a folder that would otherwise hide a match behind a stale fold. */
+	private async subtreeHasMatch(nodes: ViewNode[]): Promise<boolean> {
+		for (const n of nodes) {
+			if (n.type === "unit" && n.ref) {
+				const info = await this.resolveRef(n.ref);
+				if (this.matchesFilter(info.text)) return true;
+			}
+			if (n.children.length > 0 && (await this.subtreeHasMatch(n.children))) return true;
+		}
+		return false;
+	}
+
+	/** PR 9 (issue 6): restores every folder's fold state to what it was immediately before the
+	 * current filter run started force-revealing matches, then forgets that snapshot. Safe to call
+	 * even with nothing to restore (`preFilterCollapsedState` is null until a filter actually
+	 * force-reveals something). */
+	private restoreFoldStateAfterFilterClear(): void {
+		if (!this.preFilterCollapsedState) return;
+		const view = this.plugin.viewsManager.getActiveView();
+		for (const [nodeId, collapsed] of this.preFilterCollapsedState) {
+			this.plugin.viewsManager.setNodeCollapsed(view.id, nodeId, !!collapsed);
+		}
+		this.preFilterCollapsedState = null;
+	}
+
 	private async renderNode(node: ViewNode, container: HTMLElement, view: View, depth: number): Promise<void> {
 		if (node.type === "meta") {
 			const row = container.createDiv({ cls: "atlas-row atlas-row-meta" });
 			row.style.paddingLeft = `${depth * 16}px`;
 			row.setAttr("draggable", "true");
 			const chevron = row.createDiv({ cls: "atlas-chevron" });
-			setIcon(chevron, node.collapsed ? "chevron-right" : "chevron-down");
 			const iconEl = row.createDiv({ cls: "atlas-icon" });
 			setIcon(iconEl, "layers");
 			row.createSpan({ cls: "atlas-row-text", text: node.label ?? "" });
@@ -334,6 +525,19 @@ export class AtlasExplorerView extends ItemView {
 				this.showMetaFolderMenu(evt, node, view);
 			});
 
+			// PR 9 (issue 6): a filter-matching descendant force-reveals this folder regardless of its
+			// own collapsed state, so a match is never hidden behind a stale fold. The state from just
+			// before the filter started touching it is remembered (once) so clearing the filter can put
+			// it back exactly, rather than leaving every folder the filter happened to open expanded.
+			const filterActive = !!this.filterText.trim();
+			let effectiveCollapsed = !!node.collapsed;
+			if (filterActive) {
+				if (!this.preFilterCollapsedState) this.preFilterCollapsedState = new Map();
+				if (!this.preFilterCollapsedState.has(node.id)) this.preFilterCollapsedState.set(node.id, node.collapsed);
+				if (await this.subtreeHasMatch(node.children)) effectiveCollapsed = false;
+			}
+			setIcon(chevron, effectiveCollapsed ? "chevron-right" : "chevron-down");
+
 			// Children always render (regardless of collapsed state) inside a dedicated wrapper, so
 			// collapsing/expanding can be a CSS transition on that wrapper (grid-template-rows 1fr↔0fr,
 			// the standard height:auto-safe collapse technique) instead of the row disappearing from
@@ -342,7 +546,7 @@ export class AtlasExplorerView extends ItemView {
 			// it immediately would rebuild the DOM from scratch on the next tick and cut the animation
 			// short with a hard snap instead of a slide.
 			const childrenWrap = container.createDiv({ cls: "atlas-meta-children" });
-			childrenWrap.toggleClass("is-collapsed", !!node.collapsed);
+			childrenWrap.toggleClass("is-collapsed", effectiveCollapsed);
 			const childrenInner = childrenWrap.createDiv({ cls: "atlas-meta-children-inner" });
 			await this.renderNodeList(node.children, childrenInner, view, depth + 1);
 
@@ -351,7 +555,7 @@ export class AtlasExplorerView extends ItemView {
 			// inside that window previously read the same stale value as the first and re-applied the
 			// same direction instead of toggling back. Also cancels/reschedules the pending persist
 			// call per click, so only the last click in a rapid burst ever gets persisted.
-			let localCollapsed = !!node.collapsed;
+			let localCollapsed = effectiveCollapsed;
 			let pendingPersist: number | undefined;
 			chevron.addEventListener("click", (evt) => {
 				evt.stopPropagation();
@@ -393,6 +597,10 @@ export class AtlasExplorerView extends ItemView {
 				this.plugin.viewsManager.unplaceUnit(view.id, ref);
 			});
 		}
+		// PR 9 (issue 2): modules never expand inline anymore, in the bucket or the inbox — the icon
+		// opens the Module Contents modal instead. `ref.kind === "folder"` covers both folder-unit and
+		// promoted-folder (both are real folders on disk, per `unitToRef`).
+		if (!info.missing && ref.kind === "folder") this.wireModuleRow(row, iconEl, ref.path);
 
 		this.setPlacementTooltip(row, ref);
 		row.addEventListener("click", () => void this.openRef(ref));
@@ -451,18 +659,13 @@ export class AtlasExplorerView extends ItemView {
 				  });
 
 		// F11: the inbox can be thousands of rows (5,000 files + 2,000 free blocks scale target).
-		// Expanding a folder-unit's internals needs normal document flow (variable row heights),
-		// which the fixed-row-height virtualized path below can't represent — fall back to
-		// rendering every row in that case. Expansion is a deliberate, occasional action on one
-		// folder at a time, not a systemic thousands-of-rows scenario, so this fallback is fine.
-		if (this.expandedFolders.size > 0) {
-			for (const { ref, info, unit } of sorted) this.renderInboxRow(listEl, ref, info, unit, view);
-			return;
-		}
-		this.renderVirtualizedInboxRows(listEl, sorted, view);
+		// The non-virtualized fallback this used to need for expanded folder-unit internals is gone —
+		// PR 9 (issue 2) replaced inline inbox expansion with the Module Contents modal, so every
+		// inbox row is now fixed-height and the virtualized path always applies.
+		this.renderVirtualizedInboxRows(listEl, sorted);
 	}
 
-	private renderInboxRow(container: HTMLElement, ref: UnitRef, info: RowInfo, unit: Unit, view: View): HTMLElement {
+	private renderInboxRow(container: HTMLElement, ref: UnitRef, info: RowInfo): HTMLElement {
 		const row = container.createDiv({ cls: "atlas-row atlas-row-unit" });
 		row.dataset.refKey = unitRefKey(ref);
 		row.setAttr("draggable", "true");
@@ -471,7 +674,9 @@ export class AtlasExplorerView extends ItemView {
 		row.createSpan({ cls: "atlas-row-text", text: info.text });
 		if (info.promoted) row.createSpan({ cls: "atlas-badge", text: "promoted" });
 		if (info.secondary) row.createSpan({ cls: "atlas-row-secondary", text: info.secondary });
-		if (unit.type === "folder-unit") this.addExpandChevron(row, unit.path, container, view);
+		// PR 9 (issue 2): modules never expand inline anymore, in the inbox or the bucket — the icon
+		// opens the Module Contents modal instead (see `wireModuleRow`).
+		if (ref.kind === "folder") this.wireModuleRow(row, iconEl, ref.path);
 
 		this.setPlacementTooltip(row, ref);
 		row.addEventListener("click", () => void this.openRef(ref));
@@ -489,11 +694,7 @@ export class AtlasExplorerView extends ItemView {
 	 * list length. Redraws on scroll (rAF-throttled) rather than re-running the whole view's
 	 * `render()`, so scrolling thousands of rows doesn't re-resolve/re-sort/re-render the toolbar
 	 * and bucket section on every frame. */
-	private renderVirtualizedInboxRows(
-		listEl: HTMLElement,
-		sorted: { ref: UnitRef; info: RowInfo; unit: Unit }[],
-		view: View
-	): void {
+	private renderVirtualizedInboxRows(listEl: HTMLElement, sorted: { ref: UnitRef; info: RowInfo; unit: Unit }[]): void {
 		const viewport = listEl.createDiv({ cls: "atlas-inbox-viewport" });
 		const spacer = viewport.createDiv({ cls: "atlas-inbox-spacer" });
 		spacer.style.height = `${sorted.length * INBOX_ROW_HEIGHT}px`;
@@ -507,8 +708,8 @@ export class AtlasExplorerView extends ItemView {
 			const count = Math.ceil(viewportHeight / INBOX_ROW_HEIGHT) + INBOX_OVERSCAN * 2;
 			const end = Math.min(sorted.length, start + count);
 			for (let i = start; i < end; i++) {
-				const { ref, info, unit } = sorted[i];
-				const row = this.renderInboxRow(spacer, ref, info, unit, view);
+				const { ref, info } = sorted[i];
+				const row = this.renderInboxRow(spacer, ref, info);
 				row.addClass("atlas-row-virtual");
 				row.style.top = `${i * INBOX_ROW_HEIGHT}px`;
 			}
@@ -522,52 +723,11 @@ export class AtlasExplorerView extends ItemView {
 		});
 	}
 
-	// --- F3: expanding a folder-unit's internals from the inbox -----------------------------------
-
-	private addExpandChevron(row: HTMLElement, folderPath: string, container: HTMLElement, view: View): void {
-		const chevron = row.createDiv({ cls: "atlas-chevron atlas-chevron-inline" });
-		const expanded = this.expandedFolders.has(folderPath);
-		setIcon(chevron, expanded ? "chevron-down" : "chevron-right");
-		chevron.addEventListener("click", (evt) => {
-			evt.stopPropagation();
-			if (this.expandedFolders.has(folderPath)) this.expandedFolders.delete(folderPath);
-			else this.expandedFolders.add(folderPath);
-			void this.render();
-		});
-		if (expanded) {
-			const folder = this.plugin.app.vault.getAbstractFileByPath(folderPath);
-			if (folder instanceof TFolder) {
-				const internalsEl = container.createDiv({ cls: "atlas-internals" });
-				this.renderInternals(folder, internalsEl, 1, view);
-			}
-		}
-	}
-
-	private renderInternals(folder: TFolder, container: HTMLElement, depth: number, view: View): void {
-		for (const child of folder.children) {
-			const row = container.createDiv({ cls: "atlas-row atlas-row-internal" });
-			row.style.paddingLeft = `${depth * 16 + 16}px`;
-			row.setAttr("draggable", "true");
-			const iconEl = row.createDiv({ cls: "atlas-icon" });
-			setIcon(iconEl, child instanceof TFolder ? "folder" : "file");
-			row.createSpan({ cls: "atlas-row-text", text: child.name });
-			row.addEventListener("click", () => {
-				if (child instanceof TFile) void this.plugin.app.workspace.getLeaf(false).openFile(child);
-			});
-			row.addEventListener("dragstart", () => {
-				this.dragPayload = { kind: "internal", path: child.path, isFolder: child instanceof TFolder };
-			});
-			row.addEventListener("contextmenu", (evt) => {
-				evt.preventDefault();
-				const menu = new Menu();
-				menu.addItem((item) => item.setTitle("Reveal in native explorer").setIcon("folder-open").onClick(() => this.revealInNativeExplorer(child.path)));
-				menu.showAtMouseEvent(evt);
-			});
-			if (child instanceof TFolder) this.renderInternals(child, container, depth + 1, view);
-		}
-	}
-
-	/** F3: dragging an internal out of the expanded tree manually promotes it and places it. */
+	/** F3: promotes and places a module's internal file/folder — called from the Module Contents
+	 * modal's "Promote and place in view…" context menu item (`promoteAndPlaceFlow`). Used to also be
+	 * reachable by dragging an internal out of an inline-expanded tree; PR 9 (issue 2) replaced that
+	 * inline expansion with the modal, and a modal backdrop makes dragging out into the now-hidden
+	 * bucket impractical, so this is click-driven only now. */
 	private promoteAndPlace(path: string, isFolder: boolean, view: View, parentId: string | null): void {
 		const ref: UnitRef = isFolder ? { kind: "folder", path } : { kind: "file", path };
 		this.plugin.unitIndex.addManualPromotion(ref);
@@ -609,7 +769,7 @@ export class AtlasExplorerView extends ItemView {
 		}
 
 		const viewId = target.viewId;
-		if (target.kind === "node" && payload.kind !== "internal") {
+		if (target.kind === "node") {
 			const view = this.plugin.viewsManager.getView(viewId);
 			const found = view && this.findNodeAnywhere(view.root, target.nodeId);
 			if (found?.node.type === "unit" && found.node.ref?.kind === "folder") {
@@ -644,10 +804,6 @@ export class AtlasExplorerView extends ItemView {
 			}
 		}
 
-		if (payload.kind === "internal") {
-			this.promoteAndPlace(payload.path, payload.isFolder, this.plugin.viewsManager.getView(viewId)!, parentId);
-			return;
-		}
 		const ref = payload.kind === "inbox" ? payload.ref : this.refOfNode(payload);
 		if (!ref) return;
 		this.plugin.viewsManager.placeUnit(viewId, ref, parentId);
@@ -664,7 +820,7 @@ export class AtlasExplorerView extends ItemView {
 	 * by the existing link-graph promotion recompute (does it have a real backlink from outside the
 	 * module?) — this never force-promotes it; a file with no backlinks simply becomes ordinary,
 	 * invisible internals, matching the rest of the model. */
-	private async handleAddToModule(ref: UnitRef, folderPath: string): Promise<void> {
+	private async handleAddToModule(ref: UnitRef, folderPath: string, skipConfirm = false): Promise<void> {
 		const file = this.plugin.app.vault.getAbstractFileByPath(ref.path);
 		const folder = this.plugin.app.vault.getAbstractFileByPath(folderPath);
 		if (!(file instanceof TFile) || !(folder instanceof TFolder)) return;
@@ -694,7 +850,14 @@ export class AtlasExplorerView extends ItemView {
 			});
 		};
 
-		if (this.plugin.settings.confirmAddToModule) {
+		// PR 9 (issue 2, point 5): dropping into a specific nested location via the Module Contents
+		// modal (opened by holding a drag over the module rather than releasing it) skips the confirm
+		// dialog outright, regardless of the setting — the deliberate hold-to-open gesture and picking
+		// an exact destination inside the modal already *is* the confirmation. The setting only ever
+		// gated the plain direct-drop path.
+		if (skipConfirm) {
+			await perform();
+		} else if (this.plugin.settings.confirmAddToModule) {
 			new ConfirmModal(
 				this.plugin.app,
 				`Add "${file.basename}" to "${folder.name}"? This moves the file on disk into that folder — Atlas doesn't otherwise touch a module's internal organization.`,
@@ -808,17 +971,17 @@ export class AtlasExplorerView extends ItemView {
 		const menu = new Menu();
 		menu.addItem((item) =>
 			item
-				.setTitle("Rename meta folder")
+				.setTitle("Rename folder")
 				.setIcon("pencil")
 				.onClick(() => {
-					new TextPromptModal(this.plugin.app, "Rename meta folder", node.label ?? "", (label) => {
+					new TextPromptModal(this.plugin.app, "Rename folder", node.label ?? "", (label) => {
 						this.plugin.viewsManager.renameMetaFolder(view.id, node.id, label);
 					}).open();
 				})
 		);
 		menu.addItem((item) =>
 			item
-				.setTitle("Delete meta folder")
+				.setTitle("Delete folder")
 				.setIcon("trash-2")
 				.onClick(() => {
 					new ConfirmModal(
@@ -839,6 +1002,21 @@ export class AtlasExplorerView extends ItemView {
 			const targets: MetaTarget[] = [{ id: null, label: "(bucket root)" }, ...flattenMetaFolders(view.root)];
 			new MetaFolderSuggestModal(this.plugin.app, targets, (target) => {
 				this.plugin.viewsManager.placeUnit(view.id, ref, target.id);
+			}).open();
+		}).open();
+	}
+
+	/** PR 9: click-driven equivalent of F3's "drag an internal out of the expanded tree to promote
+	 * and place it" — that gesture stopped being possible once module internals moved into a modal
+	 * (a modal backdrop makes dragging out into the now-hidden bucket impractical), so this preserves
+	 * the same underlying capability (`promoteAndPlace`) from the Module Contents modal's own
+	 * context menu instead of a drag. */
+	private promoteAndPlaceFlow(path: string, isFolder: boolean): void {
+		const views = this.plugin.viewsManager.getViews();
+		new ViewSuggestModal(this.plugin.app, views, (view) => {
+			const targets: MetaTarget[] = [{ id: null, label: "(bucket root)" }, ...flattenMetaFolders(view.root)];
+			new MetaFolderSuggestModal(this.plugin.app, targets, (target) => {
+				this.promoteAndPlace(path, isFolder, view, target.id);
 			}).open();
 		}).open();
 	}
@@ -866,6 +1044,84 @@ export class AtlasExplorerView extends ItemView {
 		};
 		const file = this.plugin.app.vault.getAbstractFileByPath(path);
 		if ((file instanceof TFile || file instanceof TFolder) && fileExplorer?.revealInFolder) fileExplorer.revealInFolder(file);
+	}
+
+	// --- PR 9 (issue 2): module row icon — opens Module Contents instead of inline fold/unfold ------
+
+	/** Wires a module row's icon (closed↔open crossfade on hover, "View module contents" tooltip,
+	 * click opens the modal) and its hover-during-drag dwell timer (point 5) — shared by both the
+	 * inbox and bucket unit-row renderers so the two surfaces can't drift apart. `iconEl` is emptied
+	 * and rebuilt with the two stacked icons the crossfade needs. */
+	private wireModuleRow(row: HTMLElement, iconEl: HTMLElement, folderPath: string): void {
+		iconEl.empty();
+		iconEl.addClass("atlas-module-icon");
+		setIcon(iconEl.createSpan({ cls: "atlas-icon-closed" }), "folder");
+		setIcon(iconEl.createSpan({ cls: "atlas-icon-open" }), "folder-open");
+		setTooltip(iconEl, "View module contents");
+		iconEl.addEventListener("click", (evt) => {
+			evt.stopPropagation();
+			this.openModuleContentsModal(folderPath);
+		});
+
+		let dwellTimer: number | undefined;
+		const cancelDwell = () => {
+			if (dwellTimer === undefined) return;
+			window.clearTimeout(dwellTimer);
+			dwellTimer = undefined;
+		};
+		const startDwell = () => {
+			if (!this.dragPayload || dwellTimer !== undefined) return;
+			dwellTimer = window.setTimeout(() => {
+				dwellTimer = undefined;
+				this.openModuleContentsModalForDrag(folderPath);
+			}, MODULE_HOVER_DWELL_MS);
+		};
+		row.addEventListener("dragover", startDwell);
+		row.addEventListener("dragleave", cancelDwell);
+		row.addEventListener("drop", cancelDwell);
+	}
+
+	private trackModuleModal(modal: ModuleContentsModal): void {
+		modal.setFilterText(this.filterText);
+		this.openModuleModal = modal;
+	}
+
+	private openModuleContentsModal(folderPath: string): void {
+		const folder = this.plugin.app.vault.getAbstractFileByPath(folderPath);
+		if (!(folder instanceof TFolder)) return;
+		const modal: ModuleContentsModal = new ModuleContentsModal(this.plugin.app, folder, {
+			onOpenFile: (file) => void this.openRef({ kind: "file", path: file.path }),
+			onRevealInNative: (path) => this.revealInNativeExplorer(path),
+			onPromoteAndPlace: (path, isFolder) => this.promoteAndPlaceFlow(path, isFolder),
+			onCloseCallback: () => {
+				if (this.openModuleModal === modal) this.openModuleModal = null;
+			},
+		});
+		this.trackModuleModal(modal);
+		modal.open();
+	}
+
+	/** Opened via the hover-during-drag dwell timer only — every folder shown (including the
+	 * module's own root) is a live drop target for whatever's still being dragged, and dropping
+	 * anywhere in it skips the usual confirm dialog (`handleAddToModule`'s `skipConfirm`). */
+	private openModuleContentsModalForDrag(folderPath: string): void {
+		const folder = this.plugin.app.vault.getAbstractFileByPath(folderPath);
+		const payload = this.dragPayload;
+		if (!(folder instanceof TFolder) || !payload) return;
+		const ref = payload.kind === "inbox" ? payload.ref : this.refOfNode(payload);
+		if (!ref || ref.kind === "folder") return; // only files/blocks are moveable into a module (see handleDrop)
+		const modal: ModuleContentsModal = new ModuleContentsModal(this.plugin.app, folder, {
+			onOpenFile: (file) => void this.openRef({ kind: "file", path: file.path }),
+			onRevealInNative: (path) => this.revealInNativeExplorer(path),
+			onPromoteAndPlace: (path, isFolder) => this.promoteAndPlaceFlow(path, isFolder),
+			dropTarget: { onDrop: (targetFolderPath) => void this.handleAddToModule(ref, targetFolderPath, true) },
+			onCloseCallback: () => {
+				if (this.openModuleModal === modal) this.openModuleModal = null;
+				this.dragPayload = null; // the drag gesture is considered resolved once this modal closes
+			},
+		});
+		this.trackModuleModal(modal);
+		modal.open();
 	}
 
 	private async copyLink(ref: UnitRef): Promise<void> {
@@ -912,7 +1168,7 @@ export class AtlasExplorerView extends ItemView {
 			if (node.type === "unit" && node.ref) this.plugin.viewsManager.unplaceUnit(view.id, node.ref);
 		} else if (evt.key === "F2" && node.type === "meta") {
 			evt.preventDefault();
-			new TextPromptModal(this.plugin.app, "Rename meta folder", node.label ?? "", (label) => {
+			new TextPromptModal(this.plugin.app, "Rename folder", node.label ?? "", (label) => {
 				this.plugin.viewsManager.renameMetaFolder(view.id, node.id, label);
 			}).open();
 		}

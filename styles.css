@@ -2,8 +2,23 @@
 	display: flex;
 	flex-direction: column;
 	height: 100%;
+	/* Safety net, not the normal path: the inbox section below flex-grows to fill remaining space
+	 * and scrolls internally on its own in the common case. This only kicks in if the bucket alone
+	 * (not virtualized, expected to stay small/user-curated) somehow exceeds the panel's height. */
 	overflow-y: auto;
 	font-size: var(--font-ui-small);
+}
+
+/* PR 9 (issue 3): the inbox previously had a fixed `max-height: 45vh` on its viewport, which read
+ * as "cut off halfway down the page" on a tall sidebar — it was capped at a fraction of the whole
+ * window, not the actual space left after the toolbar/bucket. The inbox section now flex-grows to
+ * fill whatever's left in the panel, and only *it* scrolls internally — the bucket keeps its
+ * natural height above it instead of the whole page scrolling as one blob. */
+.atlas-section.atlas-inbox {
+	display: flex;
+	flex-direction: column;
+	flex: 1 1 auto;
+	min-height: 0;
 }
 
 .atlas-toolbar {
@@ -15,9 +30,26 @@
 	border-bottom: 1px solid var(--background-modifier-border);
 }
 
-.atlas-view-select {
-	max-width: 120px;
-	font-size: var(--font-ui-smaller);
+/* PR 9 (issue 5): replaces the native <select> view-switcher with a section-header-styled button
+ * (click = switch view via the fuzzy picker, right-click = New/Rename/Delete) — slightly larger
+ * than `.atlas-section-header` and with its padding trimmed so it reads as the toolbar's own
+ * identity, not a second "Bucket"/"Inbox" label. */
+.atlas-view-name {
+	font-weight: 600;
+	color: var(--text-normal);
+	text-transform: uppercase;
+	font-size: calc(var(--font-ui-smaller) + 1px);
+	padding: 2px 4px;
+	border-radius: 4px;
+	cursor: pointer;
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	max-width: 110px;
+}
+
+.atlas-view-name:hover {
+	background: var(--background-modifier-hover);
 }
 
 .atlas-toolbar-sep {
@@ -42,8 +74,29 @@
 	background: var(--background-modifier-hover);
 }
 
+/* PR 9 (issue 5): the filter box is hidden until its toolbar button is toggled on, then reveals
+ * with the same `grid-template-columns: 0fr` → `1fr` technique `.atlas-meta-children` uses on the
+ * rows axis — `.atlas-filter-wrap-inner`'s `overflow: hidden` clips the input as the track
+ * collapses, and since the track size is an explicit `fr` value the input's own `min-width` below
+ * can't stop it from reaching zero. */
+.atlas-filter-wrap {
+	display: grid;
+	grid-template-columns: 0fr;
+	transition: grid-template-columns 160ms ease;
+}
+
+.atlas-filter-wrap.is-revealed {
+	grid-template-columns: 1fr;
+}
+
+.atlas-filter-wrap-inner {
+	overflow: hidden;
+	min-width: 0;
+}
+
 .atlas-filter {
 	flex: 1;
+	width: 100%;
 	min-width: 80px;
 	font-size: var(--font-ui-smaller);
 	background: var(--background-secondary);
@@ -112,10 +165,13 @@
 	min-height: 0;
 }
 
-/* F11: bounded, independently-scrollable viewport so the inbox can hold thousands of rows without
- * every row living in the DOM at once — see `renderVirtualizedInboxRows` in explorer-view.ts. */
+/* F11: independently-scrollable viewport so the inbox can hold thousands of rows without every row
+ * living in the DOM at once — see `renderVirtualizedInboxRows` in explorer-view.ts. PR 9 (issue 3):
+ * flex-grows to fill whatever space `.atlas-section.atlas-inbox` has left, instead of a fixed
+ * `max-height: 45vh` that read as an arbitrary cutoff partway down a tall sidebar. */
 .atlas-inbox-viewport {
-	max-height: 45vh;
+	flex: 1 1 auto;
+	min-height: 80px;
 	overflow-y: auto;
 	position: relative;
 }
@@ -176,6 +232,36 @@
 	color: var(--icon-color);
 }
 
+/* PR 9 (issue 2, point 4): a module row's icon crossfades closed→open on hover instead of a real
+ * SVG morph (not feasible without a third-party icon-morphing library) — two icons stacked via
+ * `position: absolute` inside the same cell, opacity-swapped on `:hover`. The tooltip itself
+ * ("View module contents") is wired in TS via `setTooltip`, Obsidian's own tooltip system. */
+.atlas-module-icon {
+	position: relative;
+	width: var(--icon-size, 16px);
+	height: var(--icon-size, 16px);
+}
+
+.atlas-icon-closed,
+.atlas-icon-open {
+	position: absolute;
+	inset: 0;
+	display: flex;
+	transition: opacity 120ms ease;
+}
+
+.atlas-icon-open {
+	opacity: 0;
+}
+
+.atlas-module-icon:hover .atlas-icon-closed {
+	opacity: 0;
+}
+
+.atlas-module-icon:hover .atlas-icon-open {
+	opacity: 1;
+}
+
 .atlas-row-text {
 	overflow: hidden;
 	text-overflow: ellipsis;
@@ -210,14 +296,38 @@
 	color: var(--text-normal);
 }
 
-.atlas-internals {
-	background: var(--background-secondary);
-}
-
 .atlas-row-internal {
 	color: var(--text-muted);
 }
 
 .atlas-free-block-link {
 	cursor: pointer;
+}
+
+/* PR 9 (issue 6): highlights a filter match inside an open Module Contents modal — the modal's own
+ * rows aren't otherwise part of the bucket/inbox filtering pass, so this is the only visual cue a
+ * match happened once you've drilled into a module. */
+.atlas-row-filter-match {
+	background: var(--text-highlight-bg);
+}
+
+/* PR 9 (issue 2): Module Contents modal — a plain scrollable tree, deliberately styled close to
+ * the explorer's own `.atlas-row` rows so browsing a module's internals doesn't feel like a
+ * different app. */
+.atlas-module-modal-content {
+	max-height: 70vh;
+	overflow-y: auto;
+}
+
+.atlas-module-modal-tree {
+	display: flex;
+	flex-direction: column;
+	gap: 1px;
+}
+
+.atlas-module-modal-root {
+	font-weight: 600;
+	margin-bottom: 4px;
+	border-bottom: 1px solid var(--background-modifier-border);
+	border-radius: 0;
 }
