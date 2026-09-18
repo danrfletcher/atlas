@@ -85,6 +85,31 @@
 
 .atlas-node-list {
 	min-height: 8px;
+	/* Visible trailing space so there's always somewhere obvious to drop "at bucket root" even
+	 * when the tree already has rows — the drop target itself now covers the whole section (see
+	 * `renderBucketSection`), this just makes that reachable area visually discoverable too. */
+	padding-bottom: 16px;
+}
+
+/* Reveal animation for meta-folder collapse/expand, matching Obsidian's own native file-tree feel.
+ * `grid-template-rows: 1fr` → `0fr` is the standard technique for animating to/from an implicit
+ * "auto" height without JS measuring `scrollHeight` — the inner wrapper's `overflow: hidden` is
+ * what actually clips the content as the row shrinks. Duration must match
+ * `META_COLLAPSE_TRANSITION_MS` in explorer-view.ts, which delays persisting the new collapsed
+ * state until this transition has had time to finish. */
+.atlas-meta-children {
+	display: grid;
+	grid-template-rows: 1fr;
+	transition: grid-template-rows 160ms ease;
+}
+
+.atlas-meta-children.is-collapsed {
+	grid-template-rows: 0fr;
+}
+
+.atlas-meta-children-inner {
+	overflow: hidden;
+	min-height: 0;
 }
 
 /* F11: bounded, independently-scrollable viewport so the inbox can hold thousands of rows without
