@@ -438,11 +438,11 @@ export class AtlasExplorerView extends ItemView {
 		});
 		this.toolbarButton(toolbar, "chevrons-down-up", "Collapse all", () => this.plugin.viewsManager.collapseAll(view.id));
 		// PR 11: same fix as the bucket/inbox sections — toggling `filterRevealed` used to call
-		// `render()` immediately, which tears down and rebuilds the whole toolbar (including
-		// `filterWrap`) already in its new state within the same tick, so the CSS transition on
-		// `.atlas-filter-wrap` never had a persisting element to animate from/to. `filterWrap` is
-		// declared further down (still fine — this closure only reads it at click time, long after
-		// the `const` has run), and the actual state change + re-render is delayed the same way.
+		// `render()` immediately, which tears down and rebuilds the whole toolbar (including the
+		// filter row) already in its new state within the same tick, so the CSS transition never had
+		// a persisting element to animate from/to. `filterRow` is declared further down (still fine —
+		// this closure only reads it at click time, long after the `const` has run), and the actual
+		// state change + re-render is delayed the same way.
 		//
 		// Review follow-up (A14): the first version of this fix read `!this.filterRevealed` directly
 		// inside the click handler — but that field only actually updates once the delayed block
@@ -456,7 +456,7 @@ export class AtlasExplorerView extends ItemView {
 		this.toolbarButton(toolbar, "search", "Filter", () => {
 			localRevealed = !localRevealed;
 			const nowRevealed = localRevealed;
-			filterWrap.toggleClass("is-revealed", nowRevealed);
+			filterRow.toggleClass("is-collapsed", !nowRevealed);
 			if (filterRevealTimer !== undefined) window.clearTimeout(filterRevealTimer);
 			filterRevealTimer = window.setTimeout(() => {
 				filterRevealTimer = undefined;
@@ -473,10 +473,17 @@ export class AtlasExplorerView extends ItemView {
 			}, COLLAPSE_TRANSITION_MS);
 		});
 
-		const filterWrap = toolbar.createDiv({ cls: "atlas-filter-wrap" });
-		filterWrap.toggleClass("is-revealed", this.filterRevealed);
-		const filterInner = filterWrap.createDiv({ cls: "atlas-filter-wrap-inner" });
-		const filterInput = filterInner.createEl("input", { cls: "atlas-filter", attr: { type: "text", placeholder: "Filter…" } });
+		// A separate block-level row below the toolbar's icon row, not an inline-growing box within
+		// it — the icon row has `flex-wrap: wrap` for its own overflow handling, and a horizontally
+		// growing filter box inline with those icons would (and did, per Dan's testing) eventually
+		// force a line-wrap mid-animation: an instant, un-animatable reflow that jumped the
+		// bucket/inbox sections below down abruptly instead of moving them smoothly. Revealing is a
+		// height transition on its own row instead (`.atlas-meta-children`, same technique as
+		// everywhere else in the plugin), which the icon row's wrapping can't interfere with.
+		const filterRow = container.createDiv({ cls: "atlas-meta-children atlas-filter-row" });
+		filterRow.toggleClass("is-collapsed", !this.filterRevealed);
+		const filterRowInner = filterRow.createDiv({ cls: "atlas-meta-children-inner" });
+		const filterInput = filterRowInner.createEl("input", { cls: "atlas-filter", attr: { type: "text", placeholder: "Filter…" } });
 		filterInput.value = this.filterText;
 		this.filterInputEl = filterInput;
 		filterInput.addEventListener("input", () => {
