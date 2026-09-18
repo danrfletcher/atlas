@@ -21,10 +21,14 @@ const INBOX_OVERSCAN = 8;
  * `.atlas-chevron`'s width (14px) + `.atlas-row`'s gap (6px) exactly, or the icons drift apart —
  * this was previously 16, 4px short of the real 20, which is exactly the misalignment reported. */
 const UNIT_ROW_CHEVRON_OFFSET = 20;
-/** Must match `.atlas-meta-children`'s `transition-duration` in styles.css — the state-persisting
- * `setNodeCollapsed` call (which triggers a full re-render) is delayed by this long so the CSS
- * collapse/expand transition finishes playing before the DOM gets rebuilt out from under it. */
-const META_COLLAPSE_TRANSITION_MS = 160;
+/** Must match `.atlas-meta-children`'s and `.atlas-filter-wrap`'s `transition-duration` in
+ * styles.css — every state-persisting toggle that triggers a full re-render (meta-folder collapse,
+ * the bucket/inbox section headers, the filter-reveal toggle) delays that re-render by this long so
+ * the CSS collapse/expand transition finishes playing before the DOM gets rebuilt out from under
+ * it. PR 11: originally only the meta-folder chevron used this trick (hence the old name); the
+ * bucket/inbox/filter toggles shipped in PR 9 without it, which is why none of them actually
+ * animated despite having the CSS for it — same fix, applied to the rest of the collapse toggles. */
+const COLLAPSE_TRANSITION_MS = 160;
 /** PR 9 (issue 2, point 5): how long a drag has to hover a module (without dropping) before its
  * Contents modal opens automatically, mirroring the "hover a folder while dragging to expand it"
  * pattern most native file managers use. */
@@ -433,23 +437,53 @@ export class AtlasExplorerView extends ItemView {
 			void this.render();
 		});
 		this.toolbarButton(toolbar, "chevrons-down-up", "Collapse all", () => this.plugin.viewsManager.collapseAll(view.id));
+		// PR 11: same fix as the bucket/inbox sections — toggling `filterRevealed` used to call
+		// `render()` immediately, which tears down and rebuilds the whole toolbar (including the
+		// filter row) already in its new state within the same tick, so the CSS transition never had
+		// a persisting element to animate from/to. `filterRow` is declared further down (still fine —
+		// this closure only reads it at click time, long after the `const` has run), and the actual
+		// state change + re-render is delayed the same way.
+		//
+		// Review follow-up (A14): the first version of this fix read `!this.filterRevealed` directly
+		// inside the click handler — but that field only actually updates once the delayed block
+		// below runs, so a second click inside the 160ms window read the same stale value as the
+		// first and re-applied the same direction instead of toggling back. Exactly the race
+		// A11/A12 already fixed once for the meta-folder chevron; `localRevealed` here is that same
+		// fix — seeded once, flipped from its own prior value on every click, never re-read from
+		// `this.filterRevealed` until the eventual `render()` replaces this whole closure anyway.
+		let localRevealed = this.filterRevealed;
+		let filterRevealTimer: number | undefined;
 		this.toolbarButton(toolbar, "search", "Filter", () => {
-			this.filterRevealed = !this.filterRevealed;
-			if (this.filterRevealed) {
-				this.focusFilterOnNextRender = true;
-			} else if (this.filterText) {
-				// Closing the reveal always returns to the unfiltered view — a hidden input still
-				// silently filtering the list would be confusing, with no visible query to explain it.
-				this.filterText = "";
-				this.restoreFoldStateAfterFilterClear();
-			}
-			void this.render();
+			localRevealed = !localRevealed;
+			const nowRevealed = localRevealed;
+			filterRow.toggleClass("is-collapsed", !nowRevealed);
+			if (filterRevealTimer !== undefined) window.clearTimeout(filterRevealTimer);
+			filterRevealTimer = window.setTimeout(() => {
+				filterRevealTimer = undefined;
+				this.filterRevealed = nowRevealed;
+				if (nowRevealed) {
+					this.focusFilterOnNextRender = true;
+				} else if (this.filterText) {
+					// Closing the reveal always returns to the unfiltered view — a hidden input still
+					// silently filtering the list would be confusing, with no visible query to explain it.
+					this.filterText = "";
+					this.restoreFoldStateAfterFilterClear();
+				}
+				void this.render();
+			}, COLLAPSE_TRANSITION_MS);
 		});
 
-		const filterWrap = toolbar.createDiv({ cls: "atlas-filter-wrap" });
-		filterWrap.toggleClass("is-revealed", this.filterRevealed);
-		const filterInner = filterWrap.createDiv({ cls: "atlas-filter-wrap-inner" });
-		const filterInput = filterInner.createEl("input", { cls: "atlas-filter", attr: { type: "text", placeholder: "Filter…" } });
+		// A separate block-level row below the toolbar's icon row, not an inline-growing box within
+		// it — the icon row has `flex-wrap: wrap` for its own overflow handling, and a horizontally
+		// growing filter box inline with those icons would (and did, per Dan's testing) eventually
+		// force a line-wrap mid-animation: an instant, un-animatable reflow that jumped the
+		// bucket/inbox sections below down abruptly instead of moving them smoothly. Revealing is a
+		// height transition on its own row instead (`.atlas-meta-children`, same technique as
+		// everywhere else in the plugin), which the icon row's wrapping can't interfere with.
+		const filterRow = container.createDiv({ cls: "atlas-meta-children atlas-filter-row" });
+		filterRow.toggleClass("is-collapsed", !this.filterRevealed);
+		const filterRowInner = filterRow.createDiv({ cls: "atlas-meta-children-inner" });
+		const filterInput = filterRowInner.createEl("input", { cls: "atlas-filter", attr: { type: "text", placeholder: "Filter…" } });
 		filterInput.value = this.filterText;
 		this.filterInputEl = filterInput;
 		filterInput.addEventListener("input", () => {
@@ -505,22 +539,43 @@ export class AtlasExplorerView extends ItemView {
 		const chevron = header.createDiv({ cls: "atlas-chevron" });
 		setIcon(chevron, this.bucketCollapsed ? "chevron-right" : "chevron-down");
 		header.createSpan({ text: "Bucket" });
-		header.addEventListener("click", () => {
-			this.bucketCollapsed = !this.bucketCollapsed;
-			void this.render();
-		});
 
-		if (this.bucketCollapsed) return;
+		// PR 11: the whole section's content used to only render at all when expanded (`if
+		// (this.bucketCollapsed) return`), and the header click handler triggered an immediate full
+		// re-render — so there was never a persisting DOM node for the CSS transition to animate
+		// from/to, just a hard snap between "rendered" and "not rendered". Same fix as the
+		// meta-folder chevron: content always renders into a dedicated wrapper, the collapse is a
+		// CSS transition on that wrapper, and the state-persisting re-render is delayed until the
+		// transition has had time to play.
+		const sectionWrap = container.createDiv({ cls: "atlas-meta-children" });
+		sectionWrap.toggleClass("is-collapsed", this.bucketCollapsed);
+		const sectionInner = sectionWrap.createDiv({ cls: "atlas-meta-children-inner" });
 
 		// The whole section (not just the list of existing rows) is the bucket-root drop target —
 		// registering it on `listEl` alone left almost no reliable empty area to hit once a few
 		// rows existed (the div's own height hugs its content in normal block flow, so dropping
 		// just below the last row landed on `container`, which had no drop handler at all). Any
-		// specific row still wins first via its own drop handler's `stopPropagation`.
-		this.makeDropZone(container, { kind: "bucket-root", viewId: view.id });
+		// specific row still wins first via its own drop handler's `stopPropagation`. Safe to keep
+		// registered while visually collapsed — the wrapper's `overflow: hidden` + zero-height grid
+		// track means collapsed content has no interactable area regardless.
+		this.makeDropZone(sectionInner, { kind: "bucket-root", viewId: view.id });
 
-		const listEl = container.createDiv({ cls: "atlas-node-list" });
+		const listEl = sectionInner.createDiv({ cls: "atlas-node-list" });
 		await this.renderNodeList(view.root, listEl, view, 0);
+
+		let localCollapsed = this.bucketCollapsed;
+		let pendingPersist: number | undefined;
+		header.addEventListener("click", () => {
+			localCollapsed = !localCollapsed;
+			setIcon(chevron, localCollapsed ? "chevron-right" : "chevron-down");
+			sectionWrap.toggleClass("is-collapsed", localCollapsed);
+			if (pendingPersist !== undefined) window.clearTimeout(pendingPersist);
+			pendingPersist = window.setTimeout(() => {
+				pendingPersist = undefined;
+				this.bucketCollapsed = localCollapsed;
+				void this.render();
+			}, COLLAPSE_TRANSITION_MS);
+		});
 	}
 
 	private async renderNodeList(nodes: ViewNode[], container: HTMLElement, view: View, depth: number): Promise<void> {
@@ -620,7 +675,7 @@ export class AtlasExplorerView extends ItemView {
 				pendingPersist = window.setTimeout(() => {
 					pendingPersist = undefined;
 					this.plugin.viewsManager.setNodeCollapsed(view.id, node.id, localCollapsed);
-				}, META_COLLAPSE_TRANSITION_MS);
+				}, COLLAPSE_TRANSITION_MS);
 			});
 			return;
 		}
@@ -687,14 +742,21 @@ export class AtlasExplorerView extends ItemView {
 			});
 		}
 
-		header.addEventListener("click", () => {
-			this.inboxCollapsed = !this.inboxCollapsed;
-			void this.render();
-		});
+		// PR 11: same fix as the bucket section and the meta-folder chevron — content always renders
+		// into a dedicated wrapper so the collapse is a CSS transition, not a hard snap between
+		// "rendered" and "not rendered", and the state-persisting re-render is delayed to let the
+		// transition play first. The inbox additionally needs to stop claiming all remaining
+		// vertical space (via `container`'s own `flex: 1 1 auto`, PR 9 issue 3) once collapsed —
+		// otherwise a collapsed inbox would leave a tall blank void instead of shrinking to just its
+		// header, since flex-grow doesn't know or care that its content just went to zero height.
+		// `.atlas-section.atlas-inbox.is-collapsed` (styles.css) overrides that back to natural
+		// height; `container` is the very element that class already targets.
+		container.toggleClass("is-collapsed", this.inboxCollapsed);
+		const sectionWrap = container.createDiv({ cls: "atlas-meta-children" });
+		sectionWrap.toggleClass("is-collapsed", this.inboxCollapsed);
+		const sectionInner = sectionWrap.createDiv({ cls: "atlas-meta-children-inner" });
 
-		if (this.inboxCollapsed) return;
-
-		const listEl = container.createDiv({ cls: "atlas-node-list" });
+		const listEl = sectionInner.createDiv({ cls: "atlas-node-list" });
 		this.makeDropZone(listEl, { kind: "inbox-area", viewId: view.id });
 
 		const resolved = await Promise.all(
@@ -717,6 +779,21 @@ export class AtlasExplorerView extends ItemView {
 		// PR 9 (issue 2) replaced inline inbox expansion with the Module Contents modal, so every
 		// inbox row is now fixed-height and the virtualized path always applies.
 		this.renderVirtualizedInboxRows(listEl, sorted);
+
+		let localCollapsed = this.inboxCollapsed;
+		let pendingPersist: number | undefined;
+		header.addEventListener("click", () => {
+			localCollapsed = !localCollapsed;
+			setIcon(chevron, localCollapsed ? "chevron-right" : "chevron-down");
+			container.toggleClass("is-collapsed", localCollapsed);
+			sectionWrap.toggleClass("is-collapsed", localCollapsed);
+			if (pendingPersist !== undefined) window.clearTimeout(pendingPersist);
+			pendingPersist = window.setTimeout(() => {
+				pendingPersist = undefined;
+				this.inboxCollapsed = localCollapsed;
+				void this.render();
+			}, COLLAPSE_TRANSITION_MS);
+		});
 	}
 
 	private renderInboxRow(container: HTMLElement, ref: UnitRef, info: RowInfo): HTMLElement {

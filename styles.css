@@ -21,13 +21,44 @@
 	min-height: 0;
 }
 
+/* PR 11: while collapsed, the section should shrink to its header's natural height instead of
+ * continuing to claim all remaining vertical space as blank void — the flex-grow above is only
+ * correct while there's content filling it. */
+.atlas-section.atlas-inbox.is-collapsed {
+	flex: 0 0 auto;
+}
+
+/* PR 11: the inbox's own fold wrapper needs to participate in the same "fill remaining space" flex
+ * chain `.atlas-inbox-viewport` already relies on (PR 9 issue 3) — the generic `.atlas-meta-children`
+ * rule below is shared with the bucket section and meta-folders, none of which need to fill
+ * anything, so these overrides are scoped to the inbox specifically. */
+.atlas-section.atlas-inbox > .atlas-meta-children {
+	flex: 1 1 auto;
+	min-height: 0;
+}
+
+.atlas-section.atlas-inbox > .atlas-meta-children > .atlas-meta-children-inner {
+	display: flex;
+	flex-direction: column;
+	height: 100%;
+}
+
+.atlas-section.atlas-inbox .atlas-node-list {
+	display: flex;
+	flex-direction: column;
+	flex: 1 1 auto;
+	min-height: 0;
+}
+
 .atlas-toolbar {
 	display: flex;
 	align-items: center;
 	gap: 4px;
 	padding: 6px 8px;
 	flex-wrap: wrap;
-	border-bottom: 1px solid var(--background-modifier-border);
+	/* No border-bottom here — the divider lives on `.atlas-filter-row` below instead, so it stays
+	 * anchored to the bottom of the (possibly-animating) filter row rather than always sitting
+	 * right below the icon row, regardless of whether the filter is revealed. */
 }
 
 /* PR 9 (issue 5): replaces the native <select> view-switcher with a section-header-styled button
@@ -74,35 +105,37 @@
 	background: var(--background-modifier-hover);
 }
 
-/* PR 9 (issue 5): the filter box is hidden until its toolbar button is toggled on, then reveals
- * with the same `grid-template-columns: 0fr` → `1fr` technique `.atlas-meta-children` uses on the
- * rows axis — `.atlas-filter-wrap-inner`'s `overflow: hidden` clips the input as the track
- * collapses, and since the track size is an explicit `fr` value the input's own `min-width` below
- * can't stop it from reaching zero. */
-.atlas-filter-wrap {
-	display: grid;
-	grid-template-columns: 0fr;
-	transition: grid-template-columns 160ms ease;
+/* PR 9 (issue 5) / PR 11: the filter box is hidden until its toolbar button is toggled on, then
+ * reveals as its own full-width row below the toolbar's icon row — reusing the shared
+ * `.atlas-meta-children` vertical collapse technique (`grid-template-rows: 0fr` → `1fr`) instead of
+ * growing horizontally inline with the icons. The original version grew the input's *width* inline
+ * within `.atlas-toolbar`, which has `flex-wrap: wrap` — once the growing box got wide enough
+ * mid-animation, the toolbar wrapped to a second line, an instant, un-animatable reflow that made
+ * the bucket/inbox sections below jump down abruptly instead of moving smoothly (Dan caught this
+ * live testing PR 11). A separate block-level row sidesteps the icon row's wrapping entirely — the
+ * row's own height animating 0 → auto is what makes the content below move down smoothly instead.
+ * The divider between the toolbar/filter area and the bucket section lives here too (not on
+ * `.atlas-toolbar`), so it sits right above the bucket at all times and slides down with the row as
+ * it opens, instead of always sitting right below the icon row. */
+.atlas-filter-row {
+	padding: 0 8px;
+	border-bottom: 1px solid var(--background-modifier-border);
 }
 
-.atlas-filter-wrap.is-revealed {
-	grid-template-columns: 1fr;
-}
-
-.atlas-filter-wrap-inner {
-	overflow: hidden;
-	min-width: 0;
-}
-
+/* Deliberately no padding/margin on `.atlas-meta-children-inner` here (the grid item the collapse
+ * animation stretches to the row's track size) — found live: padding on that element is *additive*
+ * to the 0fr-collapsed track size, not absorbed by it, so the row never fully reached 0 height and
+ * left a persistent, glitchy-looking sliver when "closed". The `.atlas-filter` input's own margin
+ * below provides the same breathing room instead, since margin on a descendant *inside* the
+ * overflow-hidden wrapper does correctly disappear when the row collapses. */
 .atlas-filter {
-	flex: 1;
 	width: 100%;
-	min-width: 80px;
 	font-size: var(--font-ui-smaller);
 	background: var(--background-secondary);
 	border: 1px solid var(--background-modifier-border);
 	border-radius: 4px;
 	padding: 2px 6px;
+	margin: 6px 0;
 }
 
 .atlas-section-header {
