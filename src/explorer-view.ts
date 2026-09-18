@@ -1,6 +1,6 @@
 import { App, FuzzySuggestModal, ItemView, Menu, Modal, Notice, TFile, TFolder, WorkspaceLeaf, setIcon, setTooltip } from "obsidian";
 import type AtlasPlugin from "./main";
-import { Unit, UnitRef, View, ViewNode, unitRefKey, unitRefsEqual, unitToRef } from "./types";
+import { Unit, UnitRef, View, ViewNode, unitRefKey, unitToRef } from "./types";
 import { MetaTarget, flattenMetaFolders } from "./views";
 import { resolveUnit } from "./unit-display";
 import { TextPromptModal, ConfirmModal } from "./modals";
@@ -16,11 +16,6 @@ const INBOX_ROW_HEIGHT = 28;
 /** Extra rows rendered above/below the visible window, so a fast scroll doesn't show blank gaps
  * before the next frame's window recomputes. */
 const INBOX_OVERSCAN = 8;
-/** A bucket unit row has no `.atlas-chevron` before its icon (only meta rows do); this offset
- * stands in for one so unit-row icons line up with meta-row icons at the same depth. Must match
- * `.atlas-chevron`'s width (14px) + `.atlas-row`'s gap (6px) exactly, or the icons drift apart —
- * this was previously 16, 4px short of the real 20, which is exactly the misalignment reported. */
-const UNIT_ROW_CHEVRON_OFFSET = 20;
 /** Must match `.atlas-meta-children`'s and `.atlas-filter-wrap`'s `transition-duration` in
  * styles.css — every state-persisting toggle that triggers a full re-render (meta-folder collapse,
  * the bucket/inbox section headers, the filter-reveal toggle) delays that re-render by this long so
@@ -615,6 +610,59 @@ export class AtlasExplorerView extends ItemView {
 		this.preFilterCollapsedState = null;
 	}
 
+	/** PR 12: shared fold/unfold wiring for any node with children — meta folders (always) and now
+	 * unit nodes that have gained meta-nested children (only once they have at least one, per the
+	 * grilling decision that a chevron shouldn't appear pre-emptively). Handles the filter-driven
+	 * auto-reveal (PR 9 issue 6), the chevron icon, the animated children wrapper, and the same
+	 * optimistic-local-state-then-delayed-persist click pattern used everywhere else fold/unfold
+	 * happens in this plugin — extracted here instead of duplicated per node type so the two can't
+	 * drift out of sync with each other the way duplicated logic has caused bugs before in this build. */
+	private async renderFoldableChildren(node: ViewNode, chevron: HTMLElement, container: HTMLElement, view: View, depth: number): Promise<void> {
+		// PR 9 (issue 6): a filter-matching descendant force-reveals this node regardless of its own
+		// collapsed state, so a match is never hidden behind a stale fold. The state from just before
+		// the filter started touching it is remembered (once) so clearing the filter can put it back
+		// exactly, rather than leaving every node the filter happened to open expanded.
+		const filterActive = !!this.filterText.trim();
+		let effectiveCollapsed = !!node.collapsed;
+		if (filterActive) {
+			if (!this.preFilterCollapsedState) this.preFilterCollapsedState = new Map();
+			if (!this.preFilterCollapsedState.has(node.id)) this.preFilterCollapsedState.set(node.id, node.collapsed);
+			if (await this.subtreeHasMatch(node.children)) effectiveCollapsed = false;
+		}
+		setIcon(chevron, effectiveCollapsed ? "chevron-right" : "chevron-down");
+
+		// Children always render (regardless of collapsed state) inside a dedicated wrapper, so
+		// collapsing/expanding can be a CSS transition on that wrapper (grid-template-rows 1fr↔0fr,
+		// the standard height:auto-safe collapse technique) instead of the row disappearing from
+		// the DOM outright. The state-persisting call (which triggers a full re-render via
+		// `onChange`) is deliberately delayed to let the transition actually play first — firing
+		// it immediately would rebuild the DOM from scratch on the next tick and cut the animation
+		// short with a hard snap instead of a slide.
+		const childrenWrap = container.createDiv({ cls: "atlas-meta-children" });
+		childrenWrap.toggleClass("is-collapsed", effectiveCollapsed);
+		const childrenInner = childrenWrap.createDiv({ cls: "atlas-meta-children-inner" });
+		await this.renderNodeList(node.children, childrenInner, view, depth + 1);
+
+		// Local optimistic state, not `node.collapsed` — real bug caught in review: `node.collapsed`
+		// only updates once the delayed `setNodeCollapsed` below actually runs, so a second click
+		// inside that window previously read the same stale value as the first and re-applied the
+		// same direction instead of toggling back. Also cancels/reschedules the pending persist
+		// call per click, so only the last click in a rapid burst ever gets persisted.
+		let localCollapsed = effectiveCollapsed;
+		let pendingPersist: number | undefined;
+		chevron.addEventListener("click", (evt) => {
+			evt.stopPropagation();
+			localCollapsed = !localCollapsed;
+			setIcon(chevron, localCollapsed ? "chevron-right" : "chevron-down");
+			childrenWrap.toggleClass("is-collapsed", localCollapsed);
+			if (pendingPersist !== undefined) window.clearTimeout(pendingPersist);
+			pendingPersist = window.setTimeout(() => {
+				pendingPersist = undefined;
+				this.plugin.viewsManager.setNodeCollapsed(view.id, node.id, localCollapsed);
+			}, COLLAPSE_TRANSITION_MS);
+		});
+	}
+
 	private async renderNode(node: ViewNode, container: HTMLElement, view: View, depth: number): Promise<void> {
 		if (node.type === "meta") {
 			const row = container.createDiv({ cls: "atlas-row atlas-row-meta" });
@@ -634,49 +682,7 @@ export class AtlasExplorerView extends ItemView {
 				this.showMetaFolderMenu(evt, node, view);
 			});
 
-			// PR 9 (issue 6): a filter-matching descendant force-reveals this folder regardless of its
-			// own collapsed state, so a match is never hidden behind a stale fold. The state from just
-			// before the filter started touching it is remembered (once) so clearing the filter can put
-			// it back exactly, rather than leaving every folder the filter happened to open expanded.
-			const filterActive = !!this.filterText.trim();
-			let effectiveCollapsed = !!node.collapsed;
-			if (filterActive) {
-				if (!this.preFilterCollapsedState) this.preFilterCollapsedState = new Map();
-				if (!this.preFilterCollapsedState.has(node.id)) this.preFilterCollapsedState.set(node.id, node.collapsed);
-				if (await this.subtreeHasMatch(node.children)) effectiveCollapsed = false;
-			}
-			setIcon(chevron, effectiveCollapsed ? "chevron-right" : "chevron-down");
-
-			// Children always render (regardless of collapsed state) inside a dedicated wrapper, so
-			// collapsing/expanding can be a CSS transition on that wrapper (grid-template-rows 1fr↔0fr,
-			// the standard height:auto-safe collapse technique) instead of the row disappearing from
-			// the DOM outright. The state-persisting call (which triggers a full re-render via
-			// `onChange`) is deliberately delayed to let the transition actually play first — firing
-			// it immediately would rebuild the DOM from scratch on the next tick and cut the animation
-			// short with a hard snap instead of a slide.
-			const childrenWrap = container.createDiv({ cls: "atlas-meta-children" });
-			childrenWrap.toggleClass("is-collapsed", effectiveCollapsed);
-			const childrenInner = childrenWrap.createDiv({ cls: "atlas-meta-children-inner" });
-			await this.renderNodeList(node.children, childrenInner, view, depth + 1);
-
-			// Local optimistic state, not `node.collapsed` — real bug caught in review: `node.collapsed`
-			// only updates once the delayed `setNodeCollapsed` below actually runs, so a second click
-			// inside that window previously read the same stale value as the first and re-applied the
-			// same direction instead of toggling back. Also cancels/reschedules the pending persist
-			// call per click, so only the last click in a rapid burst ever gets persisted.
-			let localCollapsed = effectiveCollapsed;
-			let pendingPersist: number | undefined;
-			chevron.addEventListener("click", (evt) => {
-				evt.stopPropagation();
-				localCollapsed = !localCollapsed;
-				setIcon(chevron, localCollapsed ? "chevron-right" : "chevron-down");
-				childrenWrap.toggleClass("is-collapsed", localCollapsed);
-				if (pendingPersist !== undefined) window.clearTimeout(pendingPersist);
-				pendingPersist = window.setTimeout(() => {
-					pendingPersist = undefined;
-					this.plugin.viewsManager.setNodeCollapsed(view.id, node.id, localCollapsed);
-				}, COLLAPSE_TRANSITION_MS);
-			});
+			await this.renderFoldableChildren(node, chevron, container, view, depth);
 			return;
 		}
 
@@ -688,9 +694,17 @@ export class AtlasExplorerView extends ItemView {
 		const row = container.createDiv({ cls: "atlas-row atlas-row-unit" });
 		if (info.missing) row.addClass("atlas-missing");
 		row.dataset.refKey = unitRefKey(ref);
-		row.style.paddingLeft = `${depth * 16 + UNIT_ROW_CHEVRON_OFFSET}px`;
+		row.style.paddingLeft = `${depth * 16}px`;
 		row.setAttr("draggable", "true");
 
+		// PR 12: every row now gets a chevron slot, matching meta rows and the Module Contents modal
+		// (PR 10) — real content only if this unit has meta-nested children (a chevron appears only
+		// once a node actually gets its first child, never pre-emptively), otherwise left empty
+		// purely to keep icons aligned at the same depth regardless of type. Replaces the old fixed
+		// `UNIT_ROW_CHEVRON_OFFSET` padding hack, which just simulated a chevron's width in CSS —
+		// an actual (possibly empty) element is what PR 10 already found to be the reliable fix for
+		// this exact alignment problem, so reusing it here instead of a second magic-number offset.
+		const chevron = row.createDiv({ cls: "atlas-chevron" });
 		const iconEl = row.createDiv({ cls: "atlas-icon" });
 		setIcon(iconEl, info.icon);
 		row.createSpan({ cls: "atlas-row-text", text: info.text });
@@ -721,6 +735,8 @@ export class AtlasExplorerView extends ItemView {
 			evt.preventDefault();
 			this.showUnitMenu(evt, ref, view, node.id);
 		});
+
+		if (node.children.length > 0) await this.renderFoldableChildren(node, chevron, container, view, depth);
 	}
 
 	// --- inbox -----------------------------------------------------------------------------------
@@ -886,61 +902,64 @@ export class AtlasExplorerView extends ItemView {
 		});
 	}
 
-	/** The only branch that ever calls `fileManager.renameFile` in the whole explorer — dropping a
-	 * file/block directly onto a folder-unit (see `handleAddToModule`), a deliberate, confirmable
-	 * exception to Part 7's "never touches disk" rule for everything else here. */
+	/** PR 12: dropping onto a row now always means "nest as a child of this row" (meta-nesting,
+	 * organizational only) — every node type can be a parent now, not just meta folders (Q3/Q11,
+	 * grilled with Dan directly). The one exception, the real disk-move "add to module" gesture, no
+	 * longer lives here at all — it moved to the module icon's own drop zone in `wireModuleRow`,
+	 * which handles it and calls `stopPropagation()` before a drop event would ever reach this
+	 * row-level handler. This *did* mean giving up "drop onto a row to insert as its sibling," which
+	 * this branch used to do for unit targets — a deliberate simplification Dan chose over a
+	 * right-side/rest-of-row zone split; reordering to a specific position among siblings now needs
+	 * un-nesting to the bucket root or a meta folder first, not a single drag onto a neighbor.
+	 *
+	 * Also fixes a real, pre-existing bug found while rewriting this for PR 12: for a `payload.kind
+	 * === "node"` drag (an *existing* tree node being reparented, not a fresh ref from the inbox),
+	 * this used to route through `placeUnit` — which only makes sense for a unit ref and, worse,
+	 * builds a *brand-new* node object with `children: []`, discarding whatever the dragged node's
+	 * real children/collapsed state was. Harmless before PR 12 (units never had children to lose,
+	 * and `placeUnit`'s `findUnitNode` lookup never matched a dragged *meta* folder's ref at all, so
+	 * meta drags silently no-op'd instead of actually moving). PR 12 makes both halves of this live:
+	 * units can now genuinely have children to lose, and meta-nesting makes "drag one row onto
+	 * another" universal. `moveNode` is the correct operation for an existing node changing parent
+	 * either way — it reparents the real node object in place instead of replacing it. */
 	private handleDrop(target: { kind: "node"; nodeId: string; viewId: string } | { kind: "bucket-root"; viewId: string } | { kind: "inbox-area"; viewId: string }): void {
 		const payload = this.dragPayload;
 		this.dragPayload = null;
 		if (!payload) return;
 
 		if (target.kind === "inbox-area") {
-			if (payload.kind === "node") this.plugin.viewsManager.unplaceUnit(payload.viewId, this.refOfNode(payload));
+			// Only a unit has a disk/ref identity to "return to the inbox" — a meta folder dropped
+			// here is simply not a meaningful gesture, so it's a no-op rather than acting on a
+			// fabricated ref.
+			if (payload.kind === "node") {
+				const draggedView = this.plugin.viewsManager.getView(payload.viewId);
+				const dragged = draggedView && this.findNodeAnywhere(draggedView.root, payload.nodeId);
+				if (dragged?.node.type === "unit" && dragged.node.ref) this.plugin.viewsManager.unplaceUnit(payload.viewId, dragged.node.ref);
+			}
 			return;
 		}
 
 		const viewId = target.viewId;
-		if (target.kind === "node") {
-			const view = this.plugin.viewsManager.getView(viewId);
-			const found = view && this.findNodeAnywhere(view.root, target.nodeId);
-			if (found?.node.type === "unit" && found.node.ref?.kind === "folder") {
-				const ref = payload.kind === "inbox" ? payload.ref : this.refOfNode(payload);
-				// Only a file/block being dropped onto a folder-unit is "add to module" — dropping
-				// one folder-unit onto another would mean moving a whole folder's worth of content
-				// and internals wholesale, out of scope for what was asked; falls through to the
-				// ordinary sibling-insert behavior below instead.
-				if (ref && ref.kind !== "folder") {
-					void this.handleAddToModule(ref, found.node.ref.path);
-					return;
-				}
-			}
-		}
-
 		let parentId: string | null = null;
 		let index = 0;
 		if (target.kind === "node") {
 			const view = this.plugin.viewsManager.getView(viewId);
 			const found = view && this.findNodeAnywhere(view.root, target.nodeId);
-			if (found?.node.type === "meta") {
+			if (found) {
 				parentId = found.node.id;
 				index = found.node.children.length;
-			} else if (found) {
-				// Part 4 edge case: dropping onto a unit node inserts as a sibling after it — in
-				// whichever parent (root or meta folder) that unit node actually lives in, not
-				// unconditionally the bucket root (a real bug caught in review: a unit nested
-				// inside a meta folder would incorrectly escape to root on this branch).
-				const parent = this.parentIdOf(view!.root, target.nodeId);
-				parentId = parent === undefined ? null : parent;
-				index = this.indexInParent(view!.root, target.nodeId) + 1;
 			}
 		}
 
-		const ref = payload.kind === "inbox" ? payload.ref : this.refOfNode(payload);
-		if (!ref) return;
-		this.plugin.viewsManager.placeUnit(viewId, ref, parentId);
-		if (payload.kind === "node" && parentId !== undefined) {
-			this.plugin.viewsManager.moveNode(viewId, this.nodeIdForRef(viewId, ref) ?? "", parentId, index);
+		if (payload.kind === "node") {
+			// An existing tree node (meta or unit) is being reparented/reordered — `moveNode` operates
+			// on it directly by id, in place, so its own children/collapsed state travels with it.
+			this.plugin.viewsManager.moveNode(viewId, payload.nodeId, parentId, index);
+			return;
 		}
+
+		// payload.kind === "inbox": a fresh unit ref, not yet placed anywhere in this view.
+		this.plugin.viewsManager.placeUnit(viewId, payload.ref, parentId);
 	}
 
 	/** Files/blocks are opaque internals to a folder-unit until something links to them — dropping
@@ -1006,20 +1025,6 @@ export class AtlasExplorerView extends ItemView {
 		return found?.node.ref ?? { kind: "file", path: "" };
 	}
 
-	private nodeIdForRef(viewId: string, ref: UnitRef): string | null {
-		const view = this.plugin.viewsManager.getView(viewId);
-		if (!view) return null;
-		const search = (nodes: ViewNode[]): string | null => {
-			for (const node of nodes) {
-				if (node.type === "unit" && node.ref && unitRefsEqual(node.ref, ref)) return node.id;
-				const found = search(node.children);
-				if (found) return found;
-			}
-			return null;
-		};
-		return search(view.root);
-	}
-
 	private findNodeAnywhere(nodes: ViewNode[], nodeId: string): { node: ViewNode } | null {
 		for (const node of nodes) {
 			if (node.id === nodeId) return { node };
@@ -1027,27 +1032,6 @@ export class AtlasExplorerView extends ItemView {
 			if (found) return found;
 		}
 		return null;
-	}
-
-	private indexInParent(nodes: ViewNode[], nodeId: string): number {
-		const idx = nodes.findIndex((n) => n.id === nodeId);
-		if (idx !== -1) return idx;
-		for (const node of nodes) {
-			const found = this.indexInParent(node.children, nodeId);
-			if (found !== -1) return found;
-		}
-		return -1;
-	}
-
-	/** The id of the meta folder `nodeId` actually lives in, or `null` if it's at the bucket root.
-	 * Returns `undefined` only if `nodeId` isn't in the tree at all (callers treat that as root). */
-	private parentIdOf(nodes: ViewNode[], nodeId: string, parentId: string | null = null): string | null | undefined {
-		for (const node of nodes) {
-			if (node.id === nodeId) return parentId;
-			const found = this.parentIdOf(node.children, nodeId, node.id);
-			if (found !== undefined) return found;
-		}
-		return undefined;
 	}
 
 	// --- context menus -----------------------------------------------------------------------------
@@ -1180,9 +1164,16 @@ export class AtlasExplorerView extends ItemView {
 	// --- PR 9 (issue 2): module row icon — opens Module Contents instead of inline fold/unfold ------
 
 	/** Wires a module row's icon (closed↔open crossfade on hover, "View module contents" tooltip,
-	 * click opens the modal) and its hover-during-drag dwell timer (point 5) — shared by both the
+	 * click opens the modal), its hover-during-drag dwell timer (point 5), and — PR 12 — the icon's
+	 * own drop zone for the one remaining real-disk-move gesture in this row. Shared by both the
 	 * inbox and bucket unit-row renderers so the two surfaces can't drift apart. `iconEl` is emptied
-	 * and rebuilt with the two stacked icons the crossfade needs. */
+	 * and rebuilt with the two stacked icons the crossfade needs.
+	 *
+	 * PR 12: the dwell timer and the plain-drop-to-file-in confirm flow both used to be wired to the
+	 * whole `row` — grilled with Dan directly (Q3/Q11) and rescoped to the icon only, since the rest
+	 * of the row now means "meta-nest as a child" instead (organizational only, no disk move). The
+	 * icon is the one place left where dropping a file/block still physically files it into the
+	 * module; everywhere else on the row falls through to `makeDropZone`'s own row-level listener. */
 	private wireModuleRow(row: HTMLElement, iconEl: HTMLElement, folderPath: string): void {
 		iconEl.empty();
 		iconEl.addClass("atlas-module-icon");
@@ -1210,9 +1201,28 @@ export class AtlasExplorerView extends ItemView {
 				this.openModuleContentsModalForDrag(folderPath);
 			}, MODULE_HOVER_DWELL_MS);
 		};
-		row.addEventListener("dragover", startDwell);
-		row.addEventListener("dragleave", cancelDwell);
-		row.addEventListener("drop", cancelDwell);
+		iconEl.addEventListener("dragover", (evt) => {
+			if (!this.dragPayload) return;
+			evt.preventDefault();
+			evt.stopPropagation();
+			iconEl.addClass("atlas-drop-target");
+			startDwell();
+		});
+		iconEl.addEventListener("dragleave", () => {
+			iconEl.removeClass("atlas-drop-target");
+			cancelDwell();
+		});
+		iconEl.addEventListener("drop", (evt) => {
+			evt.preventDefault();
+			evt.stopPropagation();
+			iconEl.removeClass("atlas-drop-target");
+			cancelDwell();
+			const payload = this.dragPayload;
+			this.dragPayload = null;
+			if (!payload) return;
+			const ref = payload.kind === "inbox" ? payload.ref : this.refOfNode(payload);
+			if (ref && ref.kind !== "folder") void this.handleAddToModule(ref, folderPath);
+		});
 	}
 
 	private trackModuleModal(modal: ModuleContentsModal): void {
@@ -1298,7 +1308,10 @@ export class AtlasExplorerView extends ItemView {
 		if (evt.key === "Enter" && node.type === "unit" && node.ref) {
 			evt.preventDefault();
 			void this.openRef(node.ref);
-		} else if (evt.key === " " && node.type === "meta") {
+		} else if (evt.key === " " && (node.type === "meta" || node.children.length > 0)) {
+			// PR 12: keyboard parity for the new unit-node chevrons — same fold/unfold toggle meta
+			// folders already had, now also reachable without a mouse for a unit that's gained
+			// meta-nested children.
 			evt.preventDefault();
 			this.plugin.viewsManager.setNodeCollapsed(view.id, node.id, !node.collapsed);
 		} else if (evt.key === "Delete") {

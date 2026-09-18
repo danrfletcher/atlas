@@ -151,11 +151,20 @@ export class ViewsManager {
 		return placements;
 	}
 
+	/** PR 12: a unit can now be a meta-nesting parent too, not just meta folders — walked here using
+	 * its own basename as the breadcrumb segment rather than the fully-resolved display text
+	 * `resolveRef` would give (that needs async work this synchronous path-builder has no access
+	 * to; a raw basename is a reasonable stand-in for a tooltip trail). Without this, a unit placed
+	 * under another unit would silently report as "not placed anywhere" here, even though it is. */
 	private pathToRef(nodes: ViewNode[], ref: UnitRef, trail: string[]): string[] | null {
 		for (const node of nodes) {
 			if (node.type === "unit" && node.ref && unitRefsEqual(node.ref, ref)) return trail;
 			if (node.type === "meta") {
 				const found = this.pathToRef(node.children, ref, [...trail, node.label ?? ""]);
+				if (found) return found;
+			} else if (node.type === "unit" && node.ref && node.children.length > 0) {
+				const basename = node.ref.path.split("/").pop() ?? node.ref.path;
+				const found = this.pathToRef(node.children, ref, [...trail, basename]);
 				if (found) return found;
 			}
 		}
@@ -175,12 +184,16 @@ export class ViewsManager {
 		this.save();
 	}
 
+	/** PR 12: a unit can now have meta-nested children of its own (any node can be a parent).
+	 * Removing it from the view promotes its children up one level at the position it occupied,
+	 * the same rule `deleteMetaFolder` already applies — nothing organizational should silently
+	 * vanish just because its parent was unplaced. */
 	unplaceUnit(viewId: string, ref: UnitRef): void {
 		const view = this.getView(viewId);
 		if (!view) return;
 		const found = this.findUnitNode(view.root, ref);
 		if (!found) return;
-		found.siblings.splice(found.index, 1);
+		found.siblings.splice(found.index, 1, ...found.node.children);
 		this.save();
 	}
 
@@ -219,8 +232,11 @@ export class ViewsManager {
 		return node.children.some((child) => this.isSameOrDescendant(child, targetId));
 	}
 
-	/** Reparents/reorders any node (unit or meta) within the bucket. Refuses a meta folder being
-	 * dropped into its own descendant (Part 4 edge case — would disconnect the tree). */
+	/** Reparents/reorders any node (unit or meta) within the bucket. Refuses a node being dropped
+	 * into its own descendant, or onto itself (Part 4 edge case / PR 12 — would disconnect the tree
+	 * or self-reference). PR 12: any node can now be a parent, not just meta folders — meta-nesting
+	 * via drop (issue 3) lets a module/file/block become an organizational parent the same way a
+	 * meta folder already could, without a real disk move. */
 	moveNode(viewId: string, nodeId: string, newParentId: string | null, index: number): boolean {
 		const view = this.getView(viewId);
 		if (!view) return false;
@@ -229,7 +245,7 @@ export class ViewsManager {
 		if (newParentId && this.isSameOrDescendant(found.node, newParentId)) return false;
 
 		const newParent = newParentId ? this.findNode(view.root, newParentId) : null;
-		if (newParentId && (!newParent || newParent.node.type !== "meta")) return false;
+		if (newParentId && !newParent) return false;
 
 		found.siblings.splice(found.index, 1);
 		const targetChildren = newParent ? newParent.node.children : view.root;
@@ -253,12 +269,16 @@ export class ViewsManager {
 		this.save();
 	}
 
+	/** PR 12: also collapses unit nodes that have gained meta-nested children — meta folders always
+	 * collapse here regardless of child count (existing behavior, a folder is always a foldable
+	 * concept even empty), but a unit only ever shows a chevron once it actually has a child (Q5),
+	 * so collapsing a childless one would be a no-op with nothing to reflect it visually anyway. */
 	collapseAll(viewId: string): void {
 		const view = this.getView(viewId);
 		if (!view) return;
 		const walk = (nodes: ViewNode[]) => {
 			for (const node of nodes) {
-				if (node.type === "meta") {
+				if (node.type === "meta" || node.children.length > 0) {
 					node.collapsed = true;
 					walk(node.children);
 				}
