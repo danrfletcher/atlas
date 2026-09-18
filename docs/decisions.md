@@ -2,6 +2,14 @@
 
 Judgement calls made during the build, the alternative considered, and why. Newest first.
 
+## F8: real bug fixed post-review (A6) — drop-onto-nested-unit escaped to bucket root
+
+**Decision:** `handleDrop`'s branch for "dropped onto a unit node, not a meta folder" (the Part 4 edge case where dropping a unit onto another unit should insert it as a sibling right after the target) hardcoded `parentId = null` regardless of where the target unit actually lived in the tree. `indexInParent` already did the equivalent recursive search to find the right *index* within whatever array the target lives in; this branch just never did the analogous lookup for the right *parent*. Fixed by adding `parentIdOf` — a recursive search returning the id of the meta folder a node lives in, or `null` for the bucket root — and using its result instead of the hardcoded `null`.
+
+**How this was caught:** code review (A6), not live testing — dropping a unit onto another unit that's nested inside a meta folder would incorrectly escape the dropped unit out to the bucket root instead of landing inside that same meta folder as a sibling. This is exactly the failure mode the drag-and-drop-untestable-in-this-container limitation was hiding: none of the non-drag equivalents used throughout this build to verify `placeUnit`/`unplaceUnit` (the "Place in view…" flow, the temporary debug command, "Remove from view") exercise this specific branch of `handleDrop`, because they all call `placeUnit` directly with an already-correct `parentId` rather than going through the target-node → parent-lookup logic this bug lived in. A reminder that "verified the underlying method works" and "verified the UI computes the right arguments to it" are different claims — this build's non-drag substitutes covered the former, not the latter, for this one code path.
+
+**Not separately live-tested even now** — still blocked on the same environment limitation (no working synthetic drag in this container) — but it's now correct by code inspection rather than silently wrong underneath a passing-looking test suite. Real drag-and-drop testing (per A7's recommendation) is the one item in this build genuinely best left for Dan's own hands-on pass.
+
 ## F8: temporary debug drag-placement command removed at PR close
 
 **Decision:** the "Debug — place first inbox unit into bucket root" command (added mid-build to verify `placeUnit`'s state management independent of the untestable drag gesture) is removed from `main.ts` now that this PR is closing. It isn't in F10's finalized command list, and its job — proving `placeUnit`/`moveNode`/`unplaceUnit` work correctly — is now covered by non-drag equivalents that are staying: the "Place in view…" context-menu/command-palette flow (`placeUnit`), "Remove from view" (`unplaceUnit`), and view deletion moving orphaned placements to the inbox (also `unplaceUnit`, at a different call site).

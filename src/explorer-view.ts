@@ -498,8 +498,12 @@ export class AtlasExplorerView extends ItemView {
 				parentId = found.node.id;
 				index = found.node.children.length;
 			} else if (found) {
-				// Part 4 edge case: dropping onto a unit node inserts as a sibling after it.
-				parentId = null;
+				// Part 4 edge case: dropping onto a unit node inserts as a sibling after it — in
+				// whichever parent (root or meta folder) that unit node actually lives in, not
+				// unconditionally the bucket root (a real bug caught in review: a unit nested
+				// inside a meta folder would incorrectly escape to root on this branch).
+				const parent = this.parentIdOf(view!.root, target.nodeId);
+				parentId = parent === undefined ? null : parent;
 				index = this.indexInParent(view!.root, target.nodeId) + 1;
 			}
 		}
@@ -553,6 +557,17 @@ export class AtlasExplorerView extends ItemView {
 			if (found !== -1) return found;
 		}
 		return -1;
+	}
+
+	/** The id of the meta folder `nodeId` actually lives in, or `null` if it's at the bucket root.
+	 * Returns `undefined` only if `nodeId` isn't in the tree at all (callers treat that as root). */
+	private parentIdOf(nodes: ViewNode[], nodeId: string, parentId: string | null = null): string | null | undefined {
+		for (const node of nodes) {
+			if (node.id === nodeId) return parentId;
+			const found = this.parentIdOf(node.children, nodeId, node.id);
+			if (found !== undefined) return found;
+		}
+		return undefined;
 	}
 
 	// --- context menus -----------------------------------------------------------------------------
