@@ -144,7 +144,12 @@ export class ModuleContentsModal extends Modal {
 		for (const child of folder.children) {
 			const row = container.createDiv({ cls: "atlas-row atlas-row-internal" });
 			row.style.paddingLeft = `${depth * 16 + 16}px`;
-			const chevron = child instanceof TFolder ? row.createDiv({ cls: "atlas-chevron" }) : null;
+			// Always reserve the chevron's slot, even for a file (which never gets one) — otherwise
+			// a file's icon sits flush against the row's edge while a folder's icon is pushed right
+			// by its chevron, so icons at the same depth don't line up (found in Dan's own testing
+			// of this PR). An empty same-width spacer keeps every icon at a depth aligned regardless
+			// of which rows happen to be folders.
+			const chevron = row.createDiv({ cls: "atlas-chevron" });
 			const iconEl = row.createDiv({ cls: "atlas-icon" });
 			setIcon(iconEl, child instanceof TFolder ? "folder" : "file");
 			row.createSpan({ cls: "atlas-row-text", text: child.name });
@@ -179,7 +184,7 @@ export class ModuleContentsModal extends Modal {
 				menu.showAtMouseEvent(evt);
 			});
 
-			if (child instanceof TFolder && chevron) {
+			if (child instanceof TFolder) {
 				let expanded = this.callbacks.isFolderExpanded(child.path);
 				setIcon(chevron, expanded ? "chevron-down" : "chevron-right");
 
