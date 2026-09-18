@@ -39,7 +39,7 @@ Every folder is a unit — a **module** whose **interface** is a note saying wha
 - The interface note is `<Folder>/<Folder>.md` by default. A module without one is still a unit; the explorer offers to create it.
 - Clicking a module's name opens its interface note. Clicking its icon opens a "Module contents" view of its internals instead.
 - A module's properties are its interface note's properties.
-- Atlas never rearranges a module's internal organization on disk — with one deliberate, always-confirmable exception: dragging a file or block directly onto a module. Physical moves otherwise stay in Obsidian's native explorer (still available as a tab).
+- Atlas never rearranges a module's internal organization on disk — with one deliberate, always-confirmable exception: dragging a file or block directly onto a module's **icon**. Physical moves otherwise stay in Obsidian's native explorer (still available as a tab).
 
 ### Views, bucket, inbox
 
@@ -47,6 +47,7 @@ Every folder is a unit — a **module** whose **interface** is a note saying wha
 - Inside a view, the **bucket** is the arranged tree, and **folders** are its branches — labels, not folders on disk (not to be confused with modules, which *are* real folders on disk).
 - A view's **inbox** is every unit not placed in that view. The **global inbox** is every unit placed in no view at all.
 - Placing or removing a unit in the bucket never touches disk.
+- Any block, file, or module can become the organizational parent of any other bucket item too, the same way a folder can — drag one onto another's row (anywhere except a module's icon, which stays reserved for the on-disk move above) to nest it underneath. Nothing on disk moves; a unit just gains a chevron and can be folded/unfolded like a folder can.
 
 ## Installing (development)
 
@@ -70,7 +71,7 @@ Then enable "Atlas" under Settings → Community plugins, in a vault where this 
 | Interface note convention | `<Folder>/<Folder>.md` | Toggle to also accept `index.md` / `README.md` as a folder's interface note. |
 | Replace native explorer on startup | on | Makes Atlas the active view in the left sidebar on launch. The native explorer stays available as a tab. |
 | Block display length | 80 | How many characters of a free block's first line to show in the explorer. |
-| Confirm before adding a unit to a module | on | Ask before a drag-onto-a-module physically files something into it. Off skips the confirmation, not the move. |
+| Confirm before adding a unit to a module | on | Ask before a drag onto a module's icon physically files something into it. Off skips the confirmation, not the move. |
 | Default view on launch | — | Which view Atlas opens to when the vault loads. |
 
 ## Commands
