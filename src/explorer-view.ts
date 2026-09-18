@@ -346,12 +346,23 @@ export class AtlasExplorerView extends ItemView {
 			const childrenInner = childrenWrap.createDiv({ cls: "atlas-meta-children-inner" });
 			await this.renderNodeList(node.children, childrenInner, view, depth + 1);
 
+			// Local optimistic state, not `node.collapsed` — real bug caught in review: `node.collapsed`
+			// only updates once the delayed `setNodeCollapsed` below actually runs, so a second click
+			// inside that window previously read the same stale value as the first and re-applied the
+			// same direction instead of toggling back. Also cancels/reschedules the pending persist
+			// call per click, so only the last click in a rapid burst ever gets persisted.
+			let localCollapsed = !!node.collapsed;
+			let pendingPersist: number | undefined;
 			chevron.addEventListener("click", (evt) => {
 				evt.stopPropagation();
-				const collapsing = !node.collapsed;
-				setIcon(chevron, collapsing ? "chevron-right" : "chevron-down");
-				childrenWrap.toggleClass("is-collapsed", collapsing);
-				window.setTimeout(() => this.plugin.viewsManager.setNodeCollapsed(view.id, node.id, collapsing), META_COLLAPSE_TRANSITION_MS);
+				localCollapsed = !localCollapsed;
+				setIcon(chevron, localCollapsed ? "chevron-right" : "chevron-down");
+				childrenWrap.toggleClass("is-collapsed", localCollapsed);
+				if (pendingPersist !== undefined) window.clearTimeout(pendingPersist);
+				pendingPersist = window.setTimeout(() => {
+					pendingPersist = undefined;
+					this.plugin.viewsManager.setNodeCollapsed(view.id, node.id, localCollapsed);
+				}, META_COLLAPSE_TRANSITION_MS);
 			});
 			return;
 		}
@@ -608,7 +619,7 @@ export class AtlasExplorerView extends ItemView {
 				// and internals wholesale, out of scope for what was asked; falls through to the
 				// ordinary sibling-insert behavior below instead.
 				if (ref && ref.kind !== "folder") {
-					void this.handleAddToModule(ref, found.node.ref.path, payload.kind === "node" ? { viewId: payload.viewId } : null);
+					void this.handleAddToModule(ref, found.node.ref.path);
 					return;
 				}
 			}
@@ -653,7 +664,7 @@ export class AtlasExplorerView extends ItemView {
 	 * by the existing link-graph promotion recompute (does it have a real backlink from outside the
 	 * module?) — this never force-promotes it; a file with no backlinks simply becomes ordinary,
 	 * invisible internals, matching the rest of the model. */
-	private async handleAddToModule(ref: UnitRef, folderPath: string, priorPlacement: { viewId: string } | null): Promise<void> {
+	private async handleAddToModule(ref: UnitRef, folderPath: string): Promise<void> {
 		const file = this.plugin.app.vault.getAbstractFileByPath(ref.path);
 		const folder = this.plugin.app.vault.getAbstractFileByPath(folderPath);
 		if (!(file instanceof TFile) || !(folder instanceof TFolder)) return;
@@ -668,12 +679,18 @@ export class AtlasExplorerView extends ItemView {
 			const newRef: UnitRef = ref.kind === "block" ? { kind: "block", path: newPath, subpath: ref.subpath } : { kind: "file", path: newPath };
 			// Promotion status only settles once Obsidian's own link graph re-resolves after the
 			// move (rewritten backlink text elsewhere needs a metadataCache pass) — wait for exactly
-			// that event once, then clean up a now-stale placement rather than leave a "missing" ghost
-			// if it turned out to have no real backlinks and isn't a unit anymore.
+			// that event once, then clean up any now-stale placement rather than leave a "missing"
+			// ghost if it turned out to have no real backlinks and isn't a unit anymore. Cleaned up in
+			// *every* view that held it (review, A11), not just the one the drag originated in — the
+			// file moved on disk for the whole vault, not "within" whichever view was on screen, so
+			// losing unit status is a vault-wide fact the same way `onVaultRename`'s own ref-rewriting
+			// already treats path changes as cross-view, not scoped to one view's context.
 			const offRef = this.plugin.app.metadataCache.on("resolved", () => {
 				this.plugin.app.metadataCache.offref(offRef);
 				const stillAUnit = this.plugin.unitIndex.getUnits().some((u) => unitRefKey(unitToRef(u)) === unitRefKey(newRef));
-				if (!stillAUnit && priorPlacement) this.plugin.viewsManager.unplaceUnit(priorPlacement.viewId, newRef);
+				if (!stillAUnit) {
+					for (const v of this.plugin.viewsManager.getViews()) this.plugin.viewsManager.unplaceUnit(v.id, newRef);
+				}
 			});
 		};
 
