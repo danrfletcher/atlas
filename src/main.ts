@@ -15,11 +15,18 @@ interface AtlasData {
 	manualPromotions: UnitRef[];
 	views: View[];
 	activeViewId: string;
+	/** PR 10: vault paths of module-internal subfolders currently expanded in a Module Contents
+	 * modal — a flat set is enough since folder paths are already unique/absolute across the vault,
+	 * no need to key by module. Absence = collapsed (the default for a folder never opened before). */
+	expandedModuleFolders: string[];
 }
 
 export default class AtlasPlugin extends Plugin {
 	declare settings: AtlasSettings;
 	manualPromotions: UnitRef[];
+	/** PR 10: runtime form of `AtlasData.expandedModuleFolders` — a `Set` for O(1) membership checks
+	 * from the modal, which re-checks every visible subfolder's expanded state on each open. */
+	private expandedModuleFolders: Set<string>;
 	unitIndex: UnitIndex;
 	viewsManager: ViewsManager;
 	/** Public so the explorer (F8/F11) can reuse it instead of re-reading free-block files on every render. */
@@ -98,6 +105,7 @@ export default class AtlasPlugin extends Plugin {
 	private loadFromData(data: AtlasData | null): void {
 		this.settings = Object.assign({}, DEFAULT_SETTINGS, data?.settings);
 		this.manualPromotions = data?.manualPromotions ?? [];
+		this.expandedModuleFolders = new Set(data?.expandedModuleFolders ?? []);
 		if (!data) {
 			this.settings.excludedFolders = computeDefaultExcludedFolders(this.app, this.settings.poolFolder);
 		}
@@ -109,7 +117,24 @@ export default class AtlasPlugin extends Plugin {
 			manualPromotions: this.unitIndex.getManualPromotions(),
 			views: this.viewsManager.getViews(),
 			activeViewId: this.viewsManager.getActiveViewId(),
+			expandedModuleFolders: Array.from(this.expandedModuleFolders),
 		} satisfies AtlasData);
+	}
+
+	/** PR 10: whether a module-internal subfolder should render expanded in a Module Contents modal.
+	 * Defaults to collapsed (`false`) for any path never toggled before — matches "fully collapsed
+	 * the first time a module is ever opened". */
+	isModuleFolderExpanded(path: string): boolean {
+		return this.expandedModuleFolders.has(path);
+	}
+
+	/** PR 10: persists a subfolder's fold state (debounced, same as drag/placement state) — no
+	 * re-render side effect to worry about here, unlike the main tree's meta-folder collapse, since
+	 * nothing else in the plugin reacts to this. */
+	setModuleFolderExpanded(path: string, expanded: boolean): void {
+		if (expanded) this.expandedModuleFolders.add(path);
+		else this.expandedModuleFolders.delete(path);
+		this.persistDebounced();
 	}
 
 	/** Settings changes are deliberate, infrequent user actions — save immediately rather than

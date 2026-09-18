@@ -86,6 +86,13 @@ export interface ModuleContentsModalCallbacks {
 	 * drop target for the drag still in progress, and dropping skips the usual confirm dialog. */
 	dropTarget?: { onDrop: (targetFolderPath: string) => void };
 	onCloseCallback?: () => void;
+	/** PR 10: whether a subfolder (by vault path) should render expanded — backed by
+	 * `AtlasPlugin.isModuleFolderExpanded`, persisted across modal close/reopen and Obsidian
+	 * restarts. Defaults to collapsed for any path never toggled before. */
+	isFolderExpanded: (path: string) => boolean;
+	/** PR 10: called when the user clicks a subfolder's chevron, so the explorer view can persist
+	 * the new state via `AtlasPlugin.setModuleFolderExpanded`. */
+	onToggleFolder: (path: string, expanded: boolean) => void;
 }
 
 export class ModuleContentsModal extends Modal {
@@ -109,6 +116,7 @@ export class ModuleContentsModal extends Modal {
 		}
 
 		this.renderTree(this.folder, treeEl, 0);
+		if (this.filterText) this.setFilterText(this.filterText);
 	}
 
 	onClose(): void {
@@ -126,10 +134,17 @@ export class ModuleContentsModal extends Modal {
 		}
 	}
 
+	/** PR 10: a folder child gets its own chevron and a dedicated children-wrapper (the same
+	 * `.atlas-meta-children`/`-inner` grid-collapse technique used everywhere else in the plugin),
+	 * so fold/unfold animates and each subfolder's state is independent. Toggling here has no
+	 * re-render side effect to worry about (unlike the main tree's meta-folder collapse, whose
+	 * persist call triggers a full external re-render) — it's just a class toggle plus a debounced
+	 * write, so no delayed-persist trick is needed. */
 	private renderTree(folder: TFolder, container: HTMLElement, depth: number): void {
 		for (const child of folder.children) {
 			const row = container.createDiv({ cls: "atlas-row atlas-row-internal" });
 			row.style.paddingLeft = `${depth * 16 + 16}px`;
+			const chevron = child instanceof TFolder ? row.createDiv({ cls: "atlas-chevron" }) : null;
 			const iconEl = row.createDiv({ cls: "atlas-icon" });
 			setIcon(iconEl, child instanceof TFolder ? "folder" : "file");
 			row.createSpan({ cls: "atlas-row-text", text: child.name });
@@ -164,9 +179,24 @@ export class ModuleContentsModal extends Modal {
 				menu.showAtMouseEvent(evt);
 			});
 
-			if (child instanceof TFolder) this.renderTree(child, container, depth + 1);
+			if (child instanceof TFolder && chevron) {
+				let expanded = this.callbacks.isFolderExpanded(child.path);
+				setIcon(chevron, expanded ? "chevron-down" : "chevron-right");
+
+				const childrenWrap = container.createDiv({ cls: "atlas-meta-children" });
+				childrenWrap.toggleClass("is-collapsed", !expanded);
+				const childrenInner = childrenWrap.createDiv({ cls: "atlas-meta-children-inner" });
+				this.renderTree(child, childrenInner, depth + 1);
+
+				chevron.addEventListener("click", (evt) => {
+					evt.stopPropagation();
+					expanded = !expanded;
+					setIcon(chevron, expanded ? "chevron-down" : "chevron-right");
+					childrenWrap.toggleClass("is-collapsed", !expanded);
+					this.callbacks.onToggleFolder(child.path, expanded);
+				});
+			}
 		}
-		if (this.filterText) this.setFilterText(this.filterText);
 	}
 
 	private wireDropZone(row: HTMLElement, folderPath: string): void {
@@ -1093,6 +1123,8 @@ export class AtlasExplorerView extends ItemView {
 			onOpenFile: (file) => void this.openRef({ kind: "file", path: file.path }),
 			onRevealInNative: (path) => this.revealInNativeExplorer(path),
 			onPromoteAndPlace: (path, isFolder) => this.promoteAndPlaceFlow(path, isFolder),
+			isFolderExpanded: (path) => this.plugin.isModuleFolderExpanded(path),
+			onToggleFolder: (path, expanded) => this.plugin.setModuleFolderExpanded(path, expanded),
 			onCloseCallback: () => {
 				if (this.openModuleModal === modal) this.openModuleModal = null;
 			},
@@ -1114,6 +1146,8 @@ export class AtlasExplorerView extends ItemView {
 			onOpenFile: (file) => void this.openRef({ kind: "file", path: file.path }),
 			onRevealInNative: (path) => this.revealInNativeExplorer(path),
 			onPromoteAndPlace: (path, isFolder) => this.promoteAndPlaceFlow(path, isFolder),
+			isFolderExpanded: (path) => this.plugin.isModuleFolderExpanded(path),
+			onToggleFolder: (path, expanded) => this.plugin.setModuleFolderExpanded(path, expanded),
 			dropTarget: { onDrop: (targetFolderPath) => void this.handleAddToModule(ref, targetFolderPath, true) },
 			onCloseCallback: () => {
 				if (this.openModuleModal === modal) this.openModuleModal = null;
