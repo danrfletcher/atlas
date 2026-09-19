@@ -233,6 +233,32 @@ export class StatusesManager {
 		}
 		return null;
 	}
+
+	/** PR 22: same ancestor walk as `findGoverningAncestor`, deliberately *without* the per-child
+	 * `applyTo` gate — sort orders an entire rendered sibling list at once (one shared decision for
+	 * everyone in it), not "does this one child get a status dot," so it needs "which governor
+	 * reaches this level" on its own, independent of any individual child's kind. */
+	findSortGovernor(ancestors: StatusGovernance[]): StatusGovernance | null {
+		for (let i = 0; i < ancestors.length; i++) {
+			const governor = ancestors[i];
+			if (!governor.statusEnabled || !governor.statusSetId) continue;
+			if (i > 0 && !governor.inheritToSubfolders) return null;
+			return governor;
+		}
+		return null;
+	}
+
+	/** PR 22: `status`'s rank within status set `setId` for sort-by-status — ascending, index 0 =
+	 * highest rank. `null` if the status doesn't belong to that set at all (a governor's own status
+	 * set can change out from under an already-resolved child's status reference — degrades the
+	 * same "stale reference, don't error" way everything else in this file does; the caller treats
+	 * `null` as unranked, sorting last). */
+	rankOf(setId: string, statusId: string): number | null {
+		const set = this.getStatusSet(setId);
+		if (!set) return null;
+		const idx = set.statuses.findIndex((s) => s.id === statusId);
+		return idx === -1 ? null : idx;
+	}
 }
 
 /** PR 19: default truncated-group placeholder label when the governor hasn't set a custom one,

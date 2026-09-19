@@ -2,6 +2,21 @@
 
 Judgement calls made during the build, the alternative considered, and why. Newest first.
 
+## PR 22: grilled with Dan directly — truncation placeholder visual parity + sort-by-status/reverse
+
+Post-v0.2.0 remediation, grilled before any code (per Dan's own request to grill first). Full Q&A:
+
+- **Q1/Q7 (placeholder position in manual mode)**: Dan reported a truncated "Idea" (the set's default status) placeholder appearing at the bottom of his list instead of the top, where he expected it given his manual arrangement. My own live reproduction (a governor truncating a default status, items scattered Idea/Doing/Idea/Done/Idea) put the placeholder correctly at the *first*-encountered member's position — it did not reproduce his report. Rather than keep guessing at a bug I couldn't reproduce, asked Dan to either share his exact repro or redo it live. He shared a screenshot (not machine-readable in this environment — sandboxed path issue, noted and moved on since it wasn't load-bearing for the decision) but then reconsidered: the position question may resolve itself, or may need re-diagnosing, once sort-by-status exists to compare against. **Explicitly deferred** — manual-mode placeholder position is untouched by this PR; retest live with Dan once sort-by-status ships, before deciding whether it needs its own separate fix.
+- **Q2 (glow)**: confirmed — the placeholder's dot never called `.toggleClass("atlas-status-glow", ...)` the way a real dot does (one-line gap, `renderTruncationGroupHeader` vs. `renderRowIcon`). Fixed.
+- **Q2 (muted text)**: confirmed — the placeholder row's `atlas-row-internal` class (a muted `color: var(--text-muted)`, originally meant for the Module Contents modal's genuinely-secondary internal-file rows) reads as "different font." Dropped from the placeholder row entirely — it's a first-class stand-in for real items, not secondary content.
+- **Q3 (rank convention)**: confirmed ascending index within the governing status set's own `statuses[]` (index 0 = highest rank), unresolved-status children sort last — same convention the reference plugin uses (`explorerPatch.ts`'s own `rank` computation), ported directly.
+- **Q4 (reverse scope)**: confirmed — reverse only modifies sort-by-status's own order, and is unavailable/hidden when sort-by-status is off. Not a general "flip manual order" feature (which would be a different, unrequested ask).
+- **Q5 (tie-break)**: confirmed — equal-rank children preserve their existing relative order (a stable sort), not the reference plugin's own alphabetical tie-break. A deliberate divergence from "borrow wholesale" here, since Dan explicitly preferred predictability over re-alphabetizing same-status clusters.
+- **Q6 (inheritance reach)**: confirmed — sort-by-status/reverse follow the exact same ancestor-walk precedent every other `StatusGovernance` field already uses (nearest governor wins, reaches past a non-governing intermediate node only if that governor's own `inheritToSubfolders` is on).
+- **Q8 (retain-icons parity)**: Dan's own words: "ignore the 'retain icons' — should be the traffic light symbol only for the placeholder." Confirmed as option (c) from the grilling round — the placeholder's dot never shows a retained type icon, regardless of the Design → Retain Icons setting, since a group can mix types with no single truthful icon to show. Always a plain color circle.
+
+The reference plugin's own `sortMode`/rank logic was portable (Q3), but its "reverse" concept doesn't exist there at all — checked directly (zero matches for "reverse" anywhere in its source) — so the reverse toggle and its scoping (Q4) are new Atlas-only design, not a port.
+
 ## PR 21: live-closed the drag-and-drop gap, and found two of its four ACs were stale rather than untested
 
 The original F8 drag-and-drop ACs were marked deferred for one real reason: `xdotool`/X11 synthetic mouse events couldn't trigger native HTML5 drag-and-drop in the container this build used at the time. PR 12 and PR 20 both proved that's no longer true — CDP's `DragEvent`+`DataTransfer` dispatch drives real drag gestures directly, container or not. This PR used that to close every remaining "not exercised live (needs drag)" line rather than re-litigating whether it was possible.

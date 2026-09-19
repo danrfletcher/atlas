@@ -736,6 +736,26 @@ export class AtlasExplorerView extends ItemView {
 			resolved.push({ node, status, governor, bypass });
 		}
 
+		// PR 22: sort-by-status — the nearest governor that reaches this list (same ancestor-walk
+		// precedent as every other governance field, just without the per-child `applyTo` gate,
+		// since this is one shared decision for the whole list rather than a per-child one — see
+		// `findSortGovernor`'s own doc comment) decides both the ranking status set and direction.
+		// Array.prototype.sort is stable (guaranteed since ES2019), so equal-rank children simply
+		// keep their existing relative order for free — no separate tie-break needed (grilled, Q5).
+		// Sorting here, before the hide/truncate/render pass below, is also what makes a truncated
+		// group's placeholder land at its status's rank position once sort-by-status is on — it
+		// naturally becomes "whichever grouped member is now first in iteration order," with no
+		// separate positioning logic required.
+		const sortGovernor = sm.findSortGovernor(ancestors);
+		if (sortGovernor?.sortMode === "status" && sortGovernor.statusSetId) {
+			const setId = sortGovernor.statusSetId;
+			const rankOf = (r: Resolved): number => {
+				if (!r.status) return Number.POSITIVE_INFINITY;
+				return sm.rankOf(setId, r.status.id) ?? Number.POSITIVE_INFINITY;
+			};
+			resolved.sort((a, b) => (sortGovernor.sortReverse ? rankOf(b) - rankOf(a) : rankOf(a) - rankOf(b)));
+		}
+
 		const isHidden = (status: StatusDefinition, governor: StatusGovernance): boolean =>
 			(!!status.isCompleted && !!governor.hideCompleted) || (!!status.isCancelled && !!governor.hideCancelled);
 		const groupKeyOf = (governor: StatusGovernance, statusId: string): string =>
@@ -779,7 +799,15 @@ export class AtlasExplorerView extends ItemView {
 	 * single click on a status dot to opening the change-status popup (PR 16), so overloading a
 	 * second, timing-based meaning onto the same target would collide with an already-shipped,
 	 * reviewed interaction rather than cleanly extend it — an explicit, discoverable row avoids that
-	 * collision entirely and costs nothing extra to build on top of the row primitives already here. */
+	 * collision entirely and costs nothing extra to build on top of the row primitives already here.
+	 *
+	 * PR 22 (Dan-found): this is a stand-in for real status items, not secondary content, so its dot
+	 * should look exactly like a real one — dropped `atlas-row-internal` (a muted text color meant
+	 * for the Module Contents modal's genuinely-secondary rows, not this) and added the glow toggle
+	 * `renderRowIcon` already has. Deliberately *not* matching one thing: Retain Icons. A real dot
+	 * retains one item's own type icon; a truncated group can mix types (a meta folder alongside
+	 * file/block units) with no single truthful icon to retain, so the placeholder's dot always stays
+	 * a plain color circle regardless of that setting (grilled directly, Q8 — Dan's own call). */
 	private renderTruncationGroupHeader(
 		container: HTMLElement,
 		view: View,
@@ -790,11 +818,12 @@ export class AtlasExplorerView extends ItemView {
 		depth: number,
 		expanded: boolean
 	): void {
-		const row = container.createDiv({ cls: "atlas-row atlas-row-internal atlas-truncation-row" });
+		const row = container.createDiv({ cls: "atlas-row atlas-truncation-row" });
 		row.style.paddingLeft = `${depth * 16}px`;
 		const chevron = row.createDiv({ cls: "atlas-chevron" });
 		const iconEl = row.createDiv({ cls: "atlas-icon atlas-status-dot" });
 		const circle = iconEl.createDiv({ cls: "atlas-status-dot-circle" });
+		circle.toggleClass("atlas-status-glow", this.plugin.settings.glowEnabled);
 		circle.style.backgroundColor = status.color;
 		circle.style.color = status.color;
 		if (expanded) {
