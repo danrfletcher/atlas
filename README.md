@@ -99,7 +99,7 @@ A bucket item with children (unit or meta folder — the option only appears whe
 | `Atlas: New view` | Prompts for a name and creates a new, empty view. |
 | `Atlas: Rebuild index` | Forces a full re-scan of every unit in the vault; logs timings to the console. |
 
-Every row in the explorer also has a right-click menu (Open, Open in new tab, Reveal in native explorer, Copy link, Remove from view, Place in view…), and folders can be renamed or deleted from the same menu. Bucket rows (units and meta folders) also get a **Statuses** option — see the Status settings section above.
+Every row in the explorer also has a right-click menu (Open, Open in new tab, Reveal in native explorer, Copy link, Duplicate (Meta), Remove from view, Place in view…), and folders can be renamed or deleted from the same menu. "Duplicate (Meta)" places a second reference to the same item — and, if it's a parent, a copy of everything nested under it — right next to the original, without touching disk; the copy is free to be organized independently from then on. Bucket rows (units and meta folders) also get a **Statuses** option — see the Status settings section above.
 
 ## Documentation
 

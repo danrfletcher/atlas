@@ -765,7 +765,7 @@ export class AtlasExplorerView extends ItemView {
 			setTooltip(removeBtn, "Remove from view");
 			removeBtn.addEventListener("click", (evt) => {
 				evt.stopPropagation();
-				this.plugin.viewsManager.unplaceUnit(view.id, ref);
+				this.plugin.viewsManager.unplaceNode(view.id, node.id);
 			});
 		}
 		// PR 9 (issue 2): modules never expand inline anymore, in the bucket or the inbox — the icon
@@ -982,7 +982,9 @@ export class AtlasExplorerView extends ItemView {
 			if (payload.kind === "node") {
 				const draggedView = this.plugin.viewsManager.getView(payload.viewId);
 				const dragged = draggedView && this.findNodeAnywhere(draggedView.root, payload.nodeId);
-				if (dragged?.node.type === "unit" && dragged.node.ref) this.plugin.viewsManager.unplaceUnit(payload.viewId, dragged.node.ref);
+				// PR 13: unplaceNode removes this exact dragged instance, not every duplicate of the
+				// same unit that might also be placed elsewhere in this view.
+				if (dragged?.node.type === "unit") this.plugin.viewsManager.unplaceNode(payload.viewId, payload.nodeId);
 			}
 			return;
 		}
@@ -1100,11 +1102,17 @@ export class AtlasExplorerView extends ItemView {
 			menu.addItem((item) => item.setTitle("Statuses").setIcon("circle-dot").onClick(() => this.openStatusesModal(node, view)));
 			menu.addSeparator();
 		}
+		// PR 13: clones this row (and its whole meta-nested subtree, if it has one) as a new sibling
+		// right after it — same underlying unit, no disk duplicate, no naming scheme (two rows with
+		// the same label is expected — see duplicateNode's own doc comment for why).
+		menu.addItem((item) => item.setTitle("Duplicate (Meta)").setIcon("copy-plus").onClick(() => this.plugin.viewsManager.duplicateNode(view.id, node.id)));
 		menu.addItem((item) =>
 			item
 				.setTitle("Remove from view")
 				.setIcon("x")
-				.onClick(() => this.plugin.viewsManager.unplaceUnit(view.id, ref))
+				// PR 13: unplaceNode removes this exact row, not every duplicate of the same unit
+				// that might also be placed elsewhere in this view.
+				.onClick(() => this.plugin.viewsManager.unplaceNode(view.id, node.id))
 		);
 		menu.addItem((item) => item.setTitle("Place in view…").setIcon("arrow-right-left").onClick(() => this.placeInViewFlow(ref)));
 		menu.showAtMouseEvent(evt);
@@ -1151,6 +1159,10 @@ export class AtlasExplorerView extends ItemView {
 
 	private showMetaFolderMenu(evt: MouseEvent, node: ViewNode, view: View): void {
 		const menu = new Menu();
+		// PR 13: same clone-as-sibling action as a unit row's context menu — a meta folder has no
+		// disk identity to begin with, so "duplicating" it just clones the organizational label and
+		// its whole subtree, same mechanics either way (`duplicateNode` doesn't distinguish types).
+		menu.addItem((item) => item.setTitle("Duplicate (Meta)").setIcon("copy-plus").onClick(() => this.plugin.viewsManager.duplicateNode(view.id, node.id)));
 		menu.addItem((item) =>
 			item
 				.setTitle("Rename folder")
@@ -1397,7 +1409,9 @@ export class AtlasExplorerView extends ItemView {
 			this.plugin.viewsManager.setNodeCollapsed(view.id, node.id, !node.collapsed);
 		} else if (evt.key === "Delete") {
 			evt.preventDefault();
-			if (node.type === "unit" && node.ref) this.plugin.viewsManager.unplaceUnit(view.id, node.ref);
+			// PR 13: unplaceNode removes this exact focused row, not every duplicate of the same
+			// unit that might also be placed elsewhere in this view.
+			if (node.type === "unit") this.plugin.viewsManager.unplaceNode(view.id, node.id);
 		} else if (evt.key === "F2" && node.type === "meta") {
 			evt.preventDefault();
 			new TextPromptModal(this.plugin.app, "Rename folder", node.label ?? "", (label) => {
