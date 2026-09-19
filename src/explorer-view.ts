@@ -3,7 +3,7 @@ import type AtlasPlugin from "./main";
 import { Unit, UnitRef, View, ViewNode, unitRefKey, unitToRef } from "./types";
 import { MetaTarget, flattenMetaFolders } from "./views";
 import { resolveUnit } from "./unit-display";
-import { TextPromptModal, ConfirmModal } from "./modals";
+import { TextPromptModal, ConfirmModal, StatusesModal } from "./modals";
 import { createInterfaceNote, findInterfaceNote } from "./interface-notes";
 import { addBlock } from "./commands";
 
@@ -311,6 +311,16 @@ export class AtlasExplorerView extends ItemView {
 		}, 0);
 	}
 
+	/** PR 15 fix (Dan-found): Glow/Retain icons/Retained icon color are read fresh on every render,
+	 * but nothing was triggering a render when they changed in Settings — `unitIndex`/`viewsManager`
+	 * changes already auto-refresh via `queueRender` (wired in `onOpen`), these plain settings don't
+	 * go through either, so toggling one silently had no visible effect until something else
+	 * happened to re-render. Called by the settings tab right after `saveSettings()` for exactly
+	 * these toggles. */
+	refresh(): void {
+		this.queueRender();
+	}
+
 	// --- ref resolution (shared by bucket + inbox rendering) -------------------------------------
 
 	private async resolveRef(ref: UnitRef): Promise<RowInfo> {
@@ -556,7 +566,7 @@ export class AtlasExplorerView extends ItemView {
 		this.makeDropZone(sectionInner, { kind: "bucket-root", viewId: view.id });
 
 		const listEl = sectionInner.createDiv({ cls: "atlas-node-list" });
-		await this.renderNodeList(view.root, listEl, view, 0);
+		await this.renderNodeList(view.root, listEl, view, 0, null);
 
 		let localCollapsed = this.bucketCollapsed;
 		let pendingPersist: number | undefined;
@@ -573,9 +583,9 @@ export class AtlasExplorerView extends ItemView {
 		});
 	}
 
-	private async renderNodeList(nodes: ViewNode[], container: HTMLElement, view: View, depth: number): Promise<void> {
+	private async renderNodeList(nodes: ViewNode[], container: HTMLElement, view: View, depth: number, parentNode: ViewNode | null): Promise<void> {
 		for (const node of nodes) {
-			await this.renderNode(node, container, view, depth);
+			await this.renderNode(node, container, view, depth, parentNode);
 		}
 	}
 
@@ -641,7 +651,7 @@ export class AtlasExplorerView extends ItemView {
 		const childrenWrap = container.createDiv({ cls: "atlas-meta-children" });
 		childrenWrap.toggleClass("is-collapsed", effectiveCollapsed);
 		const childrenInner = childrenWrap.createDiv({ cls: "atlas-meta-children-inner" });
-		await this.renderNodeList(node.children, childrenInner, view, depth + 1);
+		await this.renderNodeList(node.children, childrenInner, view, depth + 1, node);
 
 		// Local optimistic state, not `node.collapsed` — real bug caught in review: `node.collapsed`
 		// only updates once the delayed `setNodeCollapsed` below actually runs, so a second click
@@ -663,14 +673,52 @@ export class AtlasExplorerView extends ItemView {
 		});
 	}
 
-	private async renderNode(node: ViewNode, container: HTMLElement, view: View, depth: number): Promise<void> {
+	/** PR 15: renders a row's icon slot — either its normal type icon (`fallbackIconName`) or, if
+	 * this row's *parent* has statuses turned on for its children, a colored status dot instead.
+	 * Status assignment is descendant-governing, not self-governing (Dan's own spec: "the statuses
+	 * apply to the first direct children under that item") — a node's own `statusEnabled`/
+	 * `statusSetId` fields describe what its children show, never itself, so this deliberately
+	 * resolves against `parentNode`, not `node`. `parentNode` is `null` at the bucket root, where
+	 * nothing governs (PR 16 adds root-level assignment via the view-name selector).
+	 *
+	 * Dan-found sizing fix: the dot itself is a small (10px) circle centered inside the row's normal
+	 * icon-slot footprint, not the whole slot — matching the reference plugin's own `.ffsi-dot`
+	 * dimensions exactly (checked its live container build) rather than the icon-slot's full size,
+	 * which read as oversized. Color and glow (`currentColor`-based layered box-shadow, same
+	 * technique the reference plugin uses) are set on this inner circle, not the outer slot, so the
+	 * glow radius is proportioned to the small dot instead of a large box.
+	 *
+	 * "Retain icons" (Status → Design) keeps the normal icon visible, shrunk down inside the circle,
+	 * colored via "Retained icon color" (also Status → Design) — either the theme's normal text
+	 * color or its background color, Dan's choice, not a fixed black/white contrast heuristic.
+	 * Shared by meta and unit rows so the two can't drift out of sync with each other, the same
+	 * reasoning `renderFoldableChildren`'s own extraction already used. */
+	private renderRowIcon(iconEl: HTMLElement, parentNode: ViewNode | null, fallbackIconName: string): void {
+		const status = parentNode ? this.plugin.statusesManager.resolveNodeStatus(parentNode) : null;
+		if (!status) {
+			setIcon(iconEl, fallbackIconName);
+			return;
+		}
+		iconEl.addClass("atlas-status-dot");
+		const circle = iconEl.createDiv({ cls: "atlas-status-dot-circle" });
+		circle.toggleClass("atlas-status-glow", this.plugin.settings.glowEnabled);
+		circle.style.backgroundColor = status.color;
+		circle.style.color = status.color; // currentColor source for the glow box-shadow layers
+		if (this.plugin.settings.retainIcons) {
+			const innerIcon = circle.createSpan({ cls: "atlas-status-dot-icon" });
+			innerIcon.style.color = this.plugin.settings.retainIconMatchBackground ? "var(--background-primary)" : "var(--text-normal)";
+			setIcon(innerIcon, fallbackIconName);
+		}
+	}
+
+	private async renderNode(node: ViewNode, container: HTMLElement, view: View, depth: number, parentNode: ViewNode | null): Promise<void> {
 		if (node.type === "meta") {
 			const row = container.createDiv({ cls: "atlas-row atlas-row-meta" });
 			row.style.paddingLeft = `${depth * 16}px`;
 			row.setAttr("draggable", "true");
 			const chevron = row.createDiv({ cls: "atlas-chevron" });
 			const iconEl = row.createDiv({ cls: "atlas-icon" });
-			setIcon(iconEl, "layers");
+			this.renderRowIcon(iconEl, parentNode, "layers");
 			row.createSpan({ cls: "atlas-row-text", text: node.label ?? "" });
 
 			row.addEventListener("dragstart", () => (this.dragPayload = { kind: "node", nodeId: node.id, viewId: view.id }));
@@ -706,7 +754,7 @@ export class AtlasExplorerView extends ItemView {
 		// this exact alignment problem, so reusing it here instead of a second magic-number offset.
 		const chevron = row.createDiv({ cls: "atlas-chevron" });
 		const iconEl = row.createDiv({ cls: "atlas-icon" });
-		setIcon(iconEl, info.icon);
+		this.renderRowIcon(iconEl, parentNode, info.icon);
 		row.createSpan({ cls: "atlas-row-text", text: info.text });
 		if (info.promoted) row.createSpan({ cls: "atlas-badge", text: "promoted" });
 		if (info.secondary) row.createSpan({ cls: "atlas-row-secondary", text: info.secondary });
@@ -733,7 +781,7 @@ export class AtlasExplorerView extends ItemView {
 		row.addEventListener("keydown", (evt) => this.handleRowKeydown(evt, node, view));
 		row.addEventListener("contextmenu", (evt) => {
 			evt.preventDefault();
-			this.showUnitMenu(evt, ref, view, node.id);
+			this.showUnitMenu(evt, ref, view, node);
 		});
 
 		if (node.children.length > 0) await this.renderFoldableChildren(node, chevron, container, view, depth);
@@ -1038,7 +1086,7 @@ export class AtlasExplorerView extends ItemView {
 
 	// --- context menus -----------------------------------------------------------------------------
 
-	private showUnitMenu(evt: MouseEvent, ref: UnitRef, view: View, nodeId: string): void {
+	private showUnitMenu(evt: MouseEvent, ref: UnitRef, view: View, node: ViewNode): void {
 		const menu = new Menu();
 		menu.addItem((item) => item.setTitle("Open").setIcon("file").onClick(() => void this.openRef(ref)));
 		menu.addItem((item) => item.setTitle("Open in new tab").setIcon("file-plus").onClick(() => void this.openRef(ref, true)));
@@ -1047,20 +1095,39 @@ export class AtlasExplorerView extends ItemView {
 		}
 		menu.addItem((item) => item.setTitle("Copy link").setIcon("link").onClick(() => void this.copyLink(ref)));
 		menu.addSeparator();
+		// PR 15 fix (Dan-found): status assignment governs this item's own *children*, not the item
+		// itself — an item with no children has nothing for the option to apply to, so it's hidden
+		// entirely rather than offered and doing nothing when toggled.
+		if (node.children.length > 0) {
+			menu.addItem((item) => item.setTitle("Statuses").setIcon("circle-dot").onClick(() => this.openStatusesModal(node, view)));
+			menu.addSeparator();
+		}
 		// PR 13: clones this row (and its whole meta-nested subtree, if it has one) as a new sibling
 		// right after it — same underlying unit, no disk duplicate, no naming scheme (two rows with
 		// the same label is expected — see duplicateNode's own doc comment for why).
-		menu.addItem((item) => item.setTitle("Duplicate (Meta)").setIcon("copy-plus").onClick(() => this.plugin.viewsManager.duplicateNode(view.id, nodeId)));
+		menu.addItem((item) => item.setTitle("Duplicate (Meta)").setIcon("copy-plus").onClick(() => this.plugin.viewsManager.duplicateNode(view.id, node.id)));
 		menu.addItem((item) =>
 			item
 				.setTitle("Remove from view")
 				.setIcon("x")
 				// PR 13: unplaceNode removes this exact row, not every duplicate of the same unit
 				// that might also be placed elsewhere in this view.
-				.onClick(() => this.plugin.viewsManager.unplaceNode(view.id, nodeId))
+				.onClick(() => this.plugin.viewsManager.unplaceNode(view.id, node.id))
 		);
 		menu.addItem((item) => item.setTitle("Place in view…").setIcon("arrow-right-left").onClick(() => this.placeInViewFlow(ref)));
 		menu.showAtMouseEvent(evt);
+	}
+
+	/** PR 15: the minimal "Statuses" modal — opened from a bucket unit or meta folder's own context
+	 * menu, applying live to that exact node via `setNodeStatus`. */
+	private openStatusesModal(node: ViewNode, view: View): void {
+		new StatusesModal(
+			this.plugin.app,
+			this.plugin.statusesManager.getStatusSets(),
+			!!node.statusEnabled,
+			node.statusSetId ?? null,
+			(enabled, statusSetId) => this.plugin.viewsManager.setNodeStatus(view.id, node.id, enabled, statusSetId)
+		).open();
 	}
 
 	private showInboxUnitMenu(evt: MouseEvent, ref: UnitRef): void {
@@ -1106,6 +1173,9 @@ export class AtlasExplorerView extends ItemView {
 					}).open();
 				})
 		);
+		if (node.children.length > 0) {
+			menu.addItem((item) => item.setTitle("Statuses").setIcon("circle-dot").onClick(() => this.openStatusesModal(node, view)));
+		}
 		menu.addItem((item) =>
 			item
 				.setTitle("Delete folder")
@@ -1187,10 +1257,21 @@ export class AtlasExplorerView extends ItemView {
 	 * icon is the one place left where dropping a file/block still physically files it into the
 	 * module; everywhere else on the row falls through to `makeDropZone`'s own row-level listener. */
 	private wireModuleRow(row: HTMLElement, iconEl: HTMLElement, folderPath: string): void {
-		iconEl.empty();
-		iconEl.addClass("atlas-module-icon");
-		setIcon(iconEl.createSpan({ cls: "atlas-icon-closed" }), "folder");
-		setIcon(iconEl.createSpan({ cls: "atlas-icon-open" }), "folder-open");
+		// PR 15 fix (Dan-found, discovered while grilling the next PR): this used to unconditionally
+		// wipe `iconEl` and repopulate it with the closed/open folder-icon crossfade, silently
+		// overwriting a status dot `renderRowIcon` had just rendered there — meaning a governed
+		// module could never actually show its dot at all, contradicting PR 15's own core promise.
+		// The dot's own visual is left alone when present; the tooltip/click/drag wiring below still
+		// applies to `iconEl` either way, since none of it depends on the icon's current visual
+		// content. (Click's "open contents" meaning is expected to change for dotted modules once
+		// the next PR's click-to-change-status lands — that's this PR's own scope, not PR 15's.)
+		const hasStatusDot = iconEl.hasClass("atlas-status-dot");
+		if (!hasStatusDot) {
+			iconEl.empty();
+			iconEl.addClass("atlas-module-icon");
+			setIcon(iconEl.createSpan({ cls: "atlas-icon-closed" }), "folder");
+			setIcon(iconEl.createSpan({ cls: "atlas-icon-open" }), "folder-open");
+		}
 		setTooltip(iconEl, "View module contents");
 		iconEl.addEventListener("click", (evt) => {
 			evt.stopPropagation();

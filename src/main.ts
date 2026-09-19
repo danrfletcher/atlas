@@ -103,6 +103,15 @@ export default class AtlasPlugin extends Plugin {
 		console.debug("[Atlas] unloading");
 	}
 
+	/** PR 15 fix: re-renders every open Atlas explorer leaf — used by the settings tab right after a
+	 * display-only toggle (Glow, Retain icons, Retained icon color) that nothing else would trigger
+	 * a re-render for. More than one leaf is possible if the view is split. */
+	refreshExplorerViews(): void {
+		for (const leaf of this.app.workspace.getLeavesOfType(ATLAS_VIEW_TYPE)) {
+			if (leaf.view instanceof AtlasExplorerView) leaf.view.refresh();
+		}
+	}
+
 	/** Opens the Atlas explorer in the left sidebar, reusing an existing leaf if one's already open. */
 	async activateExplorerView(): Promise<void> {
 		const { workspace } = this.app;

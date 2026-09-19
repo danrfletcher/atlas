@@ -80,11 +80,12 @@ The settings panel has two tabs: **Basic** and **Status**.
 
 ### Status
 
-Foundation for status sets — defining sets here is currently the whole feature; assigning a set to an item happens from its right-click menu in a later release.
-
 - **Status sets** — create any number of named sets, each holding an ordered list of statuses (label, color, optionally flagged "Completed" and/or "Cancelled"). Each status row's "more actions" menu handles making it the set's default, marking it completed/cancelled, reordering, and removing it.
 - **Color palette** — a shared set of swatches offered by every status color picker, in addition to a fully custom color.
-- **Glow** — a design toggle for a soft glow around status dots once status rendering ships.
+- **Glow** — a soft glow around status dots.
+- **Retain icons** — when a status is assigned, keeps the item's normal type icon visible, shrunk down inside the status dot, instead of replacing it outright.
+
+A bucket item with children (unit or meta folder — the option only appears when there's something underneath it) gets a **Statuses** entry on its right-click menu: a master on/off toggle plus which status set governs it. When on, that item's **direct children** each show a colored dot for the set's default status — the item itself is unaffected, only what's underneath it. This is a minimal, per-item assignment for now — no cascading past one level, hiding, or truncation yet (a later release). Inbox items (not yet placed in any view) can't have a status assigned until they're placed in a bucket.
 
 ## Commands
 
@@ -98,7 +99,7 @@ Foundation for status sets — defining sets here is currently the whole feature
 | `Atlas: New view` | Prompts for a name and creates a new, empty view. |
 | `Atlas: Rebuild index` | Forces a full re-scan of every unit in the vault; logs timings to the console. |
 
-Every row in the explorer also has a right-click menu (Open, Open in new tab, Reveal in native explorer, Copy link, Duplicate (Meta), Remove from view, Place in view…), and folders can be renamed or deleted from the same menu. "Duplicate (Meta)" places a second reference to the same item — and, if it's a parent, a copy of everything nested under it — right next to the original, without touching disk; the copy is free to be organized independently from then on.
+Every row in the explorer also has a right-click menu (Open, Open in new tab, Reveal in native explorer, Copy link, Duplicate (Meta), Remove from view, Place in view…), and folders can be renamed or deleted from the same menu. "Duplicate (Meta)" places a second reference to the same item — and, if it's a parent, a copy of everything nested under it — right next to the original, without touching disk; the copy is free to be organized independently from then on. Bucket rows (units and meta folders) also get a **Statuses** option — see the Status settings section above.
 
 ## Documentation
 

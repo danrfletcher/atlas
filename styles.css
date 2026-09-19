@@ -265,6 +265,54 @@
 	color: var(--icon-color);
 }
 
+/* PR 15: a status dot's outer slot keeps the row's normal icon-slot footprint (so row text
+ * doesn't shift left/right when a status toggles on/off) and just centers a small inner circle —
+ * Dan-found sizing fix: the circle itself is 10px, matching the reference plugin's own `.ffsi-dot`
+ * exactly (checked its live container build), not the full icon-slot size, which read oversized.
+ * The outer slot's own size must stay pinned explicitly (18px, Obsidian's own default icon
+ * footprint, measured live against a plain `setIcon` row) — flex alone lets it shrink-to-fit the
+ * smaller circle, which silently misaligned row text between status and non-status rows. */
+.atlas-icon.atlas-status-dot {
+	width: 18px;
+	height: 18px;
+	align-items: center;
+	justify-content: center;
+}
+
+.atlas-status-dot-circle {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	width: 10px;
+	height: 10px;
+	border-radius: 50%;
+	flex-shrink: 0;
+	box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.15);
+}
+
+/* Layered currentColor shadow, same technique + values as the reference plugin's own glow —
+ * `color` is set inline alongside `background-color` in JS so both resolve to the status's hex. */
+.atlas-status-dot-circle.atlas-status-glow {
+	box-shadow:
+		0 0 0 1px rgba(0, 0, 0, 0.15),
+		0 0 3px 1px currentColor,
+		0 0 7px 2px currentColor;
+}
+
+.atlas-status-dot-icon {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	width: 6px;
+	height: 6px;
+}
+
+.atlas-status-dot-icon svg {
+	display: block;
+	width: 6px;
+	height: 6px;
+}
+
 /* PR 9 (issue 2, point 4): a module row's icon crossfades closed→open on hover instead of a real
  * SVG morph (not feasible without a third-party icon-morphing library) — two icons stacked via
  * `position: absolute` inside the same cell, opacity-swapped on `:hover`. The tooltip itself
@@ -299,8 +347,10 @@
  * module row — everywhere else on the row means meta-nest instead). `.atlas-drop-target` on its own
  * is scoped to `.atlas-row` elsewhere, which the icon isn't, so it needs its own small ring rather
  * than inheriting that row-wide outline — `outline-offset` positive (not the row's negative) since
- * a 16px icon has no room to inset into. */
-.atlas-module-icon.atlas-drop-target {
+ * a 16px icon has no room to inset into. Scoped to `.atlas-icon` generally (not just
+ * `.atlas-module-icon`) so a governed module showing its status dot instead of the folder icon
+ * (PR 15 fix) still gets the same drop-target ring — `iconEl` stays the drop zone either way. */
+.atlas-icon.atlas-drop-target {
 	outline: 2px dashed var(--interactive-accent);
 	outline-offset: 2px;
 	border-radius: 3px;

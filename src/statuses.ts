@@ -1,8 +1,10 @@
+import { ViewNode } from "./types";
+
 /**
  * PR 14 — foundation for the File Folder Status Sets port (ported from
  * `danrfletcher/obsidian-file-folder-status-icons`, adapted to Atlas's own persistence/CRUD style
- * rather than reused as a dependency). Data model + settings-panel CRUD only — no rendering or
- * per-item assignment yet, those land in PR 15/16.
+ * rather than reused as a dependency). Data model + settings-panel CRUD only in PR 14 — PR 15 adds
+ * `resolveNodeStatus` below for the minimal per-node rendering/assignment mechanism.
  */
 
 export interface StatusDefinition {
@@ -52,6 +54,7 @@ export function normalizeHexColor(value: string, fallback = "#888888"): string {
 	const v = value.trim();
 	return isValidHexColor(v) ? v : fallback;
 }
+
 
 function generateStatusId(prefix: string): string {
 	return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
@@ -179,5 +182,20 @@ export class StatusesManager {
 	removePaletteColor(hex: string): void {
 		this.colorPalette = this.colorPalette.filter((c) => c !== hex);
 		this.save();
+	}
+
+	/** PR 15: resolves the status a *governing* node assigns to its direct children — `node` here is
+	 * the parent being checked, not the row being rendered (Dan's own spec: "the statuses apply to
+	 * the first direct children under that item", never to the item itself). `null` means "the
+	 * caller's row shows its normal icon, unaffected" (no governing parent, disabled, no set chosen,
+	 * the set was since deleted, or the set has no statuses to fall back to). No inheritance beyond
+	 * one level yet (PR 16+): a grandchild never shows a status just because a grandparent has one.
+	 * Defaults to the set's own `defaultStatusId` since PR 15 has no per-child "which specific
+	 * status" picker yet, just "which set". */
+	resolveNodeStatus(node: ViewNode): StatusDefinition | null {
+		if (!node.statusEnabled || !node.statusSetId) return null;
+		const set = this.getStatusSet(node.statusSetId);
+		if (!set || set.statuses.length === 0) return null;
+		return set.statuses.find((s) => s.id === set.defaultStatusId) ?? set.statuses[0];
 	}
 }
