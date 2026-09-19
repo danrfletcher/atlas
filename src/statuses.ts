@@ -1,4 +1,4 @@
-import { ViewNode } from "./types";
+import { ApplyToConfig, StatusGovernance, ViewNode } from "./types";
 
 /**
  * PR 14 — foundation for the File Folder Status Sets port (ported from
@@ -13,7 +13,7 @@ export interface StatusDefinition {
 	label: string;
 	/** Hex color, e.g. "#e03131". */
 	color: string;
-	/** A set may have more than one completed status. Hidden via PR 16/18's "hide completed" toggle. */
+	/** A set may have more than one completed status. Hidden via PR 17/19's "hide completed" toggle. */
 	isCompleted?: boolean;
 	/** Same idea as `isCompleted`, a separate axis — hidden via "hide cancelled" instead. */
 	isCancelled?: boolean;
@@ -184,20 +184,31 @@ export class StatusesManager {
 		this.save();
 	}
 
-	/** PR 15/16: resolves the status a *governing* node assigns to one of its direct children —
-	 * `governor` is the parent being checked, not the row being rendered (Dan's own spec: "the
-	 * statuses apply to the first direct children under that item", never to the item itself);
-	 * `child` is the actual row, checked for its own `explicitStatusId` (PR 16 — "change this one
-	 * task's status", picked from the popup) before falling back to the governor set's own
-	 * `defaultStatusId`. `null` means "the caller's row shows its normal icon, unaffected" (no
-	 * governing parent, disabled, no set chosen, the set was since deleted, or the set has no
-	 * statuses to fall back to). A stale `explicitStatusId` (status removed, or the governor
-	 * switched to a different set entirely) degrades gracefully to the set's default rather than
-	 * erroring — same as every other "was this deleted out from under us" case in this file. No
-	 * inheritance beyond one level yet (PR 17+): a grandchild never shows a status just because a
-	 * grandparent has one. */
-	resolveNodeStatus(governor: ViewNode, child: ViewNode): StatusDefinition | null {
-		if (!governor.statusEnabled || !governor.statusSetId) return null;
+	/** PR 15/16/17: resolves the status a row should display by walking its ancestor chain —
+	 * `ancestors[0]` is the nearest (direct parent, or the view root for a top-level item),
+	 * `ancestors[ancestors.length - 1]` the furthest. The *nearest* ancestor that's actually a
+	 * governor (`statusEnabled` + `statusSetId` set) wins — same "closest ancestor with an explicit
+	 * value" precedence an inherited CSS property would have. A non-governing ancestor is skipped
+	 * over while walking (it might just not have "Statuses" turned on at all), but once a real
+	 * governor is found, the walk stops there regardless of whether it actually reaches `child` —
+	 * an ancestor beyond it never gets a chance to "reach past" a closer governor that declined to
+	 * inherit. The direct parent (index 0) always reaches its own children by definition; anything
+	 * further up only reaches if *that specific governor* has `inheritToSubfolders` on (PR 17).
+	 *
+	 * `child` is the actual row: checked for its own `explicitStatusId` (PR 16 — "change this one
+	 * task's status") before falling back to the governor set's own `defaultStatusId`, and checked
+	 * against the winning governor's `applyTo` filter (PR 17 — block/file/module/meta-folder) before
+	 * anything is returned at all.
+	 *
+	 * `null` means "the caller's row shows its normal icon, unaffected": no governor found, the
+	 * nearest one doesn't reach this depth, `child`'s own kind is excluded via `applyTo`, no set
+	 * chosen, the set was since deleted, or the set has no statuses to fall back to. A stale
+	 * `explicitStatusId` (status removed, or the governor switched to a different set entirely)
+	 * degrades gracefully to the set's default rather than erroring — same as every other "was this
+	 * deleted out from under us" case in this file. */
+	resolveNodeStatus(ancestors: StatusGovernance[], child: ViewNode): StatusDefinition | null {
+		const governor = this.findGoverningAncestor(ancestors, child);
+		if (!governor?.statusSetId) return null;
 		const set = this.getStatusSet(governor.statusSetId);
 		if (!set || set.statuses.length === 0) return null;
 		if (child.explicitStatusId) {
@@ -205,5 +216,40 @@ export class StatusesManager {
 			if (explicit) return explicit;
 		}
 		return set.statuses.find((s) => s.id === set.defaultStatusId) ?? set.statuses[0];
+	}
+
+	/** PR 17: the same ancestor walk `resolveNodeStatus` uses, stopping at "which governor wins"
+	 * rather than continuing on to resolve an actual status — exposed separately so the click-to-
+	 * change-status popup (PR 16) can show *that* governor's status set, not just the nearest
+	 * ancestor unconditionally (which might not actually be the one in effect, if it doesn't reach
+	 * this depth or excludes this child's kind via `applyTo`). */
+	findGoverningAncestor(ancestors: StatusGovernance[], child: ViewNode): StatusGovernance | null {
+		for (let i = 0; i < ancestors.length; i++) {
+			const governor = ancestors[i];
+			if (!governor.statusEnabled || !governor.statusSetId) continue;
+			if (i > 0 && !governor.inheritToSubfolders) return null;
+			if (!appliesToKind(governor.applyTo, child)) return null;
+			return governor;
+		}
+		return null;
+	}
+}
+
+/** PR 17: an unset `applyTo`, or an unset individual field within it, defaults to `true` — matches
+ * the reference plugin's own default (`applyToFiles`/`applyToFolders` both on) — so a governor
+ * created before this PR existed keeps applying to everything it always did, not silently
+ * narrowing. "Module" = a real on-disk folder; "metaFolder" = the organizational, no-disk-presence
+ * kind — genuinely different things in Atlas (see `ApplyToConfig`'s own doc comment). */
+function appliesToKind(applyTo: ApplyToConfig | undefined, child: ViewNode): boolean {
+	if (child.type === "meta") return applyTo?.metaFolder ?? true;
+	switch (child.ref?.kind) {
+		case "block":
+			return applyTo?.block ?? true;
+		case "file":
+			return applyTo?.file ?? true;
+		case "folder":
+			return applyTo?.module ?? true;
+		default:
+			return true;
 	}
 }

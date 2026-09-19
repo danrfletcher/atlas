@@ -86,7 +86,16 @@ The settings panel has two tabs: **Basic** and **Status**.
 - **Retain icons** — when a status is assigned, keeps the item's normal type icon visible, shrunk down inside the status dot, instead of replacing it outright.
 - **Retained icon color** — only matters when "Retain icons" is on: match the icon to normal text color, or to the app's background color.
 
-A bucket item with children (unit or meta folder — the option only appears when there's something underneath it) gets a **Statuses** entry on its right-click menu: a master on/off toggle plus which status set governs it. When on, that item's **direct children** each show a colored dot for the set's default status — the item itself is unaffected, only what's underneath it. This is a minimal, per-item assignment for now — no cascading past one level, hiding, or truncation yet (a later release). Inbox items (not yet placed in any view) can't have a status assigned until they're placed in a bucket.
+A bucket item with children (unit or meta folder — the option only appears when there's something underneath it) gets a **Statuses** entry on its right-click menu, and the **view name** itself gets the same entry for assigning statuses at the root level of the whole view (also only offered when the bucket has something in it). Both open the same modal:
+
+- **Enable statuses** — master toggle. Everything else below is greyed out (but not discarded) while it's off.
+- **Status set** — which set governs this item's (or the view's) children.
+- **Inherit to subfolders** — off by default. When on, the assignment cascades past direct children all the way down the tree, until a *closer* item has its own separate assignment, which then takes over for its own subtree.
+- **Hide completed** / **Hide cancelled** — hide items whose current status is flagged as one or the other (not yet wired into the live tree — a later release).
+- **Apply statuses to** — which kinds of items underneath actually receive a dot: blocks, files, modules (real folders on disk), or meta folders (the organizational, no-disk-presence kind).
+- **Truncate statuses** — collapse every item sharing one particular status into a single summary row instead of listing each individually (not yet wired into the live tree — a later release).
+
+When enabled, the governed children each show a colored dot for the set's status — the governing item itself is unaffected, only what's underneath it. Inbox items (not yet placed in any view) can't have a status assigned until they're placed in a bucket.
 
 **Clicking a status dot directly** opens a small popup listing every status in the governing set, with its own color swatch — pick one to change that specific item's status (e.g. Triage → Complete), independent of its siblings. The item's own row click (open) and right-click (full menu) are unaffected — only the dot itself has this behavior. For a module whose icon is currently a status dot, viewing its contents moves to the right-click menu ("View module contents") instead of the plain click, which now means "change status" like everywhere else.
 
