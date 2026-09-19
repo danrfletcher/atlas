@@ -413,6 +413,19 @@ export class AtlasExplorerView extends ItemView {
 		const filterHadFocus = activeEl instanceof HTMLInputElement && activeEl.classList.contains("atlas-filter");
 		const filterSelectionStart = filterHadFocus ? activeEl.selectionStart : null;
 		const filterSelectionEnd = filterHadFocus ? activeEl.selectionEnd : null;
+		// Dan-found: Escape/Delete (`handleRowKeydown`) never reached a real keyboard press, even
+		// though the exact same keys worked fine dispatched synthetically straight at a queried row
+		// element in this PR's own CDP testing. Root cause is the same class of gap as the drag-abort
+		// bug earlier in this PR: a real click on a focusable (`tabIndex=0`) row focuses it natively
+		// (a browser's own default `mousedown` handling, before our `click` listener even runs) — but
+		// `handleSelectionClick` then calls `render()` in response to that same click, which
+		// `container.empty()`s the row right back out from under that just-assigned focus. The new
+		// row rebuilt in its place is a different DOM node and was never itself focused, so a
+		// following *real* keydown has nowhere relevant to land — while `dispatchEvent` in a test
+		// fires straight at whichever element you queried, focus state or not, so this was invisible
+		// to every synthetic test this PR ran. Same fix shape as the filter input's own focus restore
+		// just above/below: capture before `container.empty()`, restore after rebuild.
+		const activeRowKey = activeEl instanceof HTMLElement && activeEl.dataset.selectKey ? activeEl.dataset.selectKey : null;
 
 		container.empty();
 		container.addClass("atlas-explorer");
@@ -446,6 +459,15 @@ export class AtlasExplorerView extends ItemView {
 		const inboxUnits = this.plugin.viewsManager.getInboxUnits(allUnits, view.id, view.inboxMode);
 		const inboxEl = container.createDiv({ cls: "atlas-section atlas-inbox" });
 		await this.renderInboxSection(inboxEl, view, inboxUnits, inboxViewportScrollTop);
+
+		if (activeRowKey) {
+			const restored = container.querySelector<HTMLElement>(`[data-select-key="${CSS.escape(activeRowKey)}"]`);
+			// `preventScroll` — this row's own visible position (and the scroll position that shows
+			// it) was already restored above/in `renderVirtualizedInboxRows`; a plain `.focus()` here
+			// would otherwise fight that by scrolling to whatever the browser's own default
+			// focus-into-view behavior decides, undoing the fix just above it.
+			restored?.focus({ preventScroll: true });
+		}
 
 		container.scrollTop = scrollTop;
 		this.updateActiveHighlight();
