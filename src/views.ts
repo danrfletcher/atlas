@@ -178,15 +178,26 @@ export class ViewsManager {
 	}
 
 	/** Places `ref` under `parentId` (or bucket root if null). Moves it if already placed elsewhere
-	 * in this view, rather than creating a duplicate node for the same unit. */
+	 * in this view, rather than creating a duplicate node for the same unit. PR 13 review (A16): the
+	 * "already placed" branch used to splice out that instance and replace it with a brand-new node
+	 * (`children: []`), discarding whatever it had — dead code before duplication existed (only one
+	 * placement per ref per view was ever possible), now reachable: "Place in view…" onto a ref that
+	 * has meta-nested children silently dropped the subtree. Fixed the same way `handleDrop`'s
+	 * reparent path and `unplaceUnit` already were — move the real node in place instead of
+	 * discarding and recreating it, so its id/children travel with it. */
 	placeUnit(viewId: string, ref: UnitRef, parentId: string | null): void {
 		const view = this.getView(viewId);
 		if (!view) return;
 		const existing = this.findUnitNode(view.root, ref);
-		if (existing) existing.siblings.splice(existing.index, 1);
-		const node: ViewNode = { id: generateNodeId(), type: "unit", ref, children: [] };
 		const parent = parentId ? this.findNode(view.root, parentId) : null;
-		(parent ? parent.node.children : view.root).push(node);
+		const targetChildren = parent ? parent.node.children : view.root;
+		if (existing) {
+			const [node] = existing.siblings.splice(existing.index, 1);
+			targetChildren.push(node);
+		} else {
+			const node: ViewNode = { id: generateNodeId(), type: "unit", ref, children: [] };
+			targetChildren.push(node);
+		}
 		this.save();
 	}
 

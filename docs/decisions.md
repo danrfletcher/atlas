@@ -2,6 +2,12 @@
 
 Judgement calls made during the build, the alternative considered, and why. Newest first.
 
+## PR 13 follow-up: reviewer (A16) caught a third one-node-per-unit-per-view spot the technical check missed
+
+**Decision:** the PR 13 technical check (above) found and fixed two spots; the Atlas reviewer's pass on the finished PR found a third, same-day, before merge: `placeUnit`'s "already placed elsewhere in this view — move it" branch. It used to splice the existing instance out and build a **brand-new** node (`children: []`) at the target location — the exact same discard-and-recreate mistake PR 12 already fixed once for `handleDrop`'s reparent path, and PR 13 itself already fixed once for `unplaceUnit`. Unreachable before duplication existed (a ref could only ever have one placement per view, so "already placed" and "the one I'm about to lose children from" were never the same instance in a way that mattered); duplication makes it directly reachable — duplicate a unit with meta-nested children, then use "Place in view…" back onto that same ref, and the first duplicate's subtree silently vanished. Fixed with the same remedy as the other two: move the real node in place (same id, children travel with it) instead of discarding and recreating it. Verified live via `viewsManager.placeUnit(...)` called directly against a unit with two meta-nested children — moved node keeps its original id, both children present after the move.
+
+**Why this one slipped past the PR's own technical-check grep:** the check was framed around "does this assume at most one placement exists" — `placeUnit`'s already-placed branch does the opposite, it explicitly *handles* the multi-instance-capable case (that's exactly why it exists), so a grep for the missing-case pattern didn't flag it. The actual bug wasn't in the *existence check*, it was in *how* the existing instance got relocated once found. Worth remembering for PR 14 onward: "assumes uniqueness" and "handles a duplicate but mishandles what it carries" are different bug shapes, and the second one doesn't show up in a grep for the first.
+
 ## PR 13: allowing duplicate refs exposed two more places that assumed one-node-per-unit-per-view
 
 **Decision:** the grilled spec explicitly asked for a technical check — grep the codebase for anywhere that assumes a unit has at most one `ViewNode` per view, now that duplication makes that false. Two real spots turned up, both fixed here rather than filed separately, since they're a direct consequence of this PR's own feature.
