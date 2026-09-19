@@ -333,6 +333,13 @@ export class AtlasExplorerView extends ItemView {
 		this.registerDomEvent(window, "dragend", () => {
 			this.dragPayload = null;
 			this.cancelActiveDwell?.();
+			// PR 20 follow-up (reviewer-caught, A27): a successful drop already repaints via
+			// `handleDrop`'s own `render()` call, but an *abandoned* drag (dropped outside any
+			// registered zone, or cancelled with Escape) never reaches that — same "state correct,
+			// paint stale" bug family as the two Dan just found, just the one remaining branch.
+			// `queueRender` (not a direct `render()`) so this coalesces into the same repaint as a
+			// same-tick `handleDrop` call instead of doubling up on a successful drop.
+			this.queueRender();
 		});
 		await this.render();
 	}
