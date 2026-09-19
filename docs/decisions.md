@@ -16,6 +16,21 @@ Judgement calls made during the build, the alternative considered, and why. Newe
 
 **`getPlacements`/`pathToRef` also stopped at the first match per view.** The "placed in…" row tooltip would have silently under-reported a unit duplicated to two spots within the *same* view, showing only one of the two placements. Renamed to `allPathsToRef`, collects every match in the subtree via unconditional recursion instead of returning as soon as one is found.
 
+## PR 14: status data model shape, and a status-row layout it took two live bugs to get right
+
+**Decision:** port `StatusDefinition`/`StatusSet`/color-palette 1:1 from `danrfletcher/obsidian-file-folder-status-icons`'s own model (`id`/`label`/`color`/`isCompleted` on a status, `id`/`name`/`statuses`/`defaultStatusId` on a set, a flat hex-string palette array) rather than inventing a new shape — this is a foundation PR specifically meant to carry the reference plugin's model into Atlas, not redesign it. Added `isCancelled` alongside the reference plugin's `isCompleted` (grilled: PR 16/18 need a "hide cancelled" axis distinct from "hide completed", and building both flags in now avoids a schema migration later for a field this cheap to add up front). `glowEnabled` lives as a plain boolean on `AtlasSettings` (saved immediately, like every other simple toggle) rather than inside the status-set data (saved via the existing debounced path) — it's a display preference, not part of any one set's definition.
+
+**`StatusesManager` mirrors `ViewsManager`'s shape** (constructor-injected `persist` callback, mutate-then-save methods, no direct `data.json` access of its own) for consistency with the rest of the plugin's persistence pattern, rather than introducing a different style for this one manager.
+
+**Folder assignments intentionally don't come across.** The reference plugin config's statuses per-folder via a settings-panel picker; Atlas assigns per-item via right-click (PR 15/16) to match how everything else in Atlas is configured (in the explorer, not the settings panel) — this PR only builds the set *definitions*, no assignment mechanism exists yet at all.
+
+**Two real layout bugs found and fixed during live testing, not left as known gaps:**
+
+1. The first pass put two full toggle+label pairs (Completed/Cancelled) plus four extra-button icons (make default, move up, move down, delete) directly on each status row. Measured live via CDP against the actual settings panel: the row's control area computed to 645px inside a ~300px-wide row — badly overflowing, forcing horizontal scroll just to reach the delete button. The reference plugin sidesteps this with a dedicated "more actions" popup utility (`openChoicePopup`) it built for exactly this problem; rather than porting a second popup system, everything except the swatch/label/badges was folded into a single "more actions" menu using Atlas's own existing `Menu` import (already used by the explorer's row context menus). Control width dropped to ~130px.
+2. The native `<input type="color">` swatch ignored its own `width: 28px` — Chromium renders its color swatch inside a `::-webkit-color-swatch-wrapper` shadow part with its own intrinsic sizing, so constraining the host element alone left it at 81px regardless of the CSS. Fixed by also styling the `::-webkit-color-swatch-wrapper`/`::-webkit-color-swatch` pseudo-elements directly.
+
+Both were caught by measuring actual rendered dimensions live in the container rather than trusting the code to look right — the settings panel is a fixed-width native pane, not a page that reflows, so an overflow here doesn't have the safety net a responsive web layout would.
+
 ## PR 12: two pre-existing bugs found while unifying the data model, fixed as part of this PR rather than filed separately
 
 **Decision:** while implementing meta-nesting-via-drop, reading `handleDrop`'s reparent logic closely (necessary anyway, since it's the exact function this PR needed to generalize) surfaced two real bugs that predate this PR entirely. Fixed both here rather than opening them as separate follow-ups, since PR 12 is what makes them newly reachable/consequential and the fix sits directly alongside the code this PR was already rewriting.
