@@ -557,7 +557,7 @@ export class AtlasExplorerView extends ItemView {
 		this.makeDropZone(sectionInner, { kind: "bucket-root", viewId: view.id });
 
 		const listEl = sectionInner.createDiv({ cls: "atlas-node-list" });
-		await this.renderNodeList(view.root, listEl, view, 0);
+		await this.renderNodeList(view.root, listEl, view, 0, null);
 
 		let localCollapsed = this.bucketCollapsed;
 		let pendingPersist: number | undefined;
@@ -574,9 +574,9 @@ export class AtlasExplorerView extends ItemView {
 		});
 	}
 
-	private async renderNodeList(nodes: ViewNode[], container: HTMLElement, view: View, depth: number): Promise<void> {
+	private async renderNodeList(nodes: ViewNode[], container: HTMLElement, view: View, depth: number, parentNode: ViewNode | null): Promise<void> {
 		for (const node of nodes) {
-			await this.renderNode(node, container, view, depth);
+			await this.renderNode(node, container, view, depth, parentNode);
 		}
 	}
 
@@ -642,7 +642,7 @@ export class AtlasExplorerView extends ItemView {
 		const childrenWrap = container.createDiv({ cls: "atlas-meta-children" });
 		childrenWrap.toggleClass("is-collapsed", effectiveCollapsed);
 		const childrenInner = childrenWrap.createDiv({ cls: "atlas-meta-children-inner" });
-		await this.renderNodeList(node.children, childrenInner, view, depth + 1);
+		await this.renderNodeList(node.children, childrenInner, view, depth + 1, node);
 
 		// Local optimistic state, not `node.collapsed` — real bug caught in review: `node.collapsed`
 		// only updates once the delayed `setNodeCollapsed` below actually runs, so a second click
@@ -665,12 +665,17 @@ export class AtlasExplorerView extends ItemView {
 	}
 
 	/** PR 15: renders a row's icon slot — either its normal type icon (`fallbackIconName`) or, if
-	 * this exact node has its own status assigned, a colored status dot instead. "Retain icons"
+	 * this row's *parent* has statuses turned on for its children, a colored status dot instead.
+	 * Status assignment is descendant-governing, not self-governing (Dan's own spec: "the statuses
+	 * apply to the first direct children under that item") — a node's own `statusEnabled`/
+	 * `statusSetId` fields describe what its children show, never itself, so this deliberately
+	 * resolves against `parentNode`, not `node`. `parentNode` is `null` at the bucket root, where
+	 * nothing governs (PR 16 adds root-level assignment via the view-name selector). "Retain icons"
 	 * (Status → Design) keeps the normal icon visible, shrunk down inside the dot, rather than
 	 * replacing it outright. Shared by meta and unit rows so the two can't drift out of sync with
 	 * each other, the same reasoning `renderFoldableChildren`'s own extraction already used. */
-	private renderRowIcon(iconEl: HTMLElement, node: ViewNode, fallbackIconName: string): void {
-		const status = this.plugin.statusesManager.resolveNodeStatus(node);
+	private renderRowIcon(iconEl: HTMLElement, parentNode: ViewNode | null, fallbackIconName: string): void {
+		const status = parentNode ? this.plugin.statusesManager.resolveNodeStatus(parentNode) : null;
 		if (!status) {
 			setIcon(iconEl, fallbackIconName);
 			return;
@@ -686,14 +691,14 @@ export class AtlasExplorerView extends ItemView {
 		}
 	}
 
-	private async renderNode(node: ViewNode, container: HTMLElement, view: View, depth: number): Promise<void> {
+	private async renderNode(node: ViewNode, container: HTMLElement, view: View, depth: number, parentNode: ViewNode | null): Promise<void> {
 		if (node.type === "meta") {
 			const row = container.createDiv({ cls: "atlas-row atlas-row-meta" });
 			row.style.paddingLeft = `${depth * 16}px`;
 			row.setAttr("draggable", "true");
 			const chevron = row.createDiv({ cls: "atlas-chevron" });
 			const iconEl = row.createDiv({ cls: "atlas-icon" });
-			this.renderRowIcon(iconEl, node, "layers");
+			this.renderRowIcon(iconEl, parentNode, "layers");
 			row.createSpan({ cls: "atlas-row-text", text: node.label ?? "" });
 
 			row.addEventListener("dragstart", () => (this.dragPayload = { kind: "node", nodeId: node.id, viewId: view.id }));
@@ -729,7 +734,7 @@ export class AtlasExplorerView extends ItemView {
 		// this exact alignment problem, so reusing it here instead of a second magic-number offset.
 		const chevron = row.createDiv({ cls: "atlas-chevron" });
 		const iconEl = row.createDiv({ cls: "atlas-icon" });
-		this.renderRowIcon(iconEl, node, info.icon);
+		this.renderRowIcon(iconEl, parentNode, info.icon);
 		row.createSpan({ cls: "atlas-row-text", text: info.text });
 		if (info.promoted) row.createSpan({ cls: "atlas-badge", text: "promoted" });
 		if (info.secondary) row.createSpan({ cls: "atlas-row-secondary", text: info.secondary });
@@ -1068,8 +1073,13 @@ export class AtlasExplorerView extends ItemView {
 		}
 		menu.addItem((item) => item.setTitle("Copy link").setIcon("link").onClick(() => void this.copyLink(ref)));
 		menu.addSeparator();
-		menu.addItem((item) => item.setTitle("Statuses").setIcon("circle-dot").onClick(() => this.openStatusesModal(node, view)));
-		menu.addSeparator();
+		// PR 15 fix (Dan-found): status assignment governs this item's own *children*, not the item
+		// itself — an item with no children has nothing for the option to apply to, so it's hidden
+		// entirely rather than offered and doing nothing when toggled.
+		if (node.children.length > 0) {
+			menu.addItem((item) => item.setTitle("Statuses").setIcon("circle-dot").onClick(() => this.openStatusesModal(node, view)));
+			menu.addSeparator();
+		}
 		menu.addItem((item) =>
 			item
 				.setTitle("Remove from view")
@@ -1131,7 +1141,9 @@ export class AtlasExplorerView extends ItemView {
 					}).open();
 				})
 		);
-		menu.addItem((item) => item.setTitle("Statuses").setIcon("circle-dot").onClick(() => this.openStatusesModal(node, view)));
+		if (node.children.length > 0) {
+			menu.addItem((item) => item.setTitle("Statuses").setIcon("circle-dot").onClick(() => this.openStatusesModal(node, view)));
+		}
 		menu.addItem((item) =>
 			item
 				.setTitle("Delete folder")

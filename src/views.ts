@@ -269,10 +269,12 @@ export class ViewsManager {
 		this.save();
 	}
 
-	/** PR 15: this node's own minimal status assignment (master toggle + which set) — not applied
-	 * to any other node. `statusSetId: null` clears the assignment's set without necessarily
-	 * disabling it (the "Statuses" modal keeps the toggle's state independent of whether a set has
-	 * been chosen yet, matching PR 16's later "greyed out until master toggle on" framing). */
+	/** PR 15: this node's minimal status assignment (master toggle + which set) governing its own
+	 * *direct children* — never this node's own displayed status (Dan's spec: "the statuses apply
+	 * to the first direct children under that item"). `statusSetId: null` clears the assignment's
+	 * set without necessarily disabling it (the "Statuses" modal keeps the toggle's state
+	 * independent of whether a set has been chosen yet, matching PR 16's later "greyed out until
+	 * master toggle on" framing). */
 	setNodeStatus(viewId: string, nodeId: string, enabled: boolean, statusSetId: string | null): void {
 		const view = this.getView(viewId);
 		const found = view && this.findNode(view.root, nodeId);

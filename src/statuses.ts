@@ -195,11 +195,14 @@ export class StatusesManager {
 		this.save();
 	}
 
-	/** PR 15: resolves a node's own status for rendering — `null` means "show the normal icon,
-	 * unaffected" (disabled, no set chosen, the set was since deleted, or the set has no statuses
-	 * to fall back to). No inheritance yet (PR 16+): a node with no assignment of its own never
-	 * shows a status just because an ancestor has one. Defaults to the set's own `defaultStatusId`
-	 * since PR 15 has no per-node "which specific status" picker yet, just "which set". */
+	/** PR 15: resolves the status a *governing* node assigns to its direct children — `node` here is
+	 * the parent being checked, not the row being rendered (Dan's own spec: "the statuses apply to
+	 * the first direct children under that item", never to the item itself). `null` means "the
+	 * caller's row shows its normal icon, unaffected" (no governing parent, disabled, no set chosen,
+	 * the set was since deleted, or the set has no statuses to fall back to). No inheritance beyond
+	 * one level yet (PR 16+): a grandchild never shows a status just because a grandparent has one.
+	 * Defaults to the set's own `defaultStatusId` since PR 15 has no per-child "which specific
+	 * status" picker yet, just "which set". */
 	resolveNodeStatus(node: ViewNode): StatusDefinition | null {
 		if (!node.statusEnabled || !node.statusSetId) return null;
 		const set = this.getStatusSet(node.statusSetId);
