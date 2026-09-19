@@ -281,8 +281,24 @@ export class ViewsManager {
 		this.save();
 	}
 
+	/** PR 18: a duplicate keeps the same status assignment its original had at the moment of
+	 * duplication (grilled default from TASKS.md, resolved during this PR's build — no reason for a
+	 * clone to start "blank" when everything else about it, including its own children, is copied).
+	 * The shallow `{ ...node }` spread is enough for every scalar `StatusGovernance` field
+	 * (`statusEnabled`, `statusSetId`, `inheritToSubfolders`, `explicitStatusId`, the hide flags), but
+	 * `applyTo`/`truncatedStatuses` are objects — spreading would leave the clone sharing the *same*
+	 * object reference as the original. Every write site (`modals.ts`, `updateStatusGovernance`)
+	 * happens to replace that reference wholesale rather than mutating in place, so this wouldn't
+	 * currently cause a visible bug either way — but a clone silently entangled with its original is
+	 * a landmine for the next person to touch this, so copy them explicitly rather than lean on that. */
 	private cloneNode(node: ViewNode): ViewNode {
-		return { ...node, id: generateNodeId(), children: node.children.map((child) => this.cloneNode(child)) };
+		return {
+			...node,
+			id: generateNodeId(),
+			applyTo: node.applyTo ? { ...node.applyTo } : node.applyTo,
+			truncatedStatuses: node.truncatedStatuses ? { ...node.truncatedStatuses } : node.truncatedStatuses,
+			children: node.children.map((child) => this.cloneNode(child)),
+		};
 	}
 
 	private isSameOrDescendant(node: ViewNode, targetId: string): boolean {
