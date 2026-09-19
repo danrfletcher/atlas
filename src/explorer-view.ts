@@ -1,9 +1,10 @@
 import { App, FuzzySuggestModal, ItemView, Menu, Modal, Notice, TFile, TFolder, WorkspaceLeaf, setIcon, setTooltip } from "obsidian";
 import type AtlasPlugin from "./main";
-import { StatusGovernance, Unit, UnitRef, View, ViewNode, unitRefKey, unitToRef } from "./types";
+import { StatusGovernance, TruncatedStatusConfig, Unit, UnitRef, View, ViewNode, unitRefKey, unitToRef } from "./types";
 import { MetaTarget, flattenMetaFolders } from "./views";
 import { resolveUnit } from "./unit-display";
 import { TextPromptModal, ConfirmModal, StatusesModal } from "./modals";
+import { StatusDefinition, pluralizeStatusLabel } from "./statuses";
 import { openStatusPickerPopup } from "./status-popup";
 import { createInterfaceNote, findInterfaceNote } from "./interface-notes";
 import { addBlock } from "./commands";
@@ -245,6 +246,11 @@ export class AtlasExplorerView extends ItemView {
 	 * already-open Module Contents modal, rather than the modal only ever seeing the filter text
 	 * that was active at the moment it was opened. */
 	private openModuleModal: ModuleContentsModal | null = null;
+	/** PR 19: which truncated-status groups are currently expanded back to their individual member
+	 * rows, keyed by `${governor kind}:${governor id}:${statusId}` (see `renderNodeList`'s `keyOf`).
+	 * Ephemeral UI state, not persisted — matches every other fold-state field on this view, and a
+	 * collapsed-by-default group is the expected state on next load, same as a freshly-opened bucket. */
+	private expandedTruncationGroups = new Set<string>();
 	private dragPayload: DragPayload | null = null;
 	/** Review follow-up (retroactive PR 9 finding): cancels whichever module row's dwell timer is
 	 * currently pending, if any — invoked from the window-level `dragend` backstop below. At most
@@ -593,10 +599,122 @@ export class AtlasExplorerView extends ItemView {
 		});
 	}
 
+	/** PR 19: wires PR 17's hide-completed/hide-cancelled/truncate-statuses settings (captured but
+	 * inert until now) into actual rendering. A node's governor and resolved status are looked up
+	 * once per node here — hidden/truncated status is a property of *this* rendering pass against
+	 * *these* ancestors, not the node itself, so it can't be decided any earlier (e.g. in `moveNode`,
+	 * PR 18's own finding) or cached across renders.
+	 *
+	 * Precedence, per TASKS.md's own edge case: hide wins outright — a hidden item is excluded from
+	 * rendering *and* from a truncated group's count, never appearing even as a tally. Among what's
+	 * left, a status truncation-enabled on its governor only actually collapses once at least two
+	 * siblings share it (a "group" of one is just the item itself — matches the reference plugin's
+	 * own `>= 2` threshold, ported directly rather than reinvented, since collapsing a lone item into
+	 * a summary of itself has no purpose).
+	 *
+	 * Filter interaction (flagged in TASKS.md as "not yet grilled, resolve if obvious during build"):
+	 * a node that itself matches the active filter, or contains a descendant that does, always
+	 * renders individually — same "never let a filter match hide behind something else" principle
+	 * `renderFoldableChildren` already applies to collapsed folders (PR 9 issue 6), extended to cover
+	 * hide/truncate the same way. */
 	private async renderNodeList(nodes: ViewNode[], container: HTMLElement, view: View, depth: number, ancestors: StatusGovernance[]): Promise<void> {
+		const sm = this.plugin.statusesManager;
+		const filterActive = !!this.filterText.trim();
+
+		interface Resolved {
+			node: ViewNode;
+			status: StatusDefinition | null;
+			governor: StatusGovernance | null;
+			bypass: boolean;
+		}
+		const resolved: Resolved[] = [];
 		for (const node of nodes) {
+			const governor = sm.findGoverningAncestor(ancestors, node);
+			const status = governor ? sm.resolveNodeStatus(ancestors, node) : null;
+			let bypass = false;
+			if (filterActive) {
+				if (node.type === "unit" && node.ref) {
+					const info = await this.resolveRef(node.ref);
+					if (this.matchesFilter(info.text)) bypass = true;
+				}
+				if (!bypass && node.children.length > 0 && (await this.subtreeHasMatch(node.children))) bypass = true;
+			}
+			resolved.push({ node, status, governor, bypass });
+		}
+
+		const isHidden = (status: StatusDefinition, governor: StatusGovernance): boolean =>
+			(!!status.isCompleted && !!governor.hideCompleted) || (!!status.isCancelled && !!governor.hideCancelled);
+		const groupKeyOf = (governor: StatusGovernance, statusId: string): string =>
+			(governor === view ? `view:${view.id}` : `node:${(governor as ViewNode).id}`) + `:${statusId}`;
+
+		const counts = new Map<string, number>();
+		for (const r of resolved) {
+			if (r.bypass || !r.status || !r.governor) continue;
+			if (isHidden(r.status, r.governor)) continue;
+			if (!r.governor.truncatedStatuses?.[r.status.id]?.enabled) continue;
+			const key = groupKeyOf(r.governor, r.status.id);
+			counts.set(key, (counts.get(key) ?? 0) + 1);
+		}
+
+		const groupRowShown = new Set<string>();
+		for (const r of resolved) {
+			const { node, status, governor, bypass } = r;
+			if (!bypass && status && governor && isHidden(status, governor)) continue; // hide wins outright
+
+			if (!bypass && status && governor) {
+				const config = governor.truncatedStatuses?.[status.id];
+				if (config?.enabled && (counts.get(groupKeyOf(governor, status.id)) ?? 0) >= 2) {
+					const key = groupKeyOf(governor, status.id);
+					const expanded = this.expandedTruncationGroups.has(key);
+					if (!groupRowShown.has(key)) {
+						groupRowShown.add(key);
+						this.renderTruncationGroupHeader(container, view, key, status, config, counts.get(key) ?? 0, depth, expanded);
+					}
+					if (!expanded) continue; // folded into the placeholder above, not rendered as its own row
+				}
+			}
+
 			await this.renderNode(node, container, view, depth, ancestors);
 		}
+	}
+
+	/** PR 19: the group placeholder ("3 Done") when collapsed, or a small "Collapse" affordance
+	 * (placed once, right before the group's first member) when expanded — both toggle the same
+	 * ephemeral `expandedTruncationGroups` entry and re-render. Deliberately a dedicated row rather
+	 * than the reference plugin's own double-click-a-member's-dot gesture: Atlas already binds a
+	 * single click on a status dot to opening the change-status popup (PR 16), so overloading a
+	 * second, timing-based meaning onto the same target would collide with an already-shipped,
+	 * reviewed interaction rather than cleanly extend it — an explicit, discoverable row avoids that
+	 * collision entirely and costs nothing extra to build on top of the row primitives already here. */
+	private renderTruncationGroupHeader(
+		container: HTMLElement,
+		view: View,
+		key: string,
+		status: StatusDefinition,
+		config: TruncatedStatusConfig,
+		count: number,
+		depth: number,
+		expanded: boolean
+	): void {
+		const row = container.createDiv({ cls: "atlas-row atlas-row-internal atlas-truncation-row" });
+		row.style.paddingLeft = `${depth * 16}px`;
+		const chevron = row.createDiv({ cls: "atlas-chevron" });
+		const iconEl = row.createDiv({ cls: "atlas-icon atlas-status-dot" });
+		const circle = iconEl.createDiv({ cls: "atlas-status-dot-circle" });
+		circle.style.backgroundColor = status.color;
+		circle.style.color = status.color;
+		if (expanded) {
+			setIcon(chevron, "chevron-down");
+			row.createSpan({ cls: "atlas-row-text", text: "Collapse" });
+		} else {
+			const label = config.label?.trim() || pluralizeStatusLabel(status.label);
+			row.createSpan({ cls: "atlas-row-text", text: `${count} ${label}` });
+		}
+		row.addEventListener("click", () => {
+			if (expanded) this.expandedTruncationGroups.delete(key);
+			else this.expandedTruncationGroups.add(key);
+			void this.render();
+		});
 	}
 
 	private matchesFilter(text: string): boolean {

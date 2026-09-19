@@ -235,6 +235,15 @@ export class StatusesManager {
 	}
 }
 
+/** PR 19: default truncated-group placeholder label when the governor hasn't set a custom one,
+ * e.g. "Idea" -> "Ideas" — ported from the reference plugin's own `pluralizeStatusLabel` (same
+ * name, same "Items" fallback for a blank status label, same naive "already ends in s" check). */
+export function pluralizeStatusLabel(label: string): string {
+	const trimmed = label.trim();
+	if (trimmed === "") return "Items";
+	return trimmed.toLowerCase().endsWith("s") ? trimmed : `${trimmed}s`;
+}
+
 /** PR 17: an unset `applyTo`, or an unset individual field within it, defaults to `true` — matches
  * the reference plugin's own default (`applyToFiles`/`applyToFolders` both on) — so a governor
  * created before this PR existed keeps applying to everything it always did, not silently
