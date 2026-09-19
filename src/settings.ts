@@ -20,6 +20,10 @@ export interface AtlasSettings {
 	/** PR 15: when a status dot replaces a row's normal icon, keep that icon visible shrunk down
 	 * inside the dot instead of hiding it outright. */
 	retainIcons: boolean;
+	/** PR 15 (Dan-found follow-up): which color a retained icon uses — `true` matches the app
+	 * background (a "cut out of the dot" look), `false` matches normal text color. Only meaningful
+	 * when `retainIcons` is on. */
+	retainIconMatchBackground: boolean;
 }
 
 export const DEFAULT_TO_DELETE_FOLDER = "_to_delete";
@@ -35,6 +39,7 @@ export const DEFAULT_SETTINGS: AtlasSettings = {
 	confirmAddToModule: true,
 	glowEnabled: false,
 	retainIcons: false,
+	retainIconMatchBackground: false,
 };
 
 /** Dot-folders + the pool folder + `_to_delete`, computed once against the live vault root. */
@@ -383,6 +388,7 @@ export class AtlasSettingTab extends PluginSettingTab {
 				toggle.setValue(this.plugin.settings.glowEnabled).onChange(async (value) => {
 					this.plugin.settings.glowEnabled = value;
 					await this.plugin.saveSettings();
+					this.plugin.refreshExplorerViews();
 				})
 			);
 
@@ -393,7 +399,23 @@ export class AtlasSettingTab extends PluginSettingTab {
 				toggle.setValue(this.plugin.settings.retainIcons).onChange(async (value) => {
 					this.plugin.settings.retainIcons = value;
 					await this.plugin.saveSettings();
+					this.plugin.refreshExplorerViews();
 				})
+			);
+
+		new Setting(containerEl)
+			.setName("Retained icon color")
+			.setDesc("Only matters when \"Retain icons\" is on. Match the icon to normal text color, or to the app's background color.")
+			.addDropdown((dropdown) =>
+				dropdown
+					.addOption("text", "Match text color")
+					.addOption("background", "Match background color")
+					.setValue(this.plugin.settings.retainIconMatchBackground ? "background" : "text")
+					.onChange(async (value) => {
+						this.plugin.settings.retainIconMatchBackground = value === "background";
+						await this.plugin.saveSettings();
+						this.plugin.refreshExplorerViews();
+					})
 			);
 	}
 }

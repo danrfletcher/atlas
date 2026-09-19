@@ -3,7 +3,6 @@ import type AtlasPlugin from "./main";
 import { Unit, UnitRef, View, ViewNode, unitRefKey, unitToRef } from "./types";
 import { MetaTarget, flattenMetaFolders } from "./views";
 import { resolveUnit } from "./unit-display";
-import { contrastingTextColor } from "./statuses";
 import { TextPromptModal, ConfirmModal, StatusesModal } from "./modals";
 import { createInterfaceNote, findInterfaceNote } from "./interface-notes";
 import { addBlock } from "./commands";
@@ -310,6 +309,16 @@ export class AtlasExplorerView extends ItemView {
 			this.renderQueued = false;
 			void this.render();
 		}, 0);
+	}
+
+	/** PR 15 fix (Dan-found): Glow/Retain icons/Retained icon color are read fresh on every render,
+	 * but nothing was triggering a render when they changed in Settings — `unitIndex`/`viewsManager`
+	 * changes already auto-refresh via `queueRender` (wired in `onOpen`), these plain settings don't
+	 * go through either, so toggling one silently had no visible effect until something else
+	 * happened to re-render. Called by the settings tab right after `saveSettings()` for exactly
+	 * these toggles. */
+	refresh(): void {
+		this.queueRender();
 	}
 
 	// --- ref resolution (shared by bucket + inbox rendering) -------------------------------------
@@ -670,10 +679,20 @@ export class AtlasExplorerView extends ItemView {
 	 * apply to the first direct children under that item") — a node's own `statusEnabled`/
 	 * `statusSetId` fields describe what its children show, never itself, so this deliberately
 	 * resolves against `parentNode`, not `node`. `parentNode` is `null` at the bucket root, where
-	 * nothing governs (PR 16 adds root-level assignment via the view-name selector). "Retain icons"
-	 * (Status → Design) keeps the normal icon visible, shrunk down inside the dot, rather than
-	 * replacing it outright. Shared by meta and unit rows so the two can't drift out of sync with
-	 * each other, the same reasoning `renderFoldableChildren`'s own extraction already used. */
+	 * nothing governs (PR 16 adds root-level assignment via the view-name selector).
+	 *
+	 * Dan-found sizing fix: the dot itself is a small (10px) circle centered inside the row's normal
+	 * icon-slot footprint, not the whole slot — matching the reference plugin's own `.ffsi-dot`
+	 * dimensions exactly (checked its live container build) rather than the icon-slot's full size,
+	 * which read as oversized. Color and glow (`currentColor`-based layered box-shadow, same
+	 * technique the reference plugin uses) are set on this inner circle, not the outer slot, so the
+	 * glow radius is proportioned to the small dot instead of a large box.
+	 *
+	 * "Retain icons" (Status → Design) keeps the normal icon visible, shrunk down inside the circle,
+	 * colored via "Retained icon color" (also Status → Design) — either the theme's normal text
+	 * color or its background color, Dan's choice, not a fixed black/white contrast heuristic.
+	 * Shared by meta and unit rows so the two can't drift out of sync with each other, the same
+	 * reasoning `renderFoldableChildren`'s own extraction already used. */
 	private renderRowIcon(iconEl: HTMLElement, parentNode: ViewNode | null, fallbackIconName: string): void {
 		const status = parentNode ? this.plugin.statusesManager.resolveNodeStatus(parentNode) : null;
 		if (!status) {
@@ -681,12 +700,13 @@ export class AtlasExplorerView extends ItemView {
 			return;
 		}
 		iconEl.addClass("atlas-status-dot");
-		iconEl.toggleClass("atlas-status-glow", this.plugin.settings.glowEnabled);
-		iconEl.style.backgroundColor = status.color;
-		iconEl.style.setProperty("--status-dot-glow-color", status.color);
+		const circle = iconEl.createDiv({ cls: "atlas-status-dot-circle" });
+		circle.toggleClass("atlas-status-glow", this.plugin.settings.glowEnabled);
+		circle.style.backgroundColor = status.color;
+		circle.style.color = status.color; // currentColor source for the glow box-shadow layers
 		if (this.plugin.settings.retainIcons) {
-			const innerIcon = iconEl.createSpan({ cls: "atlas-status-dot-icon" });
-			innerIcon.style.color = contrastingTextColor(status.color);
+			const innerIcon = circle.createSpan({ cls: "atlas-status-dot-icon" });
+			innerIcon.style.color = this.plugin.settings.retainIconMatchBackground ? "var(--background-primary)" : "var(--text-normal)";
 			setIcon(innerIcon, fallbackIconName);
 		}
 	}

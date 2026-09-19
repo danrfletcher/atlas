@@ -55,17 +55,6 @@ export function normalizeHexColor(value: string, fallback = "#888888"): string {
 	return isValidHexColor(v) ? v : fallback;
 }
 
-/** PR 15: picks black or white so a "Retain icons" icon stays legible against an arbitrary
- * user-chosen status dot color, the same contrast heuristic the reference plugin uses. */
-export function contrastingTextColor(hex: string): "#000000" | "#ffffff" {
-	const normalized = normalizeHexColor(hex).replace("#", "");
-	const full = normalized.length === 3 ? normalized.split("").map((ch) => ch + ch).join("") : normalized;
-	const r = parseInt(full.substring(0, 2), 16);
-	const g = parseInt(full.substring(2, 4), 16);
-	const b = parseInt(full.substring(4, 6), 16);
-	const luminance = (r * 299 + g * 587 + b * 114) / 1000;
-	return luminance > 150 ? "#000000" : "#ffffff";
-}
 
 function generateStatusId(prefix: string): string {
 	return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
