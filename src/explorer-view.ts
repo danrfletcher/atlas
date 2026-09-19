@@ -1,6 +1,6 @@
 import { App, FuzzySuggestModal, ItemView, Menu, Modal, Notice, TFile, TFolder, WorkspaceLeaf, setIcon, setTooltip } from "obsidian";
 import type AtlasPlugin from "./main";
-import { Unit, UnitRef, View, ViewNode, unitRefKey, unitToRef } from "./types";
+import { StatusGovernance, Unit, UnitRef, View, ViewNode, unitRefKey, unitToRef } from "./types";
 import { MetaTarget, flattenMetaFolders } from "./views";
 import { resolveUnit } from "./unit-display";
 import { TextPromptModal, ConfirmModal, StatusesModal } from "./modals";
@@ -424,6 +424,13 @@ export class AtlasExplorerView extends ItemView {
 					).open();
 				})
 			);
+			// PR 17: root-level assignment — same "Statuses" modal as any other item, just governing
+			// the view's own top-level items instead of one specific node's children. Same no-nothing-
+			// to-apply-to gate as any other item (PR 15): an empty bucket has nothing underneath it.
+			if (view.root.length > 0) {
+				menu.addSeparator();
+				menu.addItem((item) => item.setTitle("Statuses").setIcon("circle-dot").onClick(() => this.openStatusesModal(view, null)));
+			}
 			menu.showAtMouseEvent(evt);
 		});
 
@@ -567,7 +574,9 @@ export class AtlasExplorerView extends ItemView {
 		this.makeDropZone(sectionInner, { kind: "bucket-root", viewId: view.id });
 
 		const listEl = sectionInner.createDiv({ cls: "atlas-node-list" });
-		await this.renderNodeList(view.root, listEl, view, 0, null);
+		// PR 17: the view itself is the root governor — top-level items resolve their status against
+		// it exactly the same way any other item resolves against its parent node, no special-casing.
+		await this.renderNodeList(view.root, listEl, view, 0, [view]);
 
 		let localCollapsed = this.bucketCollapsed;
 		let pendingPersist: number | undefined;
@@ -584,9 +593,9 @@ export class AtlasExplorerView extends ItemView {
 		});
 	}
 
-	private async renderNodeList(nodes: ViewNode[], container: HTMLElement, view: View, depth: number, parentNode: ViewNode | null): Promise<void> {
+	private async renderNodeList(nodes: ViewNode[], container: HTMLElement, view: View, depth: number, ancestors: StatusGovernance[]): Promise<void> {
 		for (const node of nodes) {
-			await this.renderNode(node, container, view, depth, parentNode);
+			await this.renderNode(node, container, view, depth, ancestors);
 		}
 	}
 
@@ -628,7 +637,7 @@ export class AtlasExplorerView extends ItemView {
 	 * optimistic-local-state-then-delayed-persist click pattern used everywhere else fold/unfold
 	 * happens in this plugin — extracted here instead of duplicated per node type so the two can't
 	 * drift out of sync with each other the way duplicated logic has caused bugs before in this build. */
-	private async renderFoldableChildren(node: ViewNode, chevron: HTMLElement, container: HTMLElement, view: View, depth: number): Promise<void> {
+	private async renderFoldableChildren(node: ViewNode, chevron: HTMLElement, container: HTMLElement, view: View, depth: number, ancestors: StatusGovernance[]): Promise<void> {
 		// PR 9 (issue 6): a filter-matching descendant force-reveals this node regardless of its own
 		// collapsed state, so a match is never hidden behind a stale fold. The state from just before
 		// the filter started touching it is remembered (once) so clearing the filter can put it back
@@ -652,7 +661,10 @@ export class AtlasExplorerView extends ItemView {
 		const childrenWrap = container.createDiv({ cls: "atlas-meta-children" });
 		childrenWrap.toggleClass("is-collapsed", effectiveCollapsed);
 		const childrenInner = childrenWrap.createDiv({ cls: "atlas-meta-children-inner" });
-		await this.renderNodeList(node.children, childrenInner, view, depth + 1, node);
+		// PR 17: `node` becomes the nearest ancestor for its own children — prepended, not replacing
+		// the chain, so a grandparent's `inheritToSubfolders` can still reach past `node` if `node`
+		// itself isn't a governor (or is, but doesn't itself reach — same walk either way).
+		await this.renderNodeList(node.children, childrenInner, view, depth + 1, [node, ...ancestors]);
 
 		// Local optimistic state, not `node.collapsed` — real bug caught in review: `node.collapsed`
 		// only updates once the delayed `setNodeCollapsed` below actually runs, so a second click
@@ -674,13 +686,16 @@ export class AtlasExplorerView extends ItemView {
 		});
 	}
 
-	/** PR 15: renders a row's icon slot — either its normal type icon (`fallbackIconName`) or, if
-	 * this row's *parent* has statuses turned on for its children, a colored status dot instead.
-	 * Status assignment is descendant-governing, not self-governing (Dan's own spec: "the statuses
-	 * apply to the first direct children under that item") — a node's own `statusEnabled`/
-	 * `statusSetId` fields describe what its children show, never itself, so this deliberately
-	 * resolves against `parentNode`, not `node`. `parentNode` is `null` at the bucket root, where
-	 * nothing governs (PR 16 adds root-level assignment via the view-name selector).
+	/** PR 15/17: renders a row's icon slot — either its normal type icon (`fallbackIconName`) or, if
+	 * some ancestor governs this row (directly, or via `inheritToSubfolders` reaching past a closer
+	 * non-reaching one — see `resolveNodeStatus`'s own doc comment for the full precedence rule), a
+	 * colored status dot instead. Status assignment is descendant-governing, not self-governing
+	 * (Dan's own spec: "the statuses apply to the first direct children under that item") — a
+	 * governor's own `statusEnabled`/`statusSetId` fields describe what's *underneath* it, never its
+	 * own displayed status, so this resolves against `ancestors`, never `node` itself. `ancestors[0]`
+	 * is the nearest (direct parent, or the view root for a top-level item) — the chain always has
+	 * at least the view in it, so root-level assignment (PR 17) falls out of the same walk with no
+	 * special-casing for "nothing above this node."
 	 *
 	 * Dan-found sizing fix: the dot itself is a small (10px) circle centered inside the row's normal
 	 * icon-slot footprint, not the whole slot — matching the reference plugin's own `.ffsi-dot`
@@ -694,8 +709,8 @@ export class AtlasExplorerView extends ItemView {
 	 * color or its background color, Dan's choice, not a fixed black/white contrast heuristic.
 	 * Shared by meta and unit rows so the two can't drift out of sync with each other, the same
 	 * reasoning `renderFoldableChildren`'s own extraction already used. */
-	private renderRowIcon(iconEl: HTMLElement, view: View, node: ViewNode, parentNode: ViewNode | null, fallbackIconName: string): void {
-		const status = parentNode ? this.plugin.statusesManager.resolveNodeStatus(parentNode, node) : null;
+	private renderRowIcon(iconEl: HTMLElement, view: View, node: ViewNode, ancestors: StatusGovernance[], fallbackIconName: string): void {
+		const status = this.plugin.statusesManager.resolveNodeStatus(ancestors, node);
 		if (!status) {
 			setIcon(iconEl, fallbackIconName);
 			return;
@@ -719,8 +734,11 @@ export class AtlasExplorerView extends ItemView {
 		// during grilling, not just assumed.
 		circle.addEventListener("click", (evt) => {
 			evt.stopPropagation();
-			if (!parentNode?.statusSetId) return;
-			const set = this.plugin.statusesManager.getStatusSet(parentNode.statusSetId);
+			// PR 17: re-finds the winning governor rather than reusing `ancestors[0]` — with
+			// inheritance, the governor actually in effect for this row might be several levels up.
+			const governor = this.plugin.statusesManager.findGoverningAncestor(ancestors, node);
+			if (!governor?.statusSetId) return;
+			const set = this.plugin.statusesManager.getStatusSet(governor.statusSetId);
 			if (!set) return;
 			openStatusPickerPopup({
 				anchor: circle,
@@ -731,14 +749,14 @@ export class AtlasExplorerView extends ItemView {
 		});
 	}
 
-	private async renderNode(node: ViewNode, container: HTMLElement, view: View, depth: number, parentNode: ViewNode | null): Promise<void> {
+	private async renderNode(node: ViewNode, container: HTMLElement, view: View, depth: number, ancestors: StatusGovernance[]): Promise<void> {
 		if (node.type === "meta") {
 			const row = container.createDiv({ cls: "atlas-row atlas-row-meta" });
 			row.style.paddingLeft = `${depth * 16}px`;
 			row.setAttr("draggable", "true");
 			const chevron = row.createDiv({ cls: "atlas-chevron" });
 			const iconEl = row.createDiv({ cls: "atlas-icon" });
-			this.renderRowIcon(iconEl, view, node, parentNode, "layers");
+			this.renderRowIcon(iconEl, view, node, ancestors, "layers");
 			row.createSpan({ cls: "atlas-row-text", text: node.label ?? "" });
 
 			row.addEventListener("dragstart", () => (this.dragPayload = { kind: "node", nodeId: node.id, viewId: view.id }));
@@ -750,7 +768,7 @@ export class AtlasExplorerView extends ItemView {
 				this.showMetaFolderMenu(evt, node, view);
 			});
 
-			await this.renderFoldableChildren(node, chevron, container, view, depth);
+			await this.renderFoldableChildren(node, chevron, container, view, depth, ancestors);
 			return;
 		}
 
@@ -774,7 +792,7 @@ export class AtlasExplorerView extends ItemView {
 		// this exact alignment problem, so reusing it here instead of a second magic-number offset.
 		const chevron = row.createDiv({ cls: "atlas-chevron" });
 		const iconEl = row.createDiv({ cls: "atlas-icon" });
-		this.renderRowIcon(iconEl, view, node, parentNode, info.icon);
+		this.renderRowIcon(iconEl, view, node, ancestors, info.icon);
 		row.createSpan({ cls: "atlas-row-text", text: info.text });
 		if (info.promoted) row.createSpan({ cls: "atlas-badge", text: "promoted" });
 		if (info.secondary) row.createSpan({ cls: "atlas-row-secondary", text: info.secondary });
@@ -804,7 +822,7 @@ export class AtlasExplorerView extends ItemView {
 			this.showUnitMenu(evt, ref, view, node);
 		});
 
-		if (node.children.length > 0) await this.renderFoldableChildren(node, chevron, container, view, depth);
+		if (node.children.length > 0) await this.renderFoldableChildren(node, chevron, container, view, depth, ancestors);
 	}
 
 	// --- inbox -----------------------------------------------------------------------------------
@@ -1125,7 +1143,7 @@ export class AtlasExplorerView extends ItemView {
 		// itself — an item with no children has nothing for the option to apply to, so it's hidden
 		// entirely rather than offered and doing nothing when toggled.
 		if (node.children.length > 0) {
-			menu.addItem((item) => item.setTitle("Statuses").setIcon("circle-dot").onClick(() => this.openStatusesModal(node, view)));
+			menu.addItem((item) => item.setTitle("Statuses").setIcon("circle-dot").onClick(() => this.openStatusesModal(view, node.id)));
 			menu.addSeparator();
 		}
 		// PR 13: clones this row (and its whole meta-nested subtree, if it has one) as a new sibling
@@ -1144,15 +1162,16 @@ export class AtlasExplorerView extends ItemView {
 		menu.showAtMouseEvent(evt);
 	}
 
-	/** PR 15: the minimal "Statuses" modal — opened from a bucket unit or meta folder's own context
-	 * menu, applying live to that exact node via `setNodeStatus`. */
-	private openStatusesModal(node: ViewNode, view: View): void {
-		new StatusesModal(
-			this.plugin.app,
-			this.plugin.statusesManager.getStatusSets(),
-			!!node.statusEnabled,
-			node.statusSetId ?? null,
-			(enabled, statusSetId) => this.plugin.viewsManager.setNodeStatus(view.id, node.id, enabled, statusSetId)
+	/** PR 15/17: the "Statuses" modal — opened from a bucket unit or meta folder's own context menu
+	 * (`nodeId` set), or from the view-name selector for root-level assignment (`nodeId: null`,
+	 * PR 17) — both read/write through `ViewsManager`'s generic `getStatusGovernance`/
+	 * `updateStatusGovernance`, so this one method serves both without knowing which kind of
+	 * governor it's actually editing. */
+	private openStatusesModal(view: View, nodeId: string | null): void {
+		const governance = this.plugin.viewsManager.getStatusGovernance(view.id, nodeId);
+		if (!governance) return;
+		new StatusesModal(this.plugin.app, this.plugin.statusesManager.getStatusSets(), governance, (patch) =>
+			this.plugin.viewsManager.updateStatusGovernance(view.id, nodeId, patch)
 		).open();
 	}
 
@@ -1200,7 +1219,7 @@ export class AtlasExplorerView extends ItemView {
 				})
 		);
 		if (node.children.length > 0) {
-			menu.addItem((item) => item.setTitle("Statuses").setIcon("circle-dot").onClick(() => this.openStatusesModal(node, view)));
+			menu.addItem((item) => item.setTitle("Statuses").setIcon("circle-dot").onClick(() => this.openStatusesModal(view, node.id)));
 		}
 		menu.addItem((item) =>
 			item

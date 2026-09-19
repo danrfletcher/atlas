@@ -1,5 +1,5 @@
 import { App } from "obsidian";
-import { DEFAULT_VIEW_NAME, Unit, UnitRef, View, ViewNode, createEmptyView, rewriteRefPath, unitRefsEqual, unitToRef } from "./types";
+import { DEFAULT_VIEW_NAME, StatusGovernance, Unit, UnitRef, View, ViewNode, createEmptyView, rewriteRefPath, unitRefsEqual, unitToRef } from "./types";
 
 function generateNodeId(): string {
 	return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
@@ -331,7 +331,7 @@ export class ViewsManager {
 	 * *direct children* — never this node's own displayed status (Dan's spec: "the statuses apply
 	 * to the first direct children under that item"). `statusSetId: null` clears the assignment's
 	 * set without necessarily disabling it (the "Statuses" modal keeps the toggle's state
-	 * independent of whether a set has been chosen yet, matching PR 16's later "greyed out until
+	 * independent of whether a set has been chosen yet, matching PR 17's later "greyed out until
 	 * master toggle on" framing). */
 	setNodeStatus(viewId: string, nodeId: string, enabled: boolean, statusSetId: string | null): void {
 		const view = this.getView(viewId);
@@ -358,6 +358,23 @@ export class ViewsManager {
 		const view = this.getView(viewId);
 		const found = view && this.findNode(view.root, nodeId);
 		return found ? found.node : null;
+	}
+
+	/** PR 17: a governor is either a specific node (`nodeId` set — right-clicked from the bucket) or
+	 * the view root itself (`nodeId: null` — right-clicked from the view-name selector). Both are
+	 * `StatusGovernance` and behave identically to `resolveNodeStatus`'s own ancestor walk; these two
+	 * methods are just the read/write side, generic over which kind of governor is being edited so
+	 * the "Statuses" modal doesn't need two parallel code paths for what's otherwise the same UI. */
+	getStatusGovernance(viewId: string, nodeId: string | null): StatusGovernance | null {
+		if (nodeId === null) return this.getView(viewId) ?? null;
+		return this.getNode(viewId, nodeId);
+	}
+
+	updateStatusGovernance(viewId: string, nodeId: string | null, patch: Partial<StatusGovernance>): void {
+		const target: StatusGovernance | null = nodeId === null ? this.getView(viewId) ?? null : this.getNode(viewId, nodeId);
+		if (!target) return;
+		Object.assign(target, patch);
+		this.save();
 	}
 
 	/** PR 12: also collapses unit nodes that have gained meta-nested children — meta folders always
