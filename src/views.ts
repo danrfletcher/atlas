@@ -342,6 +342,18 @@ export class ViewsManager {
 		this.save();
 	}
 
+	/** PR 16: which status within its *governor's* set this exact node currently shows — set from
+	 * the status-picker popup opened by clicking the node's own dot. No "clear" path (grilled: the
+	 * reference plugin's own equivalent is dead code, never wired to any UI) — reverting to the
+	 * governor's default is just picking that status from the same popup like any other choice. */
+	setExplicitStatus(viewId: string, nodeId: string, statusId: string): void {
+		const view = this.getView(viewId);
+		const found = view && this.findNode(view.root, nodeId);
+		if (!found) return;
+		found.node.explicitStatusId = statusId;
+		this.save();
+	}
+
 	getNode(viewId: string, nodeId: string): ViewNode | null {
 		const view = this.getView(viewId);
 		const found = view && this.findNode(view.root, nodeId);

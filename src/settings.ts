@@ -1,6 +1,7 @@
 import { App, Menu, PluginSettingTab, Setting } from "obsidian";
 import type AtlasPlugin from "./main";
 import { normalizeHexColor } from "./statuses";
+import { closeActivePopup, openColorPickerPopup } from "./status-popup";
 
 export interface AtlasSettings {
 	poolFolder: string;
@@ -228,10 +229,42 @@ export class AtlasSettingTab extends PluginSettingTab {
 				const isDefault = status.id === set.defaultStatusId;
 				const row = new Setting(list).setClass("atlas-status-row");
 
-				const swatch = row.controlEl.createEl("input", { type: "color" });
-				swatch.value = normalizeHexColor(status.color);
-				swatch.addEventListener("change", () => {
-					statusesManager.updateStatus(set.id, status.id, { color: swatch.value });
+				// PR 14 fix (Dan-found while testing PR 16): this used to be a bare native
+				// `<input type="color">`, which only ever offers the OS color picker — the shared
+				// Color Palette below was never actually reachable from here despite the section's
+				// own description claiming it's "offered by every status-color picker." Now a
+				// clickable swatch that opens the real palette-grid-plus-custom popup, matching the
+				// reference plugin's own equivalent.
+				const swatch = row.controlEl.createDiv({ cls: "atlas-status-swatch" });
+				swatch.setCssStyles({ backgroundColor: normalizeHexColor(status.color) });
+				swatch.setAttribute("role", "button");
+				swatch.setAttribute("aria-label", "Change color");
+				swatch.addEventListener("click", () => {
+					openColorPickerPopup({
+						anchor: swatch,
+						palette: statusesManager.getColorPalette(),
+						currentColor: normalizeHexColor(status.color),
+						onPick: (hex) => {
+							statusesManager.updateStatus(set.id, status.id, { color: hex });
+							swatch.setCssStyles({ backgroundColor: hex });
+						},
+						onSaveToPalette: (hex) => {
+							// Reviewer-caught (A22): matching the existing dedicated "Add color to
+							// palette" button's own behavior a few sections down, which already calls
+							// this.display() after the same addPaletteColor call — without it, the
+							// separate always-visible Color Palette section below wouldn't show the
+							// new swatch until something unrelated triggered a re-render. Closing the
+							// popup first (rather than leaving it open, matching the reference
+							// plugin's own behavior) avoids a worse problem `display()` would
+							// otherwise introduce here: it rebuilds this exact row's swatch element,
+							// so a still-open popup's `onPick` would go on updating a now-detached
+							// node instead of the fresh one — full re-render and an anchored popup
+							// staying open don't mix safely in this settings panel's architecture.
+							closeActivePopup();
+							statusesManager.addPaletteColor(hex);
+							this.display();
+						},
+					});
 				});
 
 				row.addText((text) =>
