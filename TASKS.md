@@ -446,6 +446,23 @@ Checked the reference plugin's own live container build for its truncation behav
 
 ---
 
+## PR 22 — Truncated-status placeholder visual fix + sort-by-status/reverse (remediation)
+
+Two bugs Dan found post-release (v0.2.0): the truncation placeholder (PR 19) doesn't visually match the real status dot it stands in for, and there's no way to sort a governor's children by status. Grilled directly with Dan before building — full record in `docs/decisions.md`.
+
+- [x] Truncation placeholder's dot gets the glow effect (`atlas-status-glow`) when Design → Glow is on, exactly like a real status dot — verified live: with Glow enabled, the placeholder's dot showed the identical layered `box-shadow` glow a real dot gets, matching in color
+- [x] Truncation placeholder row text renders in normal (non-muted) color, not `atlas-row-internal`'s muted tone — verified live: measured the placeholder's `.atlas-row-text` computed color directly against a real sibling row's — pixel-identical (`rgb(218, 218, 218)` both)
+- [x] Truncation placeholder's dot deliberately does **not** retain a type icon even when Design → Retain icons is on — verified live with Retain Icons on: a real dot showed its shrunk type icon, the placeholder's dot stayed a plain color circle with no `.atlas-status-dot-icon` child at all (grilled, Q8)
+- [x] New `StatusGovernance` field: `sortMode?: "manual" | "status"` (default/absent = manual, today's behavior) — surfaced in the StatusesModal as "Sort children by status", gated on the master "Enable statuses" toggle same as every other field — verified live: toggling the master off correctly greys out both this and "Reverse order" (`is-disabled` class), matching every other field's convention
+- [x] New `StatusGovernance` field: `sortReverse?: boolean` — surfaced as "Reverse order", enabled/shown only when `sortMode === "status"` (grilled, Q4) — verified live: greyed out while sort-by-status is off, becomes enabled the instant sort-by-status is turned on (direct component `.setDisabled()` toggle, no full re-render — same pattern the truncate label field already uses)
+- [x] Sort-by-status ranks ascending by each status's index within the governing status set's own `statuses[]` array (index 0 = first = highest rank); a child whose status can't be resolved for it sorts last regardless of direction (grilled, Q3) — verified live: 5 items (Done/Todo/Doing/Todo/Done) sorted correctly to Todo-group, Doing, Done, Done
+- [x] Equal-rank children (same resolved status) keep their existing relative order — a stable sort, no secondary alphabetical tie-break (grilled, Q5) — verified live: the two same-rank "Done" items (A-Done, E-Done2) kept A before E, their original relative order, both forward and reversed
+- [x] Sort-by-status/reverse reach through inheritance exactly like every other `StatusGovernance` field (grilled, Q6) — verified live with a 3-level tree (governor → non-governing meta folder → non-governing sub-folder → 2 items): sort correctly reached all the way down when `inheritToSubfolders` was on, and correctly did *not* reach when it was off (items stayed in manual/creation order) — confirmed via the rendered DOM order, not the (never-mutated-by-sort) underlying data array
+- [x] Truncation groups participate correctly in sort-by-status once it's on — a placeholder occupies the rank position its status would occupy, same as a real item would — verified live: the "2 Todos" placeholder (rank 0) correctly rendered first once sort-by-status was on, ahead of Doing (rank 1) and the two Done items (rank 2) — falls out naturally from sorting the underlying list before the existing render loop runs, no separate positioning logic needed
+- [x] Manual mode (`sortMode` absent/"manual") is unaffected by this PR — verified live: with sort-by-status off, the same 5-item tree rendered in its original manual/creation order exactly as before this PR. The "placeholder appears in an unexpected place in manual mode" question Dan raised is explicitly deferred (grilled, Q1/Q7 — Dan's own live repro didn't reproduce the bug he saw when I tried it; he asked to hold off and retest live together now that sort-by-status exists, rather than chase it further blind)
+
+---
+
 ## Cross-cutting (verify at the end, not tied to one PR)
 
 - [x] Nothing in the plugin's DnD/promotion/placement code path ever calls `vault.rename` or `fileManager.renameFile` for the bucket/view mechanics (Part 7 — grep-verify across the whole codebase, not just F8) — grepped the entire `src/` tree for both calls: zero matches other than the code comment in `explorer-view.ts` documenting the constraint

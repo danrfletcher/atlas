@@ -89,6 +89,14 @@ export interface StatusGovernance {
 	applyTo?: ApplyToConfig;
 	/** PR 17 (capture only — PR 19 wires this into actual rendering). */
 	truncatedStatuses?: Record<string, TruncatedStatusConfig>;
+	/** PR 22: ranks this governor's children ascending by their resolved status's own position
+	 * within the governing status set's `statuses[]` (index 0 = highest rank) instead of the
+	 * existing manual/drag-ordered arrangement. Absent (or `"manual"`) is today's default —
+	 * unaffected by this field entirely. */
+	sortMode?: "manual" | "status";
+	/** PR 22: reverses the rank order from `sortMode: "status"` — meaningless (and left unset/
+	 * ignored) while `sortMode` isn't `"status"`; not a general "flip manual order" toggle. */
+	sortReverse?: boolean;
 }
 
 /** F9 — a node in a view's bucket tree. Unit nodes have no children; meta nodes are labels with

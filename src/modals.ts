@@ -1,4 +1,4 @@
-import { App, Modal, Setting, TextComponent } from "obsidian";
+import { App, Modal, Setting, TextComponent, ToggleComponent } from "obsidian";
 import { StatusSet } from "./statuses";
 import { ApplyToConfig, StatusGovernance } from "./types";
 
@@ -63,8 +63,9 @@ export class TextPromptModal extends Modal {
  * root-level assignment) right-click menu. A master on/off toggle plus which status set governs
  * the *children* of the right-clicked item (Dan's own spec: "the statuses apply to the first
  * direct children under that item" — this item's own row is never itself affected), plus (PR 17)
- * inherit-to-subfolders, hide-completed/cancelled, which unit kinds receive treatment, and per-
- * status truncation. Everything below the master toggle is disabled while it's off, but never
+ * inherit-to-subfolders, hide-completed/cancelled, which unit kinds receive treatment, per-
+ * status truncation, and (PR 22) sorting children by status with an optional reverse. Everything
+ * below the master toggle is disabled while it's off, but never
  * discarded (Dan's own edge case AC) — `this.governance` keeps every field locally regardless of
  * `statusEnabled`, the same way the underlying data model does. Applies live on every change
  * (matching the reference plugin's own framing of a persistent, greyed-out-until-enabled modal)
@@ -214,6 +215,39 @@ export class StatusesModal extends Modal {
 						})
 				);
 		}
+
+		// PR 22 (grilled with Dan directly): ranks children by their resolved status's own position
+		// within this governor's status set instead of today's manual/drag-ordered arrangement.
+		// "Reverse" only ever modifies *that* rank order — it's not a general "flip my manual
+		// arrangement" toggle, so it's meaningless (and disabled) while sort-by-status is off, rather
+		// than shown as some independent control.
+		let reverseToggle: ToggleComponent | null = null;
+		new Setting(contentEl)
+			.setName("Sort children by status")
+			.setDesc("Order by each item's own status instead of the manually-arranged order.")
+			.addToggle((toggle) =>
+				toggle
+					.setValue(this.governance.sortMode === "status")
+					.setDisabled(disabled)
+					.onChange((value) => {
+						this.governance.sortMode = value ? "status" : "manual";
+						this.onChange({ sortMode: this.governance.sortMode });
+						reverseToggle?.setDisabled(disabled || !value);
+					})
+			);
+		new Setting(contentEl)
+			.setName("Reverse order")
+			.setDesc("Reverse the status-based sort above.")
+			.addToggle((toggle) => {
+				reverseToggle = toggle;
+				toggle
+					.setValue(!!this.governance.sortReverse)
+					.setDisabled(disabled || this.governance.sortMode !== "status")
+					.onChange((value) => {
+						this.governance.sortReverse = value;
+						this.onChange({ sortReverse: value });
+					});
+			});
 
 		const chosenSet = this.statusSets.find((s) => s.id === this.governance.statusSetId);
 		if (chosenSet && chosenSet.statuses.length > 0) {
