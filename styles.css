@@ -347,8 +347,10 @@
  * module row — everywhere else on the row means meta-nest instead). `.atlas-drop-target` on its own
  * is scoped to `.atlas-row` elsewhere, which the icon isn't, so it needs its own small ring rather
  * than inheriting that row-wide outline — `outline-offset` positive (not the row's negative) since
- * a 16px icon has no room to inset into. */
-.atlas-module-icon.atlas-drop-target {
+ * a 16px icon has no room to inset into. Scoped to `.atlas-icon` generally (not just
+ * `.atlas-module-icon`) so a governed module showing its status dot instead of the folder icon
+ * (PR 15 fix) still gets the same drop-target ring — `iconEl` stays the drop zone either way. */
+.atlas-icon.atlas-drop-target {
 	outline: 2px dashed var(--interactive-accent);
 	outline-offset: 2px;
 	border-radius: 3px;

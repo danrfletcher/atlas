@@ -1245,10 +1245,21 @@ export class AtlasExplorerView extends ItemView {
 	 * icon is the one place left where dropping a file/block still physically files it into the
 	 * module; everywhere else on the row falls through to `makeDropZone`'s own row-level listener. */
 	private wireModuleRow(row: HTMLElement, iconEl: HTMLElement, folderPath: string): void {
-		iconEl.empty();
-		iconEl.addClass("atlas-module-icon");
-		setIcon(iconEl.createSpan({ cls: "atlas-icon-closed" }), "folder");
-		setIcon(iconEl.createSpan({ cls: "atlas-icon-open" }), "folder-open");
+		// PR 15 fix (Dan-found, discovered while grilling the next PR): this used to unconditionally
+		// wipe `iconEl` and repopulate it with the closed/open folder-icon crossfade, silently
+		// overwriting a status dot `renderRowIcon` had just rendered there — meaning a governed
+		// module could never actually show its dot at all, contradicting PR 15's own core promise.
+		// The dot's own visual is left alone when present; the tooltip/click/drag wiring below still
+		// applies to `iconEl` either way, since none of it depends on the icon's current visual
+		// content. (Click's "open contents" meaning is expected to change for dotted modules once
+		// the next PR's click-to-change-status lands — that's this PR's own scope, not PR 15's.)
+		const hasStatusDot = iconEl.hasClass("atlas-status-dot");
+		if (!hasStatusDot) {
+			iconEl.empty();
+			iconEl.addClass("atlas-module-icon");
+			setIcon(iconEl.createSpan({ cls: "atlas-icon-closed" }), "folder");
+			setIcon(iconEl.createSpan({ cls: "atlas-icon-open" }), "folder-open");
+		}
 		setTooltip(iconEl, "View module contents");
 		iconEl.addEventListener("click", (evt) => {
 			evt.stopPropagation();
