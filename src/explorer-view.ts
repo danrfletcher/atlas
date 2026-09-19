@@ -379,6 +379,17 @@ export class AtlasExplorerView extends ItemView {
 	private async render(): Promise<void> {
 		const container = this.containerEl.children[1] as HTMLElement;
 		const scrollTop = container.scrollTop;
+		// Dan-found: `container.scrollTop` only covers the *outer* sidebar scroll (which section is
+		// in view) — the inbox's own virtualized viewport (F11, `.atlas-inbox-viewport`) is a
+		// separate `overflow-y: auto` element with its own independent scroll position, rebuilt from
+		// scratch by `container.empty()` below like everything else, with nothing capturing or
+		// restoring *its* scrollTop before now. Any click-driven re-render (this PR's own multi-select
+		// highlighting made that far more frequent for the inbox specifically — a plain click on an
+		// inbox row never used to trigger a re-render at all before PR 20) snapped a scrolled-down
+		// inbox straight back to its top. Captured here, restored in `renderVirtualizedInboxRows`
+		// itself (has to happen before that view's own first `drawWindow()`, not after, since that
+		// read is what decides which rows are even in the initial DOM).
+		const inboxViewportScrollTop = container.querySelector(".atlas-inbox-viewport")?.scrollTop ?? 0;
 		// The filter input lives inside `container` and gets torn down by `container.empty()` below
 		// like everything else — every keystroke re-renders the whole view (index/view-change events
 		// and typing both go through this same `render()`). Capture focus/caret here and restore it
@@ -420,7 +431,7 @@ export class AtlasExplorerView extends ItemView {
 
 		const inboxUnits = this.plugin.viewsManager.getInboxUnits(allUnits, view.id, view.inboxMode);
 		const inboxEl = container.createDiv({ cls: "atlas-section atlas-inbox" });
-		await this.renderInboxSection(inboxEl, view, inboxUnits);
+		await this.renderInboxSection(inboxEl, view, inboxUnits, inboxViewportScrollTop);
 
 		container.scrollTop = scrollTop;
 		this.updateActiveHighlight();
@@ -846,7 +857,18 @@ export class AtlasExplorerView extends ItemView {
 	 * active selection if the dragged row is part of it. Dragging a row that *isn't* currently
 	 * selected instead collapses the selection down to just that row first — same "you're now
 	 * dragging what you clicked, not some other stale selection" behavior most file managers use,
-	 * and keeps the drag payload always consistent with what's visibly highlighted at drag time. */
+	 * and keeps the drag payload always consistent with what's visibly highlighted at drag time.
+	 *
+	 * Dan-found (real mouse, not CDP): this used to call `render()` right here, same as every other
+	 * selection change — but this one fires from a `dragstart` handler, mid-gesture, and a real
+	 * native HTML5 drag cannot survive its own source row being torn out of the document by
+	 * `container.empty()` a moment after `dragstart` fires — the whole drag silently aborts, so nothing
+	 * ever reaches a drop target again. CDP's synthetic `dispatchEvent(new DragEvent(...))` doesn't
+	 * go through the browser's real native drag state machine, so this never surfaced during this
+	 * PR's own live-CDP testing — only caught once Dan tried it with an actual mouse. No render call
+	 * here now; the selection `Set`s still update correctly (silently), and the visible highlight
+	 * catches up on the very next render, which `handleDrop` already triggers right after the drop
+	 * completes regardless. */
 	private buildNodeDragPayload(nodeId: string, viewId: string): DragPayload {
 		if (!this.selectedBucketNodeIds.has(nodeId) || this.selectedBucketNodeIds.size <= 1) {
 			this.selectedInboxRefKeys.clear();
@@ -854,12 +876,12 @@ export class AtlasExplorerView extends ItemView {
 			this.selectedBucketNodeIds.add(nodeId);
 			this.selectionAnchor = nodeId;
 			this.selectionAnchorScope = "bucket";
-			void this.render();
 		}
 		return { kind: "node", nodeIds: [...this.selectedBucketNodeIds], viewId };
 	}
 
-	/** PR 20: same idea as `buildNodeDragPayload`, for an inbox row. */
+	/** PR 20: same idea as `buildNodeDragPayload`, for an inbox row — see its own doc comment for why
+	 * this deliberately never calls `render()` from inside a `dragstart` handler. */
 	private buildInboxDragPayload(ref: UnitRef): DragPayload {
 		const key = unitRefKey(ref);
 		if (!this.selectedInboxRefKeys.has(key) || this.selectedInboxRefKeys.size <= 1) {
@@ -868,7 +890,6 @@ export class AtlasExplorerView extends ItemView {
 			this.selectedInboxRefKeys.add(key);
 			this.selectionAnchor = key;
 			this.selectionAnchorScope = "inbox";
-			void this.render();
 		}
 		const refs = [...this.selectedInboxRefKeys].map((k) => this.inboxRefByKey.get(k)).filter((r): r is UnitRef => !!r);
 		return { kind: "inbox", refs: refs.length > 0 ? refs : [ref] };
@@ -1108,7 +1129,7 @@ export class AtlasExplorerView extends ItemView {
 
 	// --- inbox -----------------------------------------------------------------------------------
 
-	private async renderInboxSection(container: HTMLElement, view: View, units: Unit[]): Promise<void> {
+	private async renderInboxSection(container: HTMLElement, view: View, units: Unit[], viewportScrollTop: number): Promise<void> {
 		const header = container.createDiv({ cls: "atlas-section-header" });
 		const chevron = header.createDiv({ cls: "atlas-chevron" });
 		setIcon(chevron, this.inboxCollapsed ? "chevron-right" : "chevron-down");
@@ -1168,7 +1189,7 @@ export class AtlasExplorerView extends ItemView {
 		// The non-virtualized fallback this used to need for expanded folder-unit internals is gone —
 		// PR 9 (issue 2) replaced inline inbox expansion with the Module Contents modal, so every
 		// inbox row is now fixed-height and the virtualized path always applies.
-		this.renderVirtualizedInboxRows(listEl, sorted);
+		this.renderVirtualizedInboxRows(listEl, sorted, viewportScrollTop);
 
 		let localCollapsed = this.inboxCollapsed;
 		let pendingPersist: number | undefined;
@@ -1221,10 +1242,20 @@ export class AtlasExplorerView extends ItemView {
 	 * list length. Redraws on scroll (rAF-throttled) rather than re-running the whole view's
 	 * `render()`, so scrolling thousands of rows doesn't re-resolve/re-sort/re-render the toolbar
 	 * and bucket section on every frame. */
-	private renderVirtualizedInboxRows(listEl: HTMLElement, sorted: { ref: UnitRef; info: RowInfo; unit: Unit }[]): void {
+	private renderVirtualizedInboxRows(
+		listEl: HTMLElement,
+		sorted: { ref: UnitRef; info: RowInfo; unit: Unit }[],
+		viewportScrollTop: number
+	): void {
 		const viewport = listEl.createDiv({ cls: "atlas-inbox-viewport" });
 		const spacer = viewport.createDiv({ cls: "atlas-inbox-spacer" });
 		spacer.style.height = `${sorted.length * INBOX_ROW_HEIGHT}px`;
+		// Dan-found: restores the inbox's own scroll position across a re-render (see `render()`'s
+		// own doc comment on why this is separate from the outer container's scrollTop). Has to be
+		// set before the first `drawWindow()` call below, not after — that call reads
+		// `viewport.scrollTop` synchronously to decide which rows even belong in the initial DOM, so
+		// setting it later would draw the wrong window first and only fix itself on the next scroll.
+		viewport.scrollTop = viewportScrollTop;
 
 		let frameQueued = false;
 		const drawWindow = () => {
