@@ -184,18 +184,26 @@ export class StatusesManager {
 		this.save();
 	}
 
-	/** PR 15: resolves the status a *governing* node assigns to its direct children — `node` here is
-	 * the parent being checked, not the row being rendered (Dan's own spec: "the statuses apply to
-	 * the first direct children under that item", never to the item itself). `null` means "the
-	 * caller's row shows its normal icon, unaffected" (no governing parent, disabled, no set chosen,
-	 * the set was since deleted, or the set has no statuses to fall back to). No inheritance beyond
-	 * one level yet (PR 16+): a grandchild never shows a status just because a grandparent has one.
-	 * Defaults to the set's own `defaultStatusId` since PR 15 has no per-child "which specific
-	 * status" picker yet, just "which set". */
-	resolveNodeStatus(node: ViewNode): StatusDefinition | null {
-		if (!node.statusEnabled || !node.statusSetId) return null;
-		const set = this.getStatusSet(node.statusSetId);
+	/** PR 15/16: resolves the status a *governing* node assigns to one of its direct children —
+	 * `governor` is the parent being checked, not the row being rendered (Dan's own spec: "the
+	 * statuses apply to the first direct children under that item", never to the item itself);
+	 * `child` is the actual row, checked for its own `explicitStatusId` (PR 16 — "change this one
+	 * task's status", picked from the popup) before falling back to the governor set's own
+	 * `defaultStatusId`. `null` means "the caller's row shows its normal icon, unaffected" (no
+	 * governing parent, disabled, no set chosen, the set was since deleted, or the set has no
+	 * statuses to fall back to). A stale `explicitStatusId` (status removed, or the governor
+	 * switched to a different set entirely) degrades gracefully to the set's default rather than
+	 * erroring — same as every other "was this deleted out from under us" case in this file. No
+	 * inheritance beyond one level yet (PR 17+): a grandchild never shows a status just because a
+	 * grandparent has one. */
+	resolveNodeStatus(governor: ViewNode, child: ViewNode): StatusDefinition | null {
+		if (!governor.statusEnabled || !governor.statusSetId) return null;
+		const set = this.getStatusSet(governor.statusSetId);
 		if (!set || set.statuses.length === 0) return null;
+		if (child.explicitStatusId) {
+			const explicit = set.statuses.find((s) => s.id === child.explicitStatusId);
+			if (explicit) return explicit;
+		}
 		return set.statuses.find((s) => s.id === set.defaultStatusId) ?? set.statuses[0];
 	}
 }

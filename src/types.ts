@@ -60,6 +60,10 @@ export interface ViewNode {
 	 * placements of the same unit are independent per PR 13, and a status assignment should be too. */
 	statusEnabled?: boolean;
 	statusSetId?: string;
+	/** PR 16: which status within a *governing parent's* set this exact node currently shows —
+	 * never about this node's own children (that's `statusEnabled`/`statusSetId` above). Absent
+	 * means "show the governing set's own default status," the same as before this PR existed. */
+	explicitStatusId?: string;
 }
 
 export interface View {

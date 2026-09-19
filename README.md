@@ -84,8 +84,11 @@ The settings panel has two tabs: **Basic** and **Status**.
 - **Color palette** — a shared set of swatches offered by every status color picker, in addition to a fully custom color.
 - **Glow** — a soft glow around status dots.
 - **Retain icons** — when a status is assigned, keeps the item's normal type icon visible, shrunk down inside the status dot, instead of replacing it outright.
+- **Retained icon color** — only matters when "Retain icons" is on: match the icon to normal text color, or to the app's background color.
 
 A bucket item with children (unit or meta folder — the option only appears when there's something underneath it) gets a **Statuses** entry on its right-click menu: a master on/off toggle plus which status set governs it. When on, that item's **direct children** each show a colored dot for the set's default status — the item itself is unaffected, only what's underneath it. This is a minimal, per-item assignment for now — no cascading past one level, hiding, or truncation yet (a later release). Inbox items (not yet placed in any view) can't have a status assigned until they're placed in a bucket.
+
+**Clicking a status dot directly** opens a small popup listing every status in the governing set, with its own color swatch — pick one to change that specific item's status (e.g. Triage → Complete), independent of its siblings. The item's own row click (open) and right-click (full menu) are unaffected — only the dot itself has this behavior. For a module whose icon is currently a status dot, viewing its contents moves to the right-click menu ("View module contents") instead of the plain click, which now means "change status" like everywhere else.
 
 ## Commands
 

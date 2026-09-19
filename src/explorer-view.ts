@@ -4,6 +4,7 @@ import { Unit, UnitRef, View, ViewNode, unitRefKey, unitToRef } from "./types";
 import { MetaTarget, flattenMetaFolders } from "./views";
 import { resolveUnit } from "./unit-display";
 import { TextPromptModal, ConfirmModal, StatusesModal } from "./modals";
+import { openStatusPickerPopup } from "./status-popup";
 import { createInterfaceNote, findInterfaceNote } from "./interface-notes";
 import { addBlock } from "./commands";
 
@@ -693,8 +694,8 @@ export class AtlasExplorerView extends ItemView {
 	 * color or its background color, Dan's choice, not a fixed black/white contrast heuristic.
 	 * Shared by meta and unit rows so the two can't drift out of sync with each other, the same
 	 * reasoning `renderFoldableChildren`'s own extraction already used. */
-	private renderRowIcon(iconEl: HTMLElement, parentNode: ViewNode | null, fallbackIconName: string): void {
-		const status = parentNode ? this.plugin.statusesManager.resolveNodeStatus(parentNode) : null;
+	private renderRowIcon(iconEl: HTMLElement, view: View, node: ViewNode, parentNode: ViewNode | null, fallbackIconName: string): void {
+		const status = parentNode ? this.plugin.statusesManager.resolveNodeStatus(parentNode, node) : null;
 		if (!status) {
 			setIcon(iconEl, fallbackIconName);
 			return;
@@ -709,6 +710,25 @@ export class AtlasExplorerView extends ItemView {
 			innerIcon.style.color = this.plugin.settings.retainIconMatchBackground ? "var(--background-primary)" : "var(--text-normal)";
 			setIcon(innerIcon, fallbackIconName);
 		}
+		// PR 16: a plain left-click directly on the dot opens the status-picker popup — a dedicated
+		// click target separate from the row's own click (open file) and right-click (full context
+		// menu), which stay bound to the row itself and are unaffected. `stopPropagation` keeps this
+		// click from also triggering the row's "open file" handler underneath it. Real drag gestures
+		// never fire a `click` event at all (mousedown+move suppresses it), so this can never race
+		// with the row/icon's own drag-based mechanics (meta-nest, module dwell/drop) — confirmed
+		// during grilling, not just assumed.
+		circle.addEventListener("click", (evt) => {
+			evt.stopPropagation();
+			if (!parentNode?.statusSetId) return;
+			const set = this.plugin.statusesManager.getStatusSet(parentNode.statusSetId);
+			if (!set) return;
+			openStatusPickerPopup({
+				anchor: circle,
+				statusSet: set,
+				currentStatusId: status.id,
+				onSelect: (picked) => this.plugin.viewsManager.setExplicitStatus(view.id, node.id, picked.id),
+			});
+		});
 	}
 
 	private async renderNode(node: ViewNode, container: HTMLElement, view: View, depth: number, parentNode: ViewNode | null): Promise<void> {
@@ -718,7 +738,7 @@ export class AtlasExplorerView extends ItemView {
 			row.setAttr("draggable", "true");
 			const chevron = row.createDiv({ cls: "atlas-chevron" });
 			const iconEl = row.createDiv({ cls: "atlas-icon" });
-			this.renderRowIcon(iconEl, parentNode, "layers");
+			this.renderRowIcon(iconEl, view, node, parentNode, "layers");
 			row.createSpan({ cls: "atlas-row-text", text: node.label ?? "" });
 
 			row.addEventListener("dragstart", () => (this.dragPayload = { kind: "node", nodeId: node.id, viewId: view.id }));
@@ -754,7 +774,7 @@ export class AtlasExplorerView extends ItemView {
 		// this exact alignment problem, so reusing it here instead of a second magic-number offset.
 		const chevron = row.createDiv({ cls: "atlas-chevron" });
 		const iconEl = row.createDiv({ cls: "atlas-icon" });
-		this.renderRowIcon(iconEl, parentNode, info.icon);
+		this.renderRowIcon(iconEl, view, node, parentNode, info.icon);
 		row.createSpan({ cls: "atlas-row-text", text: info.text });
 		if (info.promoted) row.createSpan({ cls: "atlas-badge", text: "promoted" });
 		if (info.secondary) row.createSpan({ cls: "atlas-row-secondary", text: info.secondary });
@@ -1091,6 +1111,12 @@ export class AtlasExplorerView extends ItemView {
 		if (ref.kind === "file" || ref.kind === "folder") {
 			menu.addItem((item) => item.setTitle("Reveal in native explorer").setIcon("folder-open").onClick(() => this.revealInNativeExplorer(ref.path)));
 		}
+		// PR 16 (grilled): always offered for modules, not just governed ones — a governed module's
+		// icon click now means "change status" (see `wireModuleRow`), so viewing contents needs a
+		// path that doesn't depend on whether this module currently has a status assigned.
+		if (ref.kind === "folder") {
+			menu.addItem((item) => item.setTitle("View module contents").setIcon("list-tree").onClick(() => this.openModuleContentsModal(ref.path)));
+		}
 		menu.addItem((item) => item.setTitle("Copy link").setIcon("link").onClick(() => void this.copyLink(ref)));
 		menu.addSeparator();
 		// PR 15 fix (Dan-found): status assignment governs this item's own *children*, not the item
@@ -1259,12 +1285,20 @@ export class AtlasExplorerView extends ItemView {
 			iconEl.addClass("atlas-module-icon");
 			setIcon(iconEl.createSpan({ cls: "atlas-icon-closed" }), "folder");
 			setIcon(iconEl.createSpan({ cls: "atlas-icon-open" }), "folder-open");
+			setTooltip(iconEl, "View module contents");
+			iconEl.addEventListener("click", (evt) => {
+				evt.stopPropagation();
+				this.openModuleContentsModal(folderPath);
+			});
 		}
-		setTooltip(iconEl, "View module contents");
-		iconEl.addEventListener("click", (evt) => {
-			evt.stopPropagation();
-			this.openModuleContentsModal(folderPath);
-		});
+		// PR 16 (grilled): a governed module's icon *is* its status dot, whose own click (wired in
+		// `renderRowIcon`) already means "change status" — plain click can't mean two things on the
+		// same element, and Dan's own original behavior list never included plain-click-opens-
+		// contents as a target for a dotted module in the first place. So the click/tooltip binding
+		// above is skipped entirely here; "View module contents" moves to the row's right-click menu
+		// instead (added unconditionally for folder refs in `showUnitMenu`, governed or not, so the
+		// path doesn't change depending on state that can flip at any time). The drag-hold-to-open
+		// dwell mechanic below is unaffected either way — it was never click-based.
 
 		let dwellTimer: number | undefined;
 		const cancelDwell = () => {
