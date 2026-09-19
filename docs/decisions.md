@@ -2,6 +2,10 @@
 
 Judgement calls made during the build, the alternative considered, and why. Newest first.
 
+## PR 16: no "clear override" control — checked the reference plugin's actual code, found it's dead there too
+
+**Decision:** the popup that lets you pick a specific status for an item has no separate "revert to default" action. Checked this specifically rather than assuming a real plugin's popup necessarily has one: `clearItemStatus(path)` exists in the reference plugin's own data layer but is never called from anywhere in its UI — genuinely dead code, not just hard to find. Since Dan wants this feature "borrowed wholesale" from the reference plugin, matching its actual shipped behavior (no clear control) is the correct read of that instruction, not matching some more-complete version of the plugin that doesn't actually exist. Reverting to the default status is still possible — just pick the default status from the same popup, same as picking any other one.
+
 ## PR 16 (new, inserted after PR 15): grilled with Dan directly, click-the-dot chosen over a menu item
 
 **How this PR came to exist at all:** it wasn't in the original nine-PR batch. Dan asked, after testing PR 15, whether right-click-to-change-status had been built — it hadn't, and checking the reference plugin confirmed it's a real, separate feature (`setItemStatus(path, statusId)`, its own popup) that was simply never itemized anywhere in the original grilled plan. Rather than guess at the design, grilled it properly with Dan before writing any code, the same process the original nine-PR batch used.
