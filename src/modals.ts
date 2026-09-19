@@ -1,4 +1,4 @@
-import { App, Modal, Setting } from "obsidian";
+import { App, Modal, Setting, TextComponent } from "obsidian";
 import { StatusSet } from "./statuses";
 import { ApplyToConfig, StatusGovernance } from "./types";
 
@@ -80,6 +80,14 @@ export class StatusesModal extends Modal {
 	constructor(app: App, private statusSets: StatusSet[], initial: StatusGovernance, private onChange: (patch: Partial<StatusGovernance>) => void) {
 		super(app);
 		this.governance = { ...initial };
+		// Dan-found (PR 17): defaulted and *persisted* here too, not just cosmetically shown by the
+		// dropdown's own `setValue` fallback — belt and braces so there's no possible path where the
+		// saved governance ends up with `statusEnabled: true` but `statusSetId` still unset because
+		// the only change the user ever made was the master toggle, never the dropdown itself.
+		if (this.governance.statusSetId === undefined && statusSets.length > 0) {
+			this.governance.statusSetId = statusSets[0].id;
+			this.onChange({ statusSetId: this.governance.statusSetId });
+		}
 	}
 
 	onOpen(): void {
@@ -88,6 +96,12 @@ export class StatusesModal extends Modal {
 
 	private render(): void {
 		const { contentEl } = this;
+		// Dan-found: every change re-renders this modal (see the class doc comment for why), which
+		// was silently resetting scroll to the top on each one — jarring on a modal this tall. The
+		// element that actually scrolls is `modalEl` (`.modal`, `overflow-y: auto`), not `contentEl`
+		// (`.modal-content`, which just grows to its natural height with no scroll of its own) —
+		// confirmed live via `getComputedStyle`/`scrollHeight` before assuming which one to save.
+		const scrollTop = this.modalEl.scrollTop;
 		contentEl.empty();
 		contentEl.createEl("h3", { text: "Statuses" });
 
@@ -105,17 +119,8 @@ export class StatusesModal extends Modal {
 				this.governance.statusEnabled = false;
 				this.onChange({ statusEnabled: false });
 			}
-		} else if (this.governance.statusSetId === undefined) {
-			// PR 17 bug (caught in this PR's own live testing, not shipped): the dropdown below
-			// defaults its *visible* selection to the first set via `setValue`, but that's cosmetic
-			// only — it never touched `this.governance` unless the user actually interacted with the
-			// dropdown. Enabling the master toggle without ever touching the dropdown persisted
-			// `statusEnabled: true` with `statusSetId` still `undefined`, silently resolving to no
-			// status at all despite the dropdown visibly showing a set selected. Defaulting it here,
-			// eagerly, keeps the underlying data honest with what the dropdown already displays.
-			this.governance.statusSetId = this.statusSets[0].id;
-			this.onChange({ statusSetId: this.governance.statusSetId });
 		}
+		// (statusSetId's own default is handled once, in the constructor — see its comment.)
 
 		new Setting(contentEl)
 			.setName("Enable statuses")
@@ -219,35 +224,52 @@ export class StatusesModal extends Modal {
 			});
 			for (const status of chosenSet.statuses) {
 				const truncConfig = this.governance.truncatedStatuses?.[status.id];
+				const truncEnabled = !!truncConfig?.enabled;
 				const row = new Setting(contentEl).setName(status.label);
-				row.addToggle((toggle) =>
-					toggle
-						.setValue(!!truncConfig?.enabled)
-						.setDisabled(disabled)
+				// Dan-found: the label field used to only exist in the DOM once truncation was turned
+				// on for this status, added *after* the toggle — since `Setting`'s control group is
+				// right-aligned as a block, that made the toggle itself visibly jump left every time
+				// the field appeared/disappeared (the group growing wider pushed its own left edge,
+				// and everything in it, further left to stay flush against the row's right edge).
+				// Fixed per Dan's own preferred alternative: the field is always present (ordered
+				// before the toggle, so the toggle stays the fixed rightmost element regardless), just
+				// disabled and unfocusable until truncation is actually on for this status — nothing
+				// appears/disappears anymore, so nothing can jump.
+				let labelInput: TextComponent | null = null;
+				row.addText((text) => {
+					labelInput = text;
+					text
+						.setPlaceholder("Summary label")
+						.setValue(truncConfig?.label ?? "")
+						.setDisabled(disabled || !truncEnabled)
 						.onChange((value) => {
-							const next = { ...this.governance.truncatedStatuses, [status.id]: { enabled: value, label: truncConfig?.label } };
+							const current = this.governance.truncatedStatuses?.[status.id];
+							const next = { ...this.governance.truncatedStatuses, [status.id]: { enabled: !!current?.enabled, label: value } };
 							this.governance.truncatedStatuses = next;
 							this.onChange({ truncatedStatuses: next });
-							this.render(); // shows/hides the label field below
+						});
+				});
+				row.addToggle((toggle) =>
+					toggle
+						.setValue(truncEnabled)
+						.setDisabled(disabled)
+						.onChange((value) => {
+							const current = this.governance.truncatedStatuses?.[status.id];
+							const next = { ...this.governance.truncatedStatuses, [status.id]: { enabled: value, label: current?.label } };
+							this.governance.truncatedStatuses = next;
+							this.onChange({ truncatedStatuses: next });
+							// Only the affected field's own disabled state needs to change — no need
+							// for a full `this.render()` (and the scroll-position jump that would
+							// otherwise risk, even with it now preserved) just for this.
+							labelInput?.setDisabled(disabled || !value);
 						})
 				);
-				if (truncConfig?.enabled) {
-					row.addText((text) =>
-						text
-							.setPlaceholder("Summary label")
-							.setValue(truncConfig.label ?? "")
-							.setDisabled(disabled)
-							.onChange((value) => {
-								const next = { ...this.governance.truncatedStatuses, [status.id]: { enabled: true, label: value } };
-								this.governance.truncatedStatuses = next;
-								this.onChange({ truncatedStatuses: next });
-							})
-					);
-				}
 			}
 		}
 
 		new Setting(contentEl).addButton((btn) => btn.setButtonText("Done").setCta().onClick(() => this.close()));
+
+		this.modalEl.scrollTop = scrollTop;
 	}
 
 	onClose(): void {
