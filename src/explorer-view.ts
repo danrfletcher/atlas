@@ -813,13 +813,17 @@ export class AtlasExplorerView extends ItemView {
 
 		// Plain click: always collapses back to a fresh single-item selection (and a fresh anchor
 		// for the next shift-click) — but never consumed, so the row's own default action still runs.
-		const hadVisibleSelection = selection.size > 0 || otherSelection.size > 0;
+		// Always re-renders: an earlier version skipped this when there was no *prior* selection to
+		// clear away, which missed the equally real case of the *new* one-row selection needing to
+		// render its own highlight for the first time — found live-testing the reviewer's own A26
+		// fix, not by inspection; the underlying `Set` was always correct, only the visible ring
+		// lagged a click behind until some unrelated re-render happened to catch it up.
 		otherSelection.clear();
 		selection.clear();
 		selection.add(key);
 		this.selectionAnchor = key;
 		this.selectionAnchorScope = scope;
-		if (hadVisibleSelection) void this.render(); // nothing to redraw if there was never a highlight to begin with
+		void this.render();
 		return false;
 	}
 
