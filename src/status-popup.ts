@@ -1,11 +1,12 @@
 import { StatusDefinition, StatusSet } from "./statuses";
 
 /**
- * PR 16 — a small anchored popup for picking one item from a short list, each optionally with its
- * own colored swatch. A plain Obsidian `Menu` can't render an arbitrary swatch color per item, so
- * this is a purpose-built DOM popup instead — positioning/closing logic ported directly from the
- * reference plugin's own popup (checked its live container build), not guessed at, since Dan wants
- * this interaction "borrowed wholesale."
+ * PR 16, plus a PR 14 fix riding the same infrastructure — small anchored popups for picking one
+ * item from a short list (`openChoicePopup`/`openStatusPickerPopup`) or a color
+ * (`openColorPickerPopup`), each able to show swatches a plain Obsidian `Menu` can't render. Content
+ * and positioning/closing logic both ported directly from the reference plugin's own popups
+ * (checked its live container build), not guessed at, since Dan wants these interactions "borrowed
+ * wholesale."
  */
 export interface ChoiceItem {
 	id: string;
@@ -74,6 +75,50 @@ export function openStatusPickerPopup(opts: {
 			if (status) opts.onSelect(status);
 		},
 	});
+}
+
+/** PR 14 fix (Dan-found, discovered while testing PR 16 — the status swatch has been a bare native
+ * `<input type="color">` since PR 14 shipped, never offering the shared Color Palette to pick from
+ * at all): a palette grid + native custom-color input + "Save to palette" button, ported from the
+ * reference plugin's own color popup (checked its live container build, same as the status popup).
+ * Reuses this file's own `positionAndBindClose`/`activePopupClose` for closing — the reference
+ * plugin's equivalent popup has the exact bare-`.remove()` leak already fixed here for the choice
+ * popup (A21), not worth reintroducing in a second popup type. */
+export function openColorPickerPopup(opts: {
+	anchor: HTMLElement;
+	palette: string[];
+	currentColor: string;
+	onPick: (hex: string) => void;
+	onSaveToPalette: (hex: string) => void;
+}): void {
+	activePopupClose?.();
+
+	const doc = opts.anchor.ownerDocument;
+	const popup = doc.body.createDiv({ cls: "atlas-choice-popup atlas-color-popup" });
+	const grid = popup.createDiv({ cls: "atlas-color-grid" });
+	for (const color of opts.palette) {
+		const swatch = grid.createDiv({ cls: "atlas-choice-swatch atlas-color-grid-swatch" });
+		swatch.setCssStyles({ backgroundColor: color });
+		if (color.toLowerCase() === opts.currentColor.toLowerCase()) swatch.addClass("is-active");
+		swatch.setAttribute("aria-label", color);
+		swatch.setAttribute("title", color);
+		swatch.addEventListener("click", (evt) => {
+			evt.stopPropagation();
+			opts.onPick(color);
+			activePopupClose?.();
+		});
+	}
+
+	const customRow = popup.createDiv({ cls: "atlas-color-custom-row" });
+	const input = customRow.createEl("input", { type: "color" });
+	input.value = opts.currentColor;
+	input.addEventListener("input", () => opts.onPick(input.value));
+	customRow.createEl("button", { text: "Save to palette", cls: "atlas-color-save-btn" }).addEventListener("click", (evt) => {
+		evt.stopPropagation();
+		opts.onSaveToPalette(input.value);
+	});
+
+	activePopupClose = positionAndBindClose(popup, opts.anchor);
 }
 
 /** Positions the popup just below-left of `anchor`, flipping above/clamping right if it would

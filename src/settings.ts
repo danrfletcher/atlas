@@ -1,6 +1,7 @@
 import { App, Menu, PluginSettingTab, Setting } from "obsidian";
 import type AtlasPlugin from "./main";
 import { normalizeHexColor } from "./statuses";
+import { openColorPickerPopup } from "./status-popup";
 
 export interface AtlasSettings {
 	poolFolder: string;
@@ -228,10 +229,29 @@ export class AtlasSettingTab extends PluginSettingTab {
 				const isDefault = status.id === set.defaultStatusId;
 				const row = new Setting(list).setClass("atlas-status-row");
 
-				const swatch = row.controlEl.createEl("input", { type: "color" });
-				swatch.value = normalizeHexColor(status.color);
-				swatch.addEventListener("change", () => {
-					statusesManager.updateStatus(set.id, status.id, { color: swatch.value });
+				// PR 14 fix (Dan-found while testing PR 16): this used to be a bare native
+				// `<input type="color">`, which only ever offers the OS color picker — the shared
+				// Color Palette below was never actually reachable from here despite the section's
+				// own description claiming it's "offered by every status-color picker." Now a
+				// clickable swatch that opens the real palette-grid-plus-custom popup, matching the
+				// reference plugin's own equivalent.
+				const swatch = row.controlEl.createDiv({ cls: "atlas-status-swatch" });
+				swatch.setCssStyles({ backgroundColor: normalizeHexColor(status.color) });
+				swatch.setAttribute("role", "button");
+				swatch.setAttribute("aria-label", "Change color");
+				swatch.addEventListener("click", () => {
+					openColorPickerPopup({
+						anchor: swatch,
+						palette: statusesManager.getColorPalette(),
+						currentColor: normalizeHexColor(status.color),
+						onPick: (hex) => {
+							statusesManager.updateStatus(set.id, status.id, { color: hex });
+							swatch.setCssStyles({ backgroundColor: hex });
+						},
+						onSaveToPalette: (hex) => {
+							statusesManager.addPaletteColor(hex);
+						},
+					});
 				});
 
 				row.addText((text) =>

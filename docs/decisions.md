@@ -2,6 +2,14 @@
 
 Judgement calls made during the build, the alternative considered, and why. Newest first.
 
+## PR 14 fix (found during PR 16 testing): the status color swatch never actually offered the palette
+
+**What shipped in PR 14:** a status's own color swatch in Settings → Status was a bare native `<input type="color">`. It worked, visually — you could pick any color — but the "Color palette" section immediately below claims every status-color picker offers the shared palette as a shortcut, and this one never did. Dan caught this testing PR 16, not PR 14 itself; took the blame for missing it during PR 14's own review, but it's a real gap regardless of when it surfaced.
+
+**Fixed by reusing PR 16's popup infrastructure, not duplicating it.** `openColorPickerPopup` in `status-popup.ts` sits alongside the status-picker popup PR 16 already built, sharing the same `positionAndBindClose`/`activePopupClose` module-level closing logic the reviewer just hardened (A21) — a second popup type reimplementing its own open/close bookkeeping would have been a second place to get that subtly wrong. Content (palette grid + native custom input + "Save to palette") ported from the reference plugin's own color popup, checked against its actual live container build rather than assumed, the same standard applied to the status-picker popup itself.
+
+**Worth noting for future spec-reading:** this is the second time in this batch a "did we actually build what the reference plugin does" question surfaced well after the PR that should have caught it — first the PR 15 targeting model, now this. Both were caught by Dan's own hands-on testing, not by a live-verification pass that only checks "does the built thing work," never "does it match what it was supposed to replicate." Worth keeping in mind for whatever's left in this batch (PR 17-19): a working feature and a correctly-ported one aren't the same claim.
+
 ## PR 16: no "clear override" control — checked the reference plugin's actual code, found it's dead there too
 
 **Decision:** the popup that lets you pick a specific status for an item has no separate "revert to default" action. Checked this specifically rather than assuming a real plugin's popup necessarily has one: `clearItemStatus(path)` exists in the reference plugin's own data layer but is never called from anywhere in its UI — genuinely dead code, not just hard to find. Since Dan wants this feature "borrowed wholesale" from the reference plugin, matching its actual shipped behavior (no clear control) is the correct read of that instruction, not matching some more-complete version of the plugin that doesn't actually exist. Reverting to the default status is still possible — just pick the default status from the same popup, same as picking any other one.
