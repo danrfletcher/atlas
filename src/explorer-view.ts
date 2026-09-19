@@ -31,7 +31,10 @@ const COLLAPSE_TRANSITION_MS = 160;
  * pattern most native file managers use. */
 const MODULE_HOVER_DWELL_MS = 650;
 
-type DragPayload = { kind: "node"; nodeId: string; viewId: string } | { kind: "inbox"; ref: UnitRef };
+/** PR 20: both variants now carry an array — a plain single-item drag is just the length-1 case,
+ * so every existing drop-handling call site only needed to start iterating instead of gaining a
+ * second, parallel "batch" code path next to the original single-item one. */
+type DragPayload = { kind: "node"; nodeIds: string[]; viewId: string } | { kind: "inbox"; refs: UnitRef[] };
 
 interface RowInfo {
 	text: string;
@@ -251,6 +254,36 @@ export class AtlasExplorerView extends ItemView {
 	 * Ephemeral UI state, not persisted — matches every other fold-state field on this view, and a
 	 * collapsed-by-default group is the expected state on next load, same as a freshly-opened bucket. */
 	private expandedTruncationGroups = new Set<string>();
+	/** PR 20: multi-select (F8's own spec — "shift/cmd-click; drag moves the whole selection").
+	 * Bucket and inbox each get their own selection, mutually exclusive: selecting in one always
+	 * clears the other, same as most apps treat two independent list panes rather than trying to
+	 * support a single drag gesture that mixes a placed node and an unplaced ref (genuinely different
+	 * operations at drop time — `moveNode` vs `placeUnit`). Keyed by node id (bucket) / ref key
+	 * (inbox) rather than storing node/ref objects directly, so a stale reference from a prior render
+	 * can never leak in — every read goes back through `ViewsManager`/`unitRefKey` at use time. */
+	private selectedBucketNodeIds = new Set<string>();
+	private selectedInboxRefKeys = new Set<string>();
+	/** PR 20: which view's ids the current bucket selection belongs to — see `render()`'s own use of
+	 * this (clears the bucket selection on a view switch; inbox selection is unaffected). */
+	private lastRenderedViewId: string | null = null;
+	/** The last row clicked (in either scope) — where a following shift-click's range starts from.
+	 * Cleared implicitly by scope: a shift-click only extends a range if the anchor's own scope
+	 * matches the row just clicked, so a stray shift-click in the *other* list can't try to build a
+	 * range across two unrelated lists. */
+	private selectionAnchor: string | null = null;
+	private selectionAnchorScope: "bucket" | "inbox" | null = null;
+	/** PR 20: the bucket's own node-list container from the most recent render — queried live at
+	 * shift-click time (`getBoundingClientRect().height > 0`) to build the visible row order a range
+	 * selects across, so a collapsed folder's hidden contents and a filtered-out row are both
+	 * correctly excluded from the range without a second, parallel bookkeeping structure to keep in
+	 * sync with the DOM. */
+	private bucketListEl: HTMLElement | null = null;
+	/** PR 20: the inbox's own stable sort order from the most recent render, captured once right
+	 * after it's computed (`renderInboxSection`) rather than queried from the DOM like the bucket's
+	 * — F11's virtualization means most inbox rows genuinely aren't in the DOM at any given moment,
+	 * so a DOM query would silently miss whatever's currently scrolled out of view. */
+	private inboxSelectOrder: string[] = [];
+	private inboxRefByKey = new Map<string, UnitRef>();
 	private dragPayload: DragPayload | null = null;
 	/** Review follow-up (retroactive PR 9 finding): cancels whichever module row's dwell timer is
 	 * currently pending, if any — invoked from the window-level `dragend` backstop below. At most
@@ -300,6 +333,20 @@ export class AtlasExplorerView extends ItemView {
 		this.registerDomEvent(window, "dragend", () => {
 			this.dragPayload = null;
 			this.cancelActiveDwell?.();
+			// PR 20 follow-up (reviewer-caught, A27): a successful drop already repaints via
+			// `handleDrop`, but an *abandoned* drag (dropped outside any registered zone, or
+			// cancelled with Escape) never reaches that — same "state correct, paint stale" bug
+			// family as the two Dan just found, just the one remaining branch.
+			//
+			// Reviewer follow-up, same review round: the first version of this fix used `queueRender`
+			// here specifically to *claim* it would coalesce with a same-tick `handleDrop` render —
+			// but `handleDrop` called `void this.render()` directly (like a dozen+ other call sites in
+			// this file), which never touches `queueRender`'s own dedup flag, so the two never
+			// actually coalesced; a successful drop was silently doing two render passes, harmless but
+			// not what the comment claimed. Fixed for real this time, not just re-worded: `handleDrop`
+			// now calls `queueRender()` too (both of its own call sites), so the flag this relies on is
+			// actually shared and a successful drop really is one render, not two.
+			this.queueRender();
 		});
 		await this.render();
 	}
@@ -346,6 +393,17 @@ export class AtlasExplorerView extends ItemView {
 	private async render(): Promise<void> {
 		const container = this.containerEl.children[1] as HTMLElement;
 		const scrollTop = container.scrollTop;
+		// Dan-found: `container.scrollTop` only covers the *outer* sidebar scroll (which section is
+		// in view) — the inbox's own virtualized viewport (F11, `.atlas-inbox-viewport`) is a
+		// separate `overflow-y: auto` element with its own independent scroll position, rebuilt from
+		// scratch by `container.empty()` below like everything else, with nothing capturing or
+		// restoring *its* scrollTop before now. Any click-driven re-render (this PR's own multi-select
+		// highlighting made that far more frequent for the inbox specifically — a plain click on an
+		// inbox row never used to trigger a re-render at all before PR 20) snapped a scrolled-down
+		// inbox straight back to its top. Captured here, restored in `renderVirtualizedInboxRows`
+		// itself (has to happen before that view's own first `drawWindow()`, not after, since that
+		// read is what decides which rows are even in the initial DOM).
+		const inboxViewportScrollTop = container.querySelector(".atlas-inbox-viewport")?.scrollTop ?? 0;
 		// The filter input lives inside `container` and gets torn down by `container.empty()` below
 		// like everything else — every keystroke re-renders the whole view (index/view-change events
 		// and typing both go through this same `render()`). Capture focus/caret here and restore it
@@ -355,6 +413,19 @@ export class AtlasExplorerView extends ItemView {
 		const filterHadFocus = activeEl instanceof HTMLInputElement && activeEl.classList.contains("atlas-filter");
 		const filterSelectionStart = filterHadFocus ? activeEl.selectionStart : null;
 		const filterSelectionEnd = filterHadFocus ? activeEl.selectionEnd : null;
+		// Dan-found: Escape/Delete (`handleRowKeydown`) never reached a real keyboard press, even
+		// though the exact same keys worked fine dispatched synthetically straight at a queried row
+		// element in this PR's own CDP testing. Root cause is the same class of gap as the drag-abort
+		// bug earlier in this PR: a real click on a focusable (`tabIndex=0`) row focuses it natively
+		// (a browser's own default `mousedown` handling, before our `click` listener even runs) — but
+		// `handleSelectionClick` then calls `render()` in response to that same click, which
+		// `container.empty()`s the row right back out from under that just-assigned focus. The new
+		// row rebuilt in its place is a different DOM node and was never itself focused, so a
+		// following *real* keydown has nowhere relevant to land — while `dispatchEvent` in a test
+		// fires straight at whichever element you queried, focus state or not, so this was invisible
+		// to every synthetic test this PR ran. Same fix shape as the filter input's own focus restore
+		// just above/below: capture before `container.empty()`, restore after rebuild.
+		const activeRowKey = activeEl instanceof HTMLElement && activeEl.dataset.selectKey ? activeEl.dataset.selectKey : null;
 
 		container.empty();
 		container.addClass("atlas-explorer");
@@ -362,6 +433,19 @@ export class AtlasExplorerView extends ItemView {
 		const view = this.plugin.viewsManager.getActiveView();
 		const allUnits = this.plugin.unitIndex.getUnits();
 		this.unitsByRefKey = new Map(allUnits.map((u) => [unitRefKey(unitToRef(u)), u]));
+
+		// PR 20: bucket node ids are only meaningful within the view that minted them — switching to
+		// a different view and keeping the old selection around would (extremely unlikely id
+		// collision aside) just be a stale, meaningless-looking highlight on whatever nodes happen to
+		// render next. Inbox selection is unaffected — a ref key means the same thing across views.
+		if (view.id !== this.lastRenderedViewId) {
+			this.lastRenderedViewId = view.id;
+			this.selectedBucketNodeIds.clear();
+			if (this.selectionAnchorScope === "bucket") {
+				this.selectionAnchor = null;
+				this.selectionAnchorScope = null;
+			}
+		}
 
 		this.renderToolbar(container, view);
 		if (filterHadFocus && this.filterInputEl) {
@@ -374,7 +458,16 @@ export class AtlasExplorerView extends ItemView {
 
 		const inboxUnits = this.plugin.viewsManager.getInboxUnits(allUnits, view.id, view.inboxMode);
 		const inboxEl = container.createDiv({ cls: "atlas-section atlas-inbox" });
-		await this.renderInboxSection(inboxEl, view, inboxUnits);
+		await this.renderInboxSection(inboxEl, view, inboxUnits, inboxViewportScrollTop);
+
+		if (activeRowKey) {
+			const restored = container.querySelector<HTMLElement>(`[data-select-key="${CSS.escape(activeRowKey)}"]`);
+			// `preventScroll` — this row's own visible position (and the scroll position that shows
+			// it) was already restored above/in `renderVirtualizedInboxRows`; a plain `.focus()` here
+			// would otherwise fight that by scrolling to whatever the browser's own default
+			// focus-into-view behavior decides, undoing the fix just above it.
+			restored?.focus({ preventScroll: true });
+		}
 
 		container.scrollTop = scrollTop;
 		this.updateActiveHighlight();
@@ -580,6 +673,7 @@ export class AtlasExplorerView extends ItemView {
 		this.makeDropZone(sectionInner, { kind: "bucket-root", viewId: view.id });
 
 		const listEl = sectionInner.createDiv({ cls: "atlas-node-list" });
+		this.bucketListEl = listEl; // PR 20: queried live for shift-click range selection
 		// PR 17: the view itself is the root governor — top-level items resolve their status against
 		// it exactly the same way any other item resolves against its parent node, no special-casing.
 		await this.renderNodeList(view.root, listEl, view, 0, [view]);
@@ -720,6 +814,121 @@ export class AtlasExplorerView extends ItemView {
 	private matchesFilter(text: string): boolean {
 		if (!this.filterText.trim()) return true;
 		return text.toLowerCase().includes(this.filterText.trim().toLowerCase());
+	}
+
+	/** PR 20 — F8's own spec: "Multi-select with shift/cmd-click; drag moves the whole selection."
+	 * Shared between bucket rows (keyed by node id) and inbox rows (keyed by ref key) — same
+	 * mechanics either way, just a different `scope`/`order`/selection `Set`. `order` is the visible
+	 * row order to range-select across for a shift-click; the caller computes it fresh each time
+	 * (`bucketVisibleOrder`/`inboxSelectOrder`) rather than this method owning it, since what counts
+	 * as "visible" is a different question per scope (DOM measurement vs. F11's virtualization —
+	 * see those two callers' own doc comments).
+	 *
+	 * Returns whether the click was *consumed* as a selection action: `true` for a shift-range or a
+	 * cmd/ctrl-toggle (caller should skip whatever the row's own plain-click action would have been,
+	 * e.g. opening a file), `false` for a plain click (selection still resets to just this one row,
+	 * but the caller's normal action still runs right after — multi-select is additive on top of the
+	 * existing single-click-opens behavior, not a replacement for it). */
+	private handleSelectionClick(evt: MouseEvent, key: string, scope: "bucket" | "inbox", order: string[]): boolean {
+		const selection = scope === "bucket" ? this.selectedBucketNodeIds : this.selectedInboxRefKeys;
+		const otherSelection = scope === "bucket" ? this.selectedInboxRefKeys : this.selectedBucketNodeIds;
+
+		if (evt.shiftKey && this.selectionAnchor !== null && this.selectionAnchorScope === scope) {
+			evt.preventDefault();
+			otherSelection.clear();
+			const from = order.indexOf(this.selectionAnchor);
+			const to = order.indexOf(key);
+			if (from !== -1 && to !== -1) {
+				selection.clear();
+				const [lo, hi] = from <= to ? [from, to] : [to, from];
+				for (let i = lo; i <= hi; i++) selection.add(order[i]);
+			}
+			void this.render();
+			return true;
+		}
+
+		if (evt.metaKey || evt.ctrlKey) {
+			evt.preventDefault();
+			otherSelection.clear();
+			if (selection.has(key)) selection.delete(key);
+			else selection.add(key);
+			this.selectionAnchor = key;
+			this.selectionAnchorScope = scope;
+			void this.render();
+			return true;
+		}
+
+		// Plain click: always collapses back to a fresh single-item selection (and a fresh anchor
+		// for the next shift-click) — but never consumed, so the row's own default action still runs.
+		// Always re-renders: an earlier version skipped this when there was no *prior* selection to
+		// clear away, which missed the equally real case of the *new* one-row selection needing to
+		// render its own highlight for the first time — found live-testing the reviewer's own A26
+		// fix, not by inspection; the underlying `Set` was always correct, only the visible ring
+		// lagged a click behind until some unrelated re-render happened to catch it up.
+		otherSelection.clear();
+		selection.clear();
+		selection.add(key);
+		this.selectionAnchor = key;
+		this.selectionAnchorScope = scope;
+		void this.render();
+		return false;
+	}
+
+	/** PR 20: the bucket's currently *visible* row order, for a shift-click range — queried live
+	 * from the DOM (not tracked during render) so a collapsed folder's hidden contents and a
+	 * filtered-out row are both naturally excluded without a second structure to keep in sync.
+	 * `getBoundingClientRect().height > 0` is the actual "is this painted with real height right
+	 * now" check — a row inside a collapsed `.atlas-meta-children` wrapper reports (near) zero here
+	 * once its ancestor's `grid-template-rows` has settled to `0fr`, even though it's still present
+	 * in the DOM (by design — see `renderFoldableChildren`'s own doc comment on why children always
+	 * render regardless of collapsed state). */
+	private bucketVisibleOrder(): string[] {
+		if (!this.bucketListEl) return [];
+		return Array.from(this.bucketListEl.querySelectorAll<HTMLElement>("[data-select-key]"))
+			.filter((el) => el.getBoundingClientRect().height > 0)
+			.map((el) => el.dataset.selectKey as string);
+	}
+
+	/** PR 20: builds this drag's payload for an existing bucket node, folding in the rest of the
+	 * active selection if the dragged row is part of it. Dragging a row that *isn't* currently
+	 * selected instead collapses the selection down to just that row first — same "you're now
+	 * dragging what you clicked, not some other stale selection" behavior most file managers use,
+	 * and keeps the drag payload always consistent with what's visibly highlighted at drag time.
+	 *
+	 * Dan-found (real mouse, not CDP): this used to call `render()` right here, same as every other
+	 * selection change — but this one fires from a `dragstart` handler, mid-gesture, and a real
+	 * native HTML5 drag cannot survive its own source row being torn out of the document by
+	 * `container.empty()` a moment after `dragstart` fires — the whole drag silently aborts, so nothing
+	 * ever reaches a drop target again. CDP's synthetic `dispatchEvent(new DragEvent(...))` doesn't
+	 * go through the browser's real native drag state machine, so this never surfaced during this
+	 * PR's own live-CDP testing — only caught once Dan tried it with an actual mouse. No render call
+	 * here now; the selection `Set`s still update correctly (silently), and the visible highlight
+	 * catches up on the very next render, which `handleDrop` already triggers right after the drop
+	 * completes regardless. */
+	private buildNodeDragPayload(nodeId: string, viewId: string): DragPayload {
+		if (!this.selectedBucketNodeIds.has(nodeId) || this.selectedBucketNodeIds.size <= 1) {
+			this.selectedInboxRefKeys.clear();
+			this.selectedBucketNodeIds.clear();
+			this.selectedBucketNodeIds.add(nodeId);
+			this.selectionAnchor = nodeId;
+			this.selectionAnchorScope = "bucket";
+		}
+		return { kind: "node", nodeIds: [...this.selectedBucketNodeIds], viewId };
+	}
+
+	/** PR 20: same idea as `buildNodeDragPayload`, for an inbox row — see its own doc comment for why
+	 * this deliberately never calls `render()` from inside a `dragstart` handler. */
+	private buildInboxDragPayload(ref: UnitRef): DragPayload {
+		const key = unitRefKey(ref);
+		if (!this.selectedInboxRefKeys.has(key) || this.selectedInboxRefKeys.size <= 1) {
+			this.selectedBucketNodeIds.clear();
+			this.selectedInboxRefKeys.clear();
+			this.selectedInboxRefKeys.add(key);
+			this.selectionAnchor = key;
+			this.selectionAnchorScope = "inbox";
+		}
+		const refs = [...this.selectedInboxRefKeys].map((k) => this.inboxRefByKey.get(k)).filter((r): r is UnitRef => !!r);
+		return { kind: "inbox", refs: refs.length > 0 ? refs : [ref] };
 	}
 
 	/** PR 9 (issue 6): does this subtree contain a unit whose resolved text matches the active
@@ -870,6 +1079,8 @@ export class AtlasExplorerView extends ItemView {
 	private async renderNode(node: ViewNode, container: HTMLElement, view: View, depth: number, ancestors: StatusGovernance[]): Promise<void> {
 		if (node.type === "meta") {
 			const row = container.createDiv({ cls: "atlas-row atlas-row-meta" });
+			row.dataset.selectKey = node.id;
+			row.toggleClass("is-selected", this.selectedBucketNodeIds.has(node.id));
 			row.style.paddingLeft = `${depth * 16}px`;
 			row.setAttr("draggable", "true");
 			const chevron = row.createDiv({ cls: "atlas-chevron" });
@@ -877,7 +1088,11 @@ export class AtlasExplorerView extends ItemView {
 			this.renderRowIcon(iconEl, view, node, ancestors, "layers");
 			row.createSpan({ cls: "atlas-row-text", text: node.label ?? "" });
 
-			row.addEventListener("dragstart", () => (this.dragPayload = { kind: "node", nodeId: node.id, viewId: view.id }));
+			// PR 20: a meta row's plain click never did anything before this (no open target) — safe
+			// to bind unconditionally, since the previous behavior ("nothing happens") is preserved
+			// exactly for a plain click; only shift/cmd-click gain new meaning.
+			row.addEventListener("click", (evt) => this.handleSelectionClick(evt, node.id, "bucket", this.bucketVisibleOrder()));
+			row.addEventListener("dragstart", () => (this.dragPayload = this.buildNodeDragPayload(node.id, view.id)));
 			this.makeDropZone(row, { kind: "node", nodeId: node.id, viewId: view.id });
 			row.addEventListener("keydown", (evt) => this.handleRowKeydown(evt, node, view));
 			row.tabIndex = 0;
@@ -898,6 +1113,8 @@ export class AtlasExplorerView extends ItemView {
 		const row = container.createDiv({ cls: "atlas-row atlas-row-unit" });
 		if (info.missing) row.addClass("atlas-missing");
 		row.dataset.refKey = unitRefKey(ref);
+		row.dataset.selectKey = node.id;
+		row.toggleClass("is-selected", this.selectedBucketNodeIds.has(node.id));
 		row.style.paddingLeft = `${depth * 16}px`;
 		row.setAttr("draggable", "true");
 
@@ -930,8 +1147,11 @@ export class AtlasExplorerView extends ItemView {
 		if (!info.missing && ref.kind === "folder") this.wireModuleRow(row, iconEl, ref.path);
 
 		this.setPlacementTooltip(row, ref);
-		row.addEventListener("click", () => void this.openRef(ref));
-		row.addEventListener("dragstart", () => (this.dragPayload = { kind: "node", nodeId: node.id, viewId: view.id }));
+		row.addEventListener("click", (evt) => {
+			const consumed = this.handleSelectionClick(evt, node.id, "bucket", this.bucketVisibleOrder());
+			if (!consumed) void this.openRef(ref);
+		});
+		row.addEventListener("dragstart", () => (this.dragPayload = this.buildNodeDragPayload(node.id, view.id)));
 		this.makeDropZone(row, { kind: "node", nodeId: node.id, viewId: view.id });
 		row.tabIndex = 0;
 		row.addEventListener("keydown", (evt) => this.handleRowKeydown(evt, node, view));
@@ -945,7 +1165,7 @@ export class AtlasExplorerView extends ItemView {
 
 	// --- inbox -----------------------------------------------------------------------------------
 
-	private async renderInboxSection(container: HTMLElement, view: View, units: Unit[]): Promise<void> {
+	private async renderInboxSection(container: HTMLElement, view: View, units: Unit[], viewportScrollTop: number): Promise<void> {
 		const header = container.createDiv({ cls: "atlas-section-header" });
 		const chevron = header.createDiv({ cls: "atlas-chevron" });
 		setIcon(chevron, this.inboxCollapsed ? "chevron-right" : "chevron-down");
@@ -994,11 +1214,18 @@ export class AtlasExplorerView extends ItemView {
 						return ctimeB - ctimeA; // newest first, per spec default
 				  });
 
+		// PR 20: captured here (not queried from the DOM like the bucket's) — F11's virtualization
+		// below means most of these rows never actually exist in the DOM at once, so a shift-click on
+		// a row currently scrolled into view still needs this to know the full order, not just
+		// whatever's presently painted.
+		this.inboxSelectOrder = sorted.map((r) => unitRefKey(r.ref));
+		this.inboxRefByKey = new Map(sorted.map((r) => [unitRefKey(r.ref), r.ref]));
+
 		// F11: the inbox can be thousands of rows (5,000 files + 2,000 free blocks scale target).
 		// The non-virtualized fallback this used to need for expanded folder-unit internals is gone —
 		// PR 9 (issue 2) replaced inline inbox expansion with the Module Contents modal, so every
 		// inbox row is now fixed-height and the virtualized path always applies.
-		this.renderVirtualizedInboxRows(listEl, sorted);
+		this.renderVirtualizedInboxRows(listEl, sorted, viewportScrollTop);
 
 		let localCollapsed = this.inboxCollapsed;
 		let pendingPersist: number | undefined;
@@ -1018,7 +1245,10 @@ export class AtlasExplorerView extends ItemView {
 
 	private renderInboxRow(container: HTMLElement, ref: UnitRef, info: RowInfo): HTMLElement {
 		const row = container.createDiv({ cls: "atlas-row atlas-row-unit" });
-		row.dataset.refKey = unitRefKey(ref);
+		const key = unitRefKey(ref);
+		row.dataset.refKey = key;
+		row.dataset.selectKey = key;
+		row.toggleClass("is-selected", this.selectedInboxRefKeys.has(key));
 		row.setAttr("draggable", "true");
 		const iconEl = row.createDiv({ cls: "atlas-icon" });
 		setIcon(iconEl, info.icon);
@@ -1030,8 +1260,11 @@ export class AtlasExplorerView extends ItemView {
 		if (ref.kind === "folder") this.wireModuleRow(row, iconEl, ref.path);
 
 		this.setPlacementTooltip(row, ref);
-		row.addEventListener("click", () => void this.openRef(ref));
-		row.addEventListener("dragstart", () => (this.dragPayload = { kind: "inbox", ref }));
+		row.addEventListener("click", (evt) => {
+			const consumed = this.handleSelectionClick(evt, key, "inbox", this.inboxSelectOrder);
+			if (!consumed) void this.openRef(ref);
+		});
+		row.addEventListener("dragstart", () => (this.dragPayload = this.buildInboxDragPayload(ref)));
 		row.tabIndex = 0;
 		row.addEventListener("contextmenu", (evt) => {
 			evt.preventDefault();
@@ -1045,10 +1278,20 @@ export class AtlasExplorerView extends ItemView {
 	 * list length. Redraws on scroll (rAF-throttled) rather than re-running the whole view's
 	 * `render()`, so scrolling thousands of rows doesn't re-resolve/re-sort/re-render the toolbar
 	 * and bucket section on every frame. */
-	private renderVirtualizedInboxRows(listEl: HTMLElement, sorted: { ref: UnitRef; info: RowInfo; unit: Unit }[]): void {
+	private renderVirtualizedInboxRows(
+		listEl: HTMLElement,
+		sorted: { ref: UnitRef; info: RowInfo; unit: Unit }[],
+		viewportScrollTop: number
+	): void {
 		const viewport = listEl.createDiv({ cls: "atlas-inbox-viewport" });
 		const spacer = viewport.createDiv({ cls: "atlas-inbox-spacer" });
 		spacer.style.height = `${sorted.length * INBOX_ROW_HEIGHT}px`;
+		// Dan-found: restores the inbox's own scroll position across a re-render (see `render()`'s
+		// own doc comment on why this is separate from the outer container's scrollTop). Has to be
+		// set before the first `drawWindow()` call below, not after — that call reads
+		// `viewport.scrollTop` synchronously to decide which rows even belong in the initial DOM, so
+		// setting it later would draw the wrong window first and only fix itself on the next scroll.
+		viewport.scrollTop = viewportScrollTop;
 
 		let frameQueued = false;
 		const drawWindow = () => {
@@ -1134,38 +1377,72 @@ export class AtlasExplorerView extends ItemView {
 		if (target.kind === "inbox-area") {
 			// Only a unit has a disk/ref identity to "return to the inbox" — a meta folder dropped
 			// here is simply not a meaningful gesture, so it's a no-op rather than acting on a
-			// fabricated ref.
+			// fabricated ref for that one, not the whole drag.
 			if (payload.kind === "node") {
 				const draggedView = this.plugin.viewsManager.getView(payload.viewId);
-				const dragged = draggedView && this.findNodeAnywhere(draggedView.root, payload.nodeId);
-				// PR 13: unplaceNode removes this exact dragged instance, not every duplicate of the
-				// same unit that might also be placed elsewhere in this view.
-				if (dragged?.node.type === "unit") this.plugin.viewsManager.unplaceNode(payload.viewId, payload.nodeId);
+				if (draggedView) {
+					for (const nodeId of payload.nodeIds) {
+						const dragged = this.findNodeAnywhere(draggedView.root, nodeId);
+						// PR 13: unplaceNode removes this exact dragged instance, not every duplicate of
+						// the same unit that might also be placed elsewhere in this view.
+						if (dragged?.node.type === "unit") this.plugin.viewsManager.unplaceNode(payload.viewId, nodeId);
+					}
+				}
 			}
+			this.selectedBucketNodeIds.clear();
+			this.queueRender();
 			return;
 		}
 
 		const viewId = target.viewId;
 		let parentId: string | null = null;
-		let index = 0;
 		if (target.kind === "node") {
 			const view = this.plugin.viewsManager.getView(viewId);
 			const found = view && this.findNodeAnywhere(view.root, target.nodeId);
-			if (found) {
-				parentId = found.node.id;
-				index = found.node.children.length;
-			}
+			if (found) parentId = found.node.id;
 		}
 
 		if (payload.kind === "node") {
+			const view = this.plugin.viewsManager.getView(viewId);
+			if (!view) return;
+			// PR 20: a node already nested under *another* node in this same drag batch travels along
+			// with that ancestor's own move automatically — moving it again separately right after
+			// would yank it back out into a sibling of its own ancestor, flattening a relationship the
+			// user very likely meant to keep by dragging them together in the first place.
+			const toMove = payload.nodeIds.filter((id) => {
+				const found = this.findNodeAnywhere(view.root, id);
+				if (!found) return false;
+				return !payload.nodeIds.some((otherId) => {
+					if (otherId === id) return false;
+					const other = this.findNodeAnywhere(view.root, otherId);
+					return !!other && this.nodeContainsDescendant(other.node, id);
+				});
+			});
 			// An existing tree node (meta or unit) is being reparented/reordered — `moveNode` operates
 			// on it directly by id, in place, so its own children/collapsed state travels with it.
-			this.plugin.viewsManager.moveNode(viewId, payload.nodeId, parentId, index);
+			// Each move appends after the previous one, so the whole selection lands at the
+			// destination in the same relative order it was dragged in.
+			let index = parentId ? (this.findNodeAnywhere(view.root, parentId)?.node.children.length ?? 0) : view.root.length;
+			for (const nodeId of toMove) {
+				if (this.plugin.viewsManager.moveNode(viewId, nodeId, parentId, index)) index++;
+			}
+			this.selectedBucketNodeIds.clear();
+			this.queueRender();
 			return;
 		}
 
-		// payload.kind === "inbox": a fresh unit ref, not yet placed anywhere in this view.
-		this.plugin.viewsManager.placeUnit(viewId, payload.ref, parentId);
+		// payload.kind === "inbox": fresh unit refs, not yet placed anywhere in this view — placeUnit
+		// always appends, so calling it in order already preserves the batch's relative order.
+		for (const ref of payload.refs) this.plugin.viewsManager.placeUnit(viewId, ref, parentId);
+		this.selectedInboxRefKeys.clear();
+		this.queueRender();
+	}
+
+	private nodeContainsDescendant(node: ViewNode, targetId: string): boolean {
+		for (const child of node.children) {
+			if (child.id === targetId || this.nodeContainsDescendant(child, targetId)) return true;
+		}
+		return false;
 	}
 
 	/** Files/blocks are opaque internals to a folder-unit until something links to them — dropping
@@ -1225,10 +1502,21 @@ export class AtlasExplorerView extends ItemView {
 		}
 	}
 
-	private refOfNode(payload: { kind: "node"; nodeId: string; viewId: string }): UnitRef {
-		const view = this.plugin.viewsManager.getView(payload.viewId);
-		const found = view && this.findNodeAnywhere(view.root, payload.nodeId);
+	private refOfNode(viewId: string, nodeId: string): UnitRef {
+		const view = this.plugin.viewsManager.getView(viewId);
+		const found = view && this.findNodeAnywhere(view.root, nodeId);
 		return found?.node.ref ?? { kind: "file", path: "" };
+	}
+
+	/** PR 20: the module-icon drop zone (`wireModuleRow`, below) is a real disk move — deliberately
+	 * restricted to a single-item drag. Dragging a multi-select onto a module icon to bulk-file
+	 * several things into it at once is a materially riskier gesture (several renames at once instead
+	 * of one named, confirmable one) than anything asked for here, so it's a no-op rather than an
+	 * unreviewed bulk-move feature — the row-level drop zone underneath still handles a multi-item
+	 * drag the normal way (organizational meta-nesting, never a disk move) once this returns `null`. */
+	private singleDragRef(payload: DragPayload): UnitRef | null {
+		if (payload.kind === "inbox") return payload.refs.length === 1 ? payload.refs[0] : null;
+		return payload.nodeIds.length === 1 ? this.refOfNode(payload.viewId, payload.nodeIds[0]) : null;
 	}
 
 	private findNodeAnywhere(nodes: ViewNode[], nodeId: string): { node: ViewNode } | null {
@@ -1484,7 +1772,7 @@ export class AtlasExplorerView extends ItemView {
 			const payload = this.dragPayload;
 			this.dragPayload = null;
 			if (!payload) return;
-			const ref = payload.kind === "inbox" ? payload.ref : this.refOfNode(payload);
+			const ref = this.singleDragRef(payload);
 			if (ref && ref.kind !== "folder") void this.handleAddToModule(ref, folderPath);
 		});
 	}
@@ -1518,7 +1806,7 @@ export class AtlasExplorerView extends ItemView {
 		const folder = this.plugin.app.vault.getAbstractFileByPath(folderPath);
 		const payload = this.dragPayload;
 		if (!(folder instanceof TFolder) || !payload) return;
-		const ref = payload.kind === "inbox" ? payload.ref : this.refOfNode(payload);
+		const ref = this.singleDragRef(payload);
 		if (!ref || ref.kind === "folder") return; // only files/blocks are moveable into a module (see handleDrop)
 		const modal: ModuleContentsModal = new ModuleContentsModal(this.plugin.app, folder, {
 			onOpenFile: (file) => void this.openRef({ kind: "file", path: file.path }),
@@ -1580,14 +1868,36 @@ export class AtlasExplorerView extends ItemView {
 			this.plugin.viewsManager.setNodeCollapsed(view.id, node.id, !node.collapsed);
 		} else if (evt.key === "Delete") {
 			evt.preventDefault();
-			// PR 13: unplaceNode removes this exact focused row, not every duplicate of the same
-			// unit that might also be placed elsewhere in this view.
-			if (node.type === "unit") this.plugin.viewsManager.unplaceNode(view.id, node.id);
+			// PR 20: if the focused row is part of an active multi-selection, Delete removes every
+			// *unit* currently selected (same restriction the single-row case already had — meta
+			// folders delete via a distinct, different operation, `deleteMetaFolder`, that promotes
+			// their children rather than a plain "remove"), not just the one row that happened to
+			// have keyboard focus — same "drag moves the whole selection" spirit, applied to the one
+			// other batch-shaped action this view already had.
+			if (this.selectedBucketNodeIds.has(node.id) && this.selectedBucketNodeIds.size > 1) {
+				for (const id of this.selectedBucketNodeIds) {
+					const found = this.findNodeAnywhere(view.root, id);
+					if (found?.node.type === "unit") this.plugin.viewsManager.unplaceNode(view.id, id);
+				}
+				this.selectedBucketNodeIds.clear();
+				void this.render();
+			} else if (node.type === "unit") {
+				// PR 13: unplaceNode removes this exact focused row, not every duplicate of the same
+				// unit that might also be placed elsewhere in this view.
+				this.plugin.viewsManager.unplaceNode(view.id, node.id);
+			}
 		} else if (evt.key === "F2" && node.type === "meta") {
 			evt.preventDefault();
 			new TextPromptModal(this.plugin.app, "Rename folder", node.label ?? "", (label) => {
 				this.plugin.viewsManager.renameMetaFolder(view.id, node.id, label);
 			}).open();
+		} else if (evt.key === "Escape" && (this.selectedBucketNodeIds.size > 0 || this.selectedInboxRefKeys.size > 0)) {
+			evt.preventDefault();
+			this.selectedBucketNodeIds.clear();
+			this.selectedInboxRefKeys.clear();
+			this.selectionAnchor = null;
+			this.selectionAnchorScope = null;
+			void this.render();
 		}
 	}
 }

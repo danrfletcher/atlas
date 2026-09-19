@@ -239,6 +239,18 @@
 	font-weight: 600;
 }
 
+/* PR 20: multi-select highlight — a distinct treatment from `.is-active` (the currently-open-file
+ * marker above) since the two can legitimately apply to the same row at once (the open file can
+ * also be part of a multi-selection) and need to stay visually distinguishable when they do. Only
+ * `box-shadow`, deliberately no `background` here (reviewer-caught, A26: an earlier version also
+ * set `background`, which — declared later in the stylesheet than `.is-active`'s own — silently won
+ * whenever a row was both, quietly losing the active-file tint). The box-shadow ring alone is
+ * enough to show selection and layers over whatever background `.is-active`/`:hover` already set,
+ * rather than fighting either of them for the same property. */
+.atlas-row.is-selected {
+	box-shadow: inset 0 0 0 1px var(--interactive-accent);
+}
+
 .atlas-row.atlas-missing {
 	opacity: 0.5;
 }
