@@ -64,6 +64,10 @@ Then enable "Atlas" under Settings → Community plugins, in a vault where this 
 
 ![Atlas settings tab](docs/images/settings.png)
 
+The settings panel has two tabs: **Basic** and **Status**.
+
+### Basic
+
 | Setting | Default | What it does |
 |---|---|---|
 | Pool folder | `_pool` | Where free blocks live. Created on demand the first time you add a block. |
@@ -73,6 +77,14 @@ Then enable "Atlas" under Settings → Community plugins, in a vault where this 
 | Block display length | 80 | How many characters of a free block's first line to show in the explorer. |
 | Confirm before adding a unit to a module | on | Ask before a drag onto a module's icon physically files something into it. Off skips the confirmation, not the move. |
 | Default view on launch | — | Which view Atlas opens to when the vault loads. |
+
+### Status
+
+Foundation for status sets — defining sets here is currently the whole feature; assigning a set to an item happens from its right-click menu in a later release.
+
+- **Status sets** — create any number of named sets, each holding an ordered list of statuses (label, color, optionally flagged "Completed" and/or "Cancelled"). Each status row's "more actions" menu handles making it the set's default, marking it completed/cancelled, reordering, and removing it.
+- **Color palette** — a shared set of swatches offered by every status color picker, in addition to a fully custom color.
+- **Glow** — a design toggle for a soft glow around status dots once status rendering ships.
 
 ## Commands
 
