@@ -9,6 +9,7 @@ import { FreeBlockTextCache, freeBlockLivePreviewPlugin, registerBlockLinkDispla
 import { ViewsManager } from "./views";
 import { ATLAS_VIEW_TYPE, AtlasExplorerView } from "./explorer-view";
 import { registerF10Commands } from "./f10-commands";
+import { DEFAULT_COLOR_PALETTE, StatusSet, StatusesManager } from "./statuses";
 
 interface AtlasData {
 	settings: AtlasSettings;
@@ -19,6 +20,10 @@ interface AtlasData {
 	 * modal — a flat set is enough since folder paths are already unique/absolute across the vault,
 	 * no need to key by module. Absence = collapsed (the default for a folder never opened before). */
 	expandedModuleFolders: string[];
+	/** PR 14: named status sets, ported from the reference plugin's own model. */
+	statusSets: StatusSet[];
+	/** PR 14: shared/global palette offered by every status-color picker. */
+	colorPalette: string[];
 }
 
 export default class AtlasPlugin extends Plugin {
@@ -29,6 +34,7 @@ export default class AtlasPlugin extends Plugin {
 	private expandedModuleFolders: Set<string>;
 	unitIndex: UnitIndex;
 	viewsManager: ViewsManager;
+	statusesManager: StatusesManager;
 	/** Public so the explorer (F8/F11) can reuse it instead of re-reading free-block files on every render. */
 	freeBlockTextCache: FreeBlockTextCache;
 	private linkSuggest: AtlasLinkSuggest;
@@ -45,6 +51,11 @@ export default class AtlasPlugin extends Plugin {
 			this.app,
 			data?.views ?? [],
 			data?.activeViewId ?? "",
+			() => this.persistDebounced()
+		);
+		this.statusesManager = new StatusesManager(
+			data?.statusSets ?? [],
+			data?.colorPalette ?? [...DEFAULT_COLOR_PALETTE],
 			() => this.persistDebounced()
 		);
 		this.addSettingTab(new AtlasSettingTab(this.app, this));
@@ -119,6 +130,8 @@ export default class AtlasPlugin extends Plugin {
 			views: this.viewsManager.getViews(),
 			activeViewId: this.viewsManager.getActiveViewId(),
 			expandedModuleFolders: Array.from(this.expandedModuleFolders),
+			statusSets: this.statusesManager.getStatusSets(),
+			colorPalette: this.statusesManager.getColorPalette(),
 		} satisfies AtlasData);
 	}
 

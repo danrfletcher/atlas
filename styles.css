@@ -375,3 +375,119 @@
 	border-bottom: 1px solid var(--background-modifier-border);
 	border-radius: 0;
 }
+
+/* PR 14: settings-panel tab switcher (Basic / Status) — plain button row, active tab highlighted
+ * the same way Obsidian's own nav-item selection looks, so it reads as native chrome. */
+.atlas-settings-tabs {
+	display: flex;
+	gap: 4px;
+	margin-bottom: 16px;
+	border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.atlas-settings-tab {
+	background: none;
+	border: none;
+	box-shadow: none;
+	padding: 8px 12px;
+	cursor: pointer;
+	color: var(--text-muted);
+	border-bottom: 2px solid transparent;
+}
+
+.atlas-settings-tab:hover {
+	color: var(--text-normal);
+}
+
+.atlas-settings-tab.is-active {
+	color: var(--text-normal);
+	border-bottom-color: var(--interactive-accent);
+	font-weight: 600;
+}
+
+/* PR 14: status set cards under the Status tab — one per named set, containing its rename field
+ * and its list of individual status rows. */
+.atlas-status-set-card {
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 6px;
+	padding: 8px 12px;
+	margin-bottom: 12px;
+}
+
+.atlas-status-list {
+	display: flex;
+	flex-direction: column;
+}
+
+.atlas-status-row input[type="color"] {
+	width: 28px;
+	height: 28px;
+	padding: 0;
+	border: none;
+	background: none;
+	cursor: pointer;
+	flex: 0 0 28px;
+}
+
+/* Chromium's native color swatch renders inside a shadow-root wrapper with its own intrinsic
+ * size — constraining the host element's width alone isn't enough to shrink it. */
+.atlas-status-row input[type="color"]::-webkit-color-swatch-wrapper {
+	padding: 0;
+}
+
+.atlas-status-row input[type="color"]::-webkit-color-swatch {
+	border: none;
+	border-radius: 4px;
+}
+
+.atlas-status-badges {
+	display: flex;
+	gap: 6px;
+	flex-shrink: 0;
+}
+
+.atlas-status-badge {
+	font-size: 0.8em;
+	color: var(--text-accent);
+	white-space: nowrap;
+}
+
+/* PR 14: shared color palette grid, same swatch-plus-remove-badge pattern the reference plugin used. */
+.atlas-palette-grid {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 8px;
+	margin-bottom: 8px;
+}
+
+.atlas-palette-item {
+	position: relative;
+}
+
+.atlas-palette-swatch {
+	width: 28px;
+	height: 28px;
+	border-radius: 4px;
+	border: 1px solid var(--background-modifier-border);
+}
+
+.atlas-palette-remove {
+	position: absolute;
+	top: -6px;
+	right: -6px;
+	background: var(--background-primary);
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 50%;
+	width: 16px;
+	height: 16px;
+	line-height: 14px;
+	text-align: center;
+	font-size: 11px;
+	cursor: pointer;
+}
+
+.atlas-palette-add {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+}
