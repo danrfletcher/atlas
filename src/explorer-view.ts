@@ -334,11 +334,18 @@ export class AtlasExplorerView extends ItemView {
 			this.dragPayload = null;
 			this.cancelActiveDwell?.();
 			// PR 20 follow-up (reviewer-caught, A27): a successful drop already repaints via
-			// `handleDrop`'s own `render()` call, but an *abandoned* drag (dropped outside any
-			// registered zone, or cancelled with Escape) never reaches that — same "state correct,
-			// paint stale" bug family as the two Dan just found, just the one remaining branch.
-			// `queueRender` (not a direct `render()`) so this coalesces into the same repaint as a
-			// same-tick `handleDrop` call instead of doubling up on a successful drop.
+			// `handleDrop`, but an *abandoned* drag (dropped outside any registered zone, or
+			// cancelled with Escape) never reaches that — same "state correct, paint stale" bug
+			// family as the two Dan just found, just the one remaining branch.
+			//
+			// Reviewer follow-up, same review round: the first version of this fix used `queueRender`
+			// here specifically to *claim* it would coalesce with a same-tick `handleDrop` render —
+			// but `handleDrop` called `void this.render()` directly (like a dozen+ other call sites in
+			// this file), which never touches `queueRender`'s own dedup flag, so the two never
+			// actually coalesced; a successful drop was silently doing two render passes, harmless but
+			// not what the comment claimed. Fixed for real this time, not just re-worded: `handleDrop`
+			// now calls `queueRender()` too (both of its own call sites), so the flag this relies on is
+			// actually shared and a successful drop really is one render, not two.
 			this.queueRender();
 		});
 		await this.render();
@@ -1361,7 +1368,7 @@ export class AtlasExplorerView extends ItemView {
 				}
 			}
 			this.selectedBucketNodeIds.clear();
-			void this.render();
+			this.queueRender();
 			return;
 		}
 
@@ -1398,7 +1405,7 @@ export class AtlasExplorerView extends ItemView {
 				if (this.plugin.viewsManager.moveNode(viewId, nodeId, parentId, index)) index++;
 			}
 			this.selectedBucketNodeIds.clear();
-			void this.render();
+			this.queueRender();
 			return;
 		}
 
@@ -1406,7 +1413,7 @@ export class AtlasExplorerView extends ItemView {
 		// always appends, so calling it in order already preserves the batch's relative order.
 		for (const ref of payload.refs) this.plugin.viewsManager.placeUnit(viewId, ref, parentId);
 		this.selectedInboxRefKeys.clear();
-		void this.render();
+		this.queueRender();
 	}
 
 	private nodeContainsDescendant(node: ViewNode, targetId: string): boolean {
