@@ -17,6 +17,9 @@ export interface AtlasSettings {
 	 * the "Status" settings tab even though it's stored alongside the rest of settings, same as
 	 * every other simple on/off toggle in this file. */
 	glowEnabled: boolean;
+	/** PR 15: when a status dot replaces a row's normal icon, keep that icon visible shrunk down
+	 * inside the dot instead of hiding it outright. */
+	retainIcons: boolean;
 }
 
 export const DEFAULT_TO_DELETE_FOLDER = "_to_delete";
@@ -31,6 +34,7 @@ export const DEFAULT_SETTINGS: AtlasSettings = {
 	defaultViewId: "default",
 	confirmAddToModule: true,
 	glowEnabled: false,
+	retainIcons: false,
 };
 
 /** Dot-folders + the pool folder + `_to_delete`, computed once against the live vault root. */
@@ -374,10 +378,20 @@ export class AtlasSettingTab extends PluginSettingTab {
 
 		new Setting(containerEl)
 			.setName("Glow")
-			.setDesc("Adds a soft glow around status dots. Purely cosmetic — takes effect once status rendering ships.")
+			.setDesc("Adds a soft glow around status dots.")
 			.addToggle((toggle) =>
 				toggle.setValue(this.plugin.settings.glowEnabled).onChange(async (value) => {
 					this.plugin.settings.glowEnabled = value;
+					await this.plugin.saveSettings();
+				})
+			);
+
+		new Setting(containerEl)
+			.setName("Retain icons")
+			.setDesc("When a status is assigned, keep the item's normal icon visible, shrunk down inside the status dot, instead of replacing it outright.")
+			.addToggle((toggle) =>
+				toggle.setValue(this.plugin.settings.retainIcons).onChange(async (value) => {
+					this.plugin.settings.retainIcons = value;
 					await this.plugin.saveSettings();
 				})
 			);

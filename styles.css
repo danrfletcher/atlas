@@ -265,6 +265,32 @@
 	color: var(--icon-color);
 }
 
+/* PR 15: a status dot takes over the same icon slot a row's normal type icon would occupy,
+ * sized to match Obsidian's default 16px icon footprint so row alignment doesn't shift when a
+ * status is toggled on/off. */
+.atlas-icon.atlas-status-dot {
+	width: 16px;
+	height: 16px;
+	border-radius: 50%;
+	align-items: center;
+	justify-content: center;
+}
+
+.atlas-icon.atlas-status-dot.atlas-status-glow {
+	box-shadow: 0 0 6px 2px var(--status-dot-glow-color);
+}
+
+.atlas-status-dot-icon {
+	display: flex;
+	width: 10px;
+	height: 10px;
+}
+
+.atlas-status-dot-icon svg {
+	width: 10px;
+	height: 10px;
+}
+
 /* PR 9 (issue 2, point 4): a module row's icon crossfades closed→open on hover instead of a real
  * SVG morph (not feasible without a third-party icon-morphing library) — two icons stacked via
  * `position: absolute` inside the same cell, opacity-swapped on `:hover`. The tooltip itself

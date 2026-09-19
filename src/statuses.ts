@@ -1,8 +1,10 @@
+import { ViewNode } from "./types";
+
 /**
  * PR 14 — foundation for the File Folder Status Sets port (ported from
  * `danrfletcher/obsidian-file-folder-status-icons`, adapted to Atlas's own persistence/CRUD style
- * rather than reused as a dependency). Data model + settings-panel CRUD only — no rendering or
- * per-item assignment yet, those land in PR 15/16.
+ * rather than reused as a dependency). Data model + settings-panel CRUD only in PR 14 — PR 15 adds
+ * `resolveNodeStatus` below for the minimal per-node rendering/assignment mechanism.
  */
 
 export interface StatusDefinition {
@@ -51,6 +53,18 @@ export function isValidHexColor(value: string): boolean {
 export function normalizeHexColor(value: string, fallback = "#888888"): string {
 	const v = value.trim();
 	return isValidHexColor(v) ? v : fallback;
+}
+
+/** PR 15: picks black or white so a "Retain icons" icon stays legible against an arbitrary
+ * user-chosen status dot color, the same contrast heuristic the reference plugin uses. */
+export function contrastingTextColor(hex: string): "#000000" | "#ffffff" {
+	const normalized = normalizeHexColor(hex).replace("#", "");
+	const full = normalized.length === 3 ? normalized.split("").map((ch) => ch + ch).join("") : normalized;
+	const r = parseInt(full.substring(0, 2), 16);
+	const g = parseInt(full.substring(2, 4), 16);
+	const b = parseInt(full.substring(4, 6), 16);
+	const luminance = (r * 299 + g * 587 + b * 114) / 1000;
+	return luminance > 150 ? "#000000" : "#ffffff";
 }
 
 function generateStatusId(prefix: string): string {
@@ -179,5 +193,17 @@ export class StatusesManager {
 	removePaletteColor(hex: string): void {
 		this.colorPalette = this.colorPalette.filter((c) => c !== hex);
 		this.save();
+	}
+
+	/** PR 15: resolves a node's own status for rendering — `null` means "show the normal icon,
+	 * unaffected" (disabled, no set chosen, the set was since deleted, or the set has no statuses
+	 * to fall back to). No inheritance yet (PR 16+): a node with no assignment of its own never
+	 * shows a status just because an ancestor has one. Defaults to the set's own `defaultStatusId`
+	 * since PR 15 has no per-node "which specific status" picker yet, just "which set". */
+	resolveNodeStatus(node: ViewNode): StatusDefinition | null {
+		if (!node.statusEnabled || !node.statusSetId) return null;
+		const set = this.getStatusSet(node.statusSetId);
+		if (!set || set.statuses.length === 0) return null;
+		return set.statuses.find((s) => s.id === set.defaultStatusId) ?? set.statuses[0];
 	}
 }

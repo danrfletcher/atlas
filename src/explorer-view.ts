@@ -3,7 +3,8 @@ import type AtlasPlugin from "./main";
 import { Unit, UnitRef, View, ViewNode, unitRefKey, unitToRef } from "./types";
 import { MetaTarget, flattenMetaFolders } from "./views";
 import { resolveUnit } from "./unit-display";
-import { TextPromptModal, ConfirmModal } from "./modals";
+import { contrastingTextColor } from "./statuses";
+import { TextPromptModal, ConfirmModal, StatusesModal } from "./modals";
 import { createInterfaceNote, findInterfaceNote } from "./interface-notes";
 import { addBlock } from "./commands";
 
@@ -663,6 +664,28 @@ export class AtlasExplorerView extends ItemView {
 		});
 	}
 
+	/** PR 15: renders a row's icon slot — either its normal type icon (`fallbackIconName`) or, if
+	 * this exact node has its own status assigned, a colored status dot instead. "Retain icons"
+	 * (Status → Design) keeps the normal icon visible, shrunk down inside the dot, rather than
+	 * replacing it outright. Shared by meta and unit rows so the two can't drift out of sync with
+	 * each other, the same reasoning `renderFoldableChildren`'s own extraction already used. */
+	private renderRowIcon(iconEl: HTMLElement, node: ViewNode, fallbackIconName: string): void {
+		const status = this.plugin.statusesManager.resolveNodeStatus(node);
+		if (!status) {
+			setIcon(iconEl, fallbackIconName);
+			return;
+		}
+		iconEl.addClass("atlas-status-dot");
+		iconEl.toggleClass("atlas-status-glow", this.plugin.settings.glowEnabled);
+		iconEl.style.backgroundColor = status.color;
+		iconEl.style.setProperty("--status-dot-glow-color", status.color);
+		if (this.plugin.settings.retainIcons) {
+			const innerIcon = iconEl.createSpan({ cls: "atlas-status-dot-icon" });
+			innerIcon.style.color = contrastingTextColor(status.color);
+			setIcon(innerIcon, fallbackIconName);
+		}
+	}
+
 	private async renderNode(node: ViewNode, container: HTMLElement, view: View, depth: number): Promise<void> {
 		if (node.type === "meta") {
 			const row = container.createDiv({ cls: "atlas-row atlas-row-meta" });
@@ -670,7 +693,7 @@ export class AtlasExplorerView extends ItemView {
 			row.setAttr("draggable", "true");
 			const chevron = row.createDiv({ cls: "atlas-chevron" });
 			const iconEl = row.createDiv({ cls: "atlas-icon" });
-			setIcon(iconEl, "layers");
+			this.renderRowIcon(iconEl, node, "layers");
 			row.createSpan({ cls: "atlas-row-text", text: node.label ?? "" });
 
 			row.addEventListener("dragstart", () => (this.dragPayload = { kind: "node", nodeId: node.id, viewId: view.id }));
@@ -706,7 +729,7 @@ export class AtlasExplorerView extends ItemView {
 		// this exact alignment problem, so reusing it here instead of a second magic-number offset.
 		const chevron = row.createDiv({ cls: "atlas-chevron" });
 		const iconEl = row.createDiv({ cls: "atlas-icon" });
-		setIcon(iconEl, info.icon);
+		this.renderRowIcon(iconEl, node, info.icon);
 		row.createSpan({ cls: "atlas-row-text", text: info.text });
 		if (info.promoted) row.createSpan({ cls: "atlas-badge", text: "promoted" });
 		if (info.secondary) row.createSpan({ cls: "atlas-row-secondary", text: info.secondary });
@@ -733,7 +756,7 @@ export class AtlasExplorerView extends ItemView {
 		row.addEventListener("keydown", (evt) => this.handleRowKeydown(evt, node, view));
 		row.addEventListener("contextmenu", (evt) => {
 			evt.preventDefault();
-			this.showUnitMenu(evt, ref, view, node.id);
+			this.showUnitMenu(evt, ref, view, node);
 		});
 
 		if (node.children.length > 0) await this.renderFoldableChildren(node, chevron, container, view, depth);
@@ -1036,7 +1059,7 @@ export class AtlasExplorerView extends ItemView {
 
 	// --- context menus -----------------------------------------------------------------------------
 
-	private showUnitMenu(evt: MouseEvent, ref: UnitRef, view: View, nodeId: string): void {
+	private showUnitMenu(evt: MouseEvent, ref: UnitRef, view: View, node: ViewNode): void {
 		const menu = new Menu();
 		menu.addItem((item) => item.setTitle("Open").setIcon("file").onClick(() => void this.openRef(ref)));
 		menu.addItem((item) => item.setTitle("Open in new tab").setIcon("file-plus").onClick(() => void this.openRef(ref, true)));
@@ -1044,6 +1067,8 @@ export class AtlasExplorerView extends ItemView {
 			menu.addItem((item) => item.setTitle("Reveal in native explorer").setIcon("folder-open").onClick(() => this.revealInNativeExplorer(ref.path)));
 		}
 		menu.addItem((item) => item.setTitle("Copy link").setIcon("link").onClick(() => void this.copyLink(ref)));
+		menu.addSeparator();
+		menu.addItem((item) => item.setTitle("Statuses").setIcon("circle-dot").onClick(() => this.openStatusesModal(node, view)));
 		menu.addSeparator();
 		menu.addItem((item) =>
 			item
@@ -1053,6 +1078,18 @@ export class AtlasExplorerView extends ItemView {
 		);
 		menu.addItem((item) => item.setTitle("Place in view…").setIcon("arrow-right-left").onClick(() => this.placeInViewFlow(ref)));
 		menu.showAtMouseEvent(evt);
+	}
+
+	/** PR 15: the minimal "Statuses" modal — opened from a bucket unit or meta folder's own context
+	 * menu, applying live to that exact node via `setNodeStatus`. */
+	private openStatusesModal(node: ViewNode, view: View): void {
+		new StatusesModal(
+			this.plugin.app,
+			this.plugin.statusesManager.getStatusSets(),
+			!!node.statusEnabled,
+			node.statusSetId ?? null,
+			(enabled, statusSetId) => this.plugin.viewsManager.setNodeStatus(view.id, node.id, enabled, statusSetId)
+		).open();
 	}
 
 	private showInboxUnitMenu(evt: MouseEvent, ref: UnitRef): void {
@@ -1094,6 +1131,7 @@ export class AtlasExplorerView extends ItemView {
 					}).open();
 				})
 		);
+		menu.addItem((item) => item.setTitle("Statuses").setIcon("circle-dot").onClick(() => this.openStatusesModal(node, view)));
 		menu.addItem((item) =>
 			item
 				.setTitle("Delete folder")

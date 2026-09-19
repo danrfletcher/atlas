@@ -269,6 +269,25 @@ export class ViewsManager {
 		this.save();
 	}
 
+	/** PR 15: this node's own minimal status assignment (master toggle + which set) — not applied
+	 * to any other node. `statusSetId: null` clears the assignment's set without necessarily
+	 * disabling it (the "Statuses" modal keeps the toggle's state independent of whether a set has
+	 * been chosen yet, matching PR 16's later "greyed out until master toggle on" framing). */
+	setNodeStatus(viewId: string, nodeId: string, enabled: boolean, statusSetId: string | null): void {
+		const view = this.getView(viewId);
+		const found = view && this.findNode(view.root, nodeId);
+		if (!found) return;
+		found.node.statusEnabled = enabled;
+		found.node.statusSetId = statusSetId ?? undefined;
+		this.save();
+	}
+
+	getNode(viewId: string, nodeId: string): ViewNode | null {
+		const view = this.getView(viewId);
+		const found = view && this.findNode(view.root, nodeId);
+		return found ? found.node : null;
+	}
+
 	/** PR 12: also collapses unit nodes that have gained meta-nested children — meta folders always
 	 * collapse here regardless of child count (existing behavior, a folder is always a foldable
 	 * concept even empty), but a unit only ever shows a chevron once it actually has a child (Q5),

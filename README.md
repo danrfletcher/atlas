@@ -80,11 +80,12 @@ The settings panel has two tabs: **Basic** and **Status**.
 
 ### Status
 
-Foundation for status sets — defining sets here is currently the whole feature; assigning a set to an item happens from its right-click menu in a later release.
-
 - **Status sets** — create any number of named sets, each holding an ordered list of statuses (label, color, optionally flagged "Completed" and/or "Cancelled"). Each status row's "more actions" menu handles making it the set's default, marking it completed/cancelled, reordering, and removing it.
 - **Color palette** — a shared set of swatches offered by every status color picker, in addition to a fully custom color.
-- **Glow** — a design toggle for a soft glow around status dots once status rendering ships.
+- **Glow** — a soft glow around status dots.
+- **Retain icons** — when a status is assigned, keeps the item's normal type icon visible, shrunk down inside the status dot, instead of replacing it outright.
+
+A bucket item (unit or meta folder) gets a status via its right-click menu → **Statuses**: a master on/off toggle plus which status set governs it. When on, its normal icon is replaced by a colored dot for that set's default status. This is a minimal, per-item assignment for now — no inheritance to children, hiding, or truncation yet (a later release). Inbox items (not yet placed in any view) can't have a status assigned until they're placed in a bucket.
 
 ## Commands
 
@@ -98,7 +99,7 @@ Foundation for status sets — defining sets here is currently the whole feature
 | `Atlas: New view` | Prompts for a name and creates a new, empty view. |
 | `Atlas: Rebuild index` | Forces a full re-scan of every unit in the vault; logs timings to the console. |
 
-Every row in the explorer also has a right-click menu (Open, Open in new tab, Reveal in native explorer, Copy link, Remove from view, Place in view…), and folders can be renamed or deleted from the same menu.
+Every row in the explorer also has a right-click menu (Open, Open in new tab, Reveal in native explorer, Copy link, Remove from view, Place in view…), and folders can be renamed or deleted from the same menu. Bucket rows (units and meta folders) also get a **Statuses** option — see the Status settings section above.
 
 ## Documentation
 

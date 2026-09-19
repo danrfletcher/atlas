@@ -53,6 +53,13 @@ export interface ViewNode {
 	ref?: UnitRef; // unit only
 	children: ViewNode[]; // meta nodes only; unit nodes always []
 	collapsed?: boolean;
+	/** PR 15: minimal status assignment — this exact node's own status, not inherited from or
+	 * cascaded to any other node (that's a PR 16+ concept). Lives on the node itself (not keyed by
+	 * `ref`) so it moves and duplicates with this specific placement, matching how `collapsed`
+	 * already works — two duplicate placements of the same unit are independent per PR 13, and a
+	 * status assignment should be too. */
+	statusEnabled?: boolean;
+	statusSetId?: string;
 }
 
 export interface View {
