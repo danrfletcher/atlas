@@ -2,6 +2,14 @@
 
 Judgement calls made during the build, the alternative considered, and why. Newest first.
 
+## PR 13: allowing duplicate refs exposed two more places that assumed one-node-per-unit-per-view
+
+**Decision:** the grilled spec explicitly asked for a technical check — grep the codebase for anywhere that assumes a unit has at most one `ViewNode` per view, now that duplication makes that false. Two real spots turned up, both fixed here rather than filed separately, since they're a direct consequence of this PR's own feature.
+
+**`unplaceUnit` found the first matching ref and stopped.** Fine when at most one instance could ever exist; wrong once two can — right-clicking a *specific* duplicate's "Remove from view" could silently act on a *different* instance (whichever the tree-walk found first), not the row the user was actually looking at. Split into two functions with distinct, honest semantics instead of trying to make one function serve both: `unplaceNode(viewId, nodeId)` removes one exact instance by id — what "Remove from view," the Delete key, the missing-ghost "×" button, and drag-to-inbox-unplace all actually mean (four call sites switched to it). `unplaceUnit(viewId, ref)` keeps its old name but now removes *every* matching instance in a loop, since its one remaining caller (`handleAddToModule`'s demotion cleanup, when a moved file stops being a recognized unit) genuinely wants "purge this ref everywhere it appears," not "remove one specific row" — leaving it ref-based-but-single-match would have left stale duplicate placements behind after a demotion.
+
+**`getPlacements`/`pathToRef` also stopped at the first match per view.** The "placed in…" row tooltip would have silently under-reported a unit duplicated to two spots within the *same* view, showing only one of the two placements. Renamed to `allPathsToRef`, collects every match in the subtree via unconditional recursion instead of returning as soon as one is found.
+
 ## PR 12: two pre-existing bugs found while unifying the data model, fixed as part of this PR rather than filed separately
 
 **Decision:** while implementing meta-nesting-via-drop, reading `handleDrop`'s reparent logic closely (necessary anyway, since it's the exact function this PR needed to generalize) surfaced two real bugs that predate this PR entirely. Fixed both here rather than opening them as separate follow-ups, since PR 12 is what makes them newly reachable/consequential and the fix sits directly alongside the code this PR was already rewriting.

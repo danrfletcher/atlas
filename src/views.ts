@@ -141,12 +141,16 @@ export class ViewsManager {
 		return this.views.some((v) => this.findUnitNode(v.root, ref) !== null);
 	}
 
-	/** Every view this ref is currently placed in, as breadcrumb-able (view name, meta-folder path) pairs. */
+	/** Every placement of this ref across every view, as breadcrumb-able (view name, meta-folder
+	 * path) pairs. PR 13: one entry per *placement*, not per view — duplicating a unit can now put
+	 * it in more than one spot within the very same view, and the old first-match-only walk would
+	 * have silently under-reported that (only ever showing one of the two, or more, placements). */
 	getPlacements(ref: UnitRef): { viewName: string; path: string[] }[] {
 		const placements: { viewName: string; path: string[] }[] = [];
 		for (const view of this.views) {
-			const path = this.pathToRef(view.root, ref, []);
-			if (path) placements.push({ viewName: view.name, path });
+			for (const path of this.allPathsToRef(view.root, ref, [])) {
+				placements.push({ viewName: view.name, path });
+			}
 		}
 		return placements;
 	}
@@ -155,20 +159,22 @@ export class ViewsManager {
 	 * its own basename as the breadcrumb segment rather than the fully-resolved display text
 	 * `resolveRef` would give (that needs async work this synchronous path-builder has no access
 	 * to; a raw basename is a reasonable stand-in for a tooltip trail). Without this, a unit placed
-	 * under another unit would silently report as "not placed anywhere" here, even though it is. */
-	private pathToRef(nodes: ViewNode[], ref: UnitRef, trail: string[]): string[] | null {
+	 * under another unit would silently report as "not placed anywhere" here, even though it is.
+	 * PR 13: collects *every* match in the subtree instead of stopping at the first — a duplicated
+	 * unit can now legitimately appear more than once in the same view, including nested inside a
+	 * different placement of itself. */
+	private allPathsToRef(nodes: ViewNode[], ref: UnitRef, trail: string[]): string[][] {
+		const out: string[][] = [];
 		for (const node of nodes) {
-			if (node.type === "unit" && node.ref && unitRefsEqual(node.ref, ref)) return trail;
+			if (node.type === "unit" && node.ref && unitRefsEqual(node.ref, ref)) out.push(trail);
 			if (node.type === "meta") {
-				const found = this.pathToRef(node.children, ref, [...trail, node.label ?? ""]);
-				if (found) return found;
+				out.push(...this.allPathsToRef(node.children, ref, [...trail, node.label ?? ""]));
 			} else if (node.type === "unit" && node.ref && node.children.length > 0) {
 				const basename = node.ref.path.split("/").pop() ?? node.ref.path;
-				const found = this.pathToRef(node.children, ref, [...trail, basename]);
-				if (found) return found;
+				out.push(...this.allPathsToRef(node.children, ref, [...trail, basename]));
 			}
 		}
-		return null;
+		return out;
 	}
 
 	/** Places `ref` under `parentId` (or bucket root if null). Moves it if already placed elsewhere
@@ -184,14 +190,35 @@ export class ViewsManager {
 		this.save();
 	}
 
-	/** PR 12: a unit can now have meta-nested children of its own (any node can be a parent).
-	 * Removing it from the view promotes its children up one level at the position it occupied,
-	 * the same rule `deleteMetaFolder` already applies — nothing organizational should silently
-	 * vanish just because its parent was unplaced. */
+	/** Removes *every* placement of `ref` in this view — used when the ref itself has stopped being
+	 * a valid unit (demoted/deleted) and needs purging wherever it appears, not just one instance.
+	 * PR 13: a duplicated unit can now legitimately have more than one placement in the same view,
+	 * so this loops until none are left rather than stopping after the first match (which used to
+	 * leave stale duplicates behind). For removing one specific row the user is actually looking at,
+	 * use `unplaceNode` instead — this one doesn't know or care which instance you meant. PR 12: each
+	 * removal promotes that instance's own children up one level, the same rule `deleteMetaFolder`
+	 * already applies for meta folders — nothing organizational should silently vanish. */
 	unplaceUnit(viewId: string, ref: UnitRef): void {
 		const view = this.getView(viewId);
 		if (!view) return;
-		const found = this.findUnitNode(view.root, ref);
+		let changed = false;
+		let found = this.findUnitNode(view.root, ref);
+		while (found) {
+			found.siblings.splice(found.index, 1, ...found.node.children);
+			changed = true;
+			found = this.findUnitNode(view.root, ref);
+		}
+		if (changed) this.save();
+	}
+
+	/** Removes one specific node instance by id, regardless of what other placements of the same
+	 * unit (if any, via PR 13's duplication) might also exist — this is what "Remove from view",
+	 * the Delete key, and dragging a row back to the inbox all actually mean: get rid of *this* row,
+	 * not every copy of the unit it happens to reference. Same children-promotion rule as
+	 * `unplaceUnit`/`deleteMetaFolder`. */
+	unplaceNode(viewId: string, nodeId: string): void {
+		const view = this.getView(viewId);
+		const found = view && this.findNode(view.root, nodeId);
 		if (!found) return;
 		found.siblings.splice(found.index, 1, ...found.node.children);
 		this.save();
@@ -225,6 +252,26 @@ export class ViewsManager {
 		if (!found || found.node.type !== "meta") return;
 		found.siblings.splice(found.index, 1, ...found.node.children);
 		this.save();
+	}
+
+	/** PR 13: deep-clones a node (unit or meta) — including its whole meta-nested subtree, if it
+	 * has one — as a new sibling immediately after the original. New node ids throughout, but every
+	 * clone still points at the same underlying unit (`ref`) or carries the same `label` as its
+	 * original counterpart, and never touches disk. Grilled with Dan directly: no naming/numbering
+	 * scheme — there's no non-fake way to give two siblings that reference the same disk path
+	 * different display names, so duplicate labels are allowed outright rather than inventing a
+	 * "meta name" override field just for this. */
+	duplicateNode(viewId: string, nodeId: string): void {
+		const view = this.getView(viewId);
+		const found = view && this.findNode(view.root, nodeId);
+		if (!found) return;
+		const clone = this.cloneNode(found.node);
+		found.siblings.splice(found.index + 1, 0, clone);
+		this.save();
+	}
+
+	private cloneNode(node: ViewNode): ViewNode {
+		return { ...node, id: generateNodeId(), children: node.children.map((child) => this.cloneNode(child)) };
 	}
 
 	private isSameOrDescendant(node: ViewNode, targetId: string): boolean {
