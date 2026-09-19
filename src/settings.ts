@@ -1,7 +1,7 @@
 import { App, Menu, PluginSettingTab, Setting } from "obsidian";
 import type AtlasPlugin from "./main";
 import { normalizeHexColor } from "./statuses";
-import { openColorPickerPopup } from "./status-popup";
+import { closeActivePopup, openColorPickerPopup } from "./status-popup";
 
 export interface AtlasSettings {
 	poolFolder: string;
@@ -249,7 +249,20 @@ export class AtlasSettingTab extends PluginSettingTab {
 							swatch.setCssStyles({ backgroundColor: hex });
 						},
 						onSaveToPalette: (hex) => {
+							// Reviewer-caught (A22): matching the existing dedicated "Add color to
+							// palette" button's own behavior a few sections down, which already calls
+							// this.display() after the same addPaletteColor call — without it, the
+							// separate always-visible Color Palette section below wouldn't show the
+							// new swatch until something unrelated triggered a re-render. Closing the
+							// popup first (rather than leaving it open, matching the reference
+							// plugin's own behavior) avoids a worse problem `display()` would
+							// otherwise introduce here: it rebuilds this exact row's swatch element,
+							// so a still-open popup's `onPick` would go on updating a now-detached
+							// node instead of the fresh one — full re-render and an anchored popup
+							// staying open don't mix safely in this settings panel's architecture.
+							closeActivePopup();
 							statusesManager.addPaletteColor(hex);
+							this.display();
 						},
 					});
 				});

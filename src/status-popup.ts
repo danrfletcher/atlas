@@ -30,6 +30,14 @@ interface ChoicePopupOptions {
  * shuts down, not two. */
 let activePopupClose: (() => void) | null = null;
 
+/** PR 14 fix follow-up: for a caller that's about to tear down and rebuild the DOM around an open
+ * popup's own anchor (e.g. a settings tab's `display()`, which fully re-renders the panel) — closes
+ * it first rather than leaving it open with closures pointing at elements that re-render is about
+ * to detach. Safe to call with nothing open. */
+export function closeActivePopup(): void {
+	activePopupClose?.();
+}
+
 export function openChoicePopup(opts: ChoicePopupOptions): void {
 	activePopupClose?.();
 
