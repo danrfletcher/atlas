@@ -48,6 +48,7 @@ Every folder is a unit — a **module** whose **interface** is a note saying wha
 - A view's **inbox** is every unit not placed in that view. The **global inbox** is every unit placed in no view at all.
 - Placing or removing a unit in the bucket never touches disk.
 - Any block, file, or module can become the organizational parent of any other bucket item too, the same way a folder can — drag one onto another's row (anywhere except a module's icon, which stays reserved for the on-disk move above) to nest it underneath. Nothing on disk moves; a unit just gains a chevron and can be folded/unfolded like a folder can.
+- **Multi-select**: shift-click for a range, cmd/ctrl-click to toggle one row in or out — in either the bucket or the inbox (selecting in one clears the other). Dragging any selected row moves the whole selection together; dragging a row that isn't selected drags just that row instead. Escape clears the selection; Delete removes every selected unit from the view at once. The one exception: dropping onto a module's **icon** (the real disk-move gesture above) only ever acts on a single item — a multi-item drag there is a no-op, not a bulk file move.
 
 ## Installing (development)
 
