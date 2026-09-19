@@ -356,9 +356,25 @@ Second slice — intentionally reordered ahead of the full assignment modal (gri
 **Fifth issue found by Dan, discovered while grilling the next PR — fixed as a PR 15 addendum rather than folded into the new PR, to keep scopes clean:**
 - [x] **A module (folder-kind unit) never actually showed its status dot at all.** `wireModuleRow` (wires up the module-icon's own drag-hold-to-open-contents and drag-drop-to-file mechanics) unconditionally called `iconEl.empty()` and repopulated it with the closed/open folder-icon crossfade — silently overwriting whatever `renderRowIcon` had just rendered, dot included, every single time. Fixed: `wireModuleRow` now checks whether `iconEl` already carries the `atlas-status-dot` class before touching its contents, and only replaces them with the folder-icon pair when there's no dot to preserve — the tooltip/click/drag wiring underneath is unchanged either way, since none of it depends on the icon's current visual content, only its identity as an element. Also widened the drop-target ring CSS (`.atlas-drop-target`) from `.atlas-module-icon`-only to the shared `.atlas-icon` ancestor, so a governed module's dot still gets the same drag-over ring a normal module icon would. Verified live: placed a real folder-unit ("Bets") as a child of a governing item — it now shows its dot; clicking the dot still opens the Module Contents modal exactly as before (unchanged, since click-to-change-status is the *next* PR's scope, not this fix's); the module's own `aria-label` tooltip ("View module contents") is still present.
 
-## PR 16 — Full "Statuses" modal + root-level assignment
+## PR 16 — Click a status dot to change that item's own status
 
-Third slice — the remaining fields from the reference plugin's per-folder config, now applied per-item via the right-click modal from PR 15, plus root-level (whole-view) assignment.
+New slice, grilled and inserted after PR 15 shipped (not part of the original nine-PR batch — a gap found only once PR 15's rendering made it obvious the reference plugin has a whole per-item status-changing interaction that was never itemized anywhere in this plan). Bumps every PR from here on by one (old PR 16 → 17, old 17 → 18, old 18 → 19).
+
+Full grilling record (verbatim decisions, not paraphrased — see `docs/decisions.md` for the reasoning behind each):
+
+- [ ] **Trigger: a plain left-click directly on the status dot itself** (not the row, not right-click) opens a small status-picker popup — a *new*, separate click target from the row's existing plain click (open file) and existing right-click (full context menu), which are both unaffected everywhere the dot isn't. Chosen over adding this as a right-click menu item, since a direct click-the-dot interaction is what the reference plugin itself does and Dan wants it "borrowed wholesale."
+- [ ] The popup lists every status in the item's *governing* set (the parent's assigned set — this feature changes which status among that set is showing, never which set governs), each with its own color swatch, borrowed visually from the reference plugin's own popup — not a plain-text Obsidian `Menu`, which can't render custom-colored swatches per item.
+- [ ] Picking a status sets a new **explicit per-item override** — the item now shows that specific status regardless of the governing set's own default — until changed again or the governing assignment itself changes underneath it.
+- [ ] The popup also offers a way to **clear the override** and revert to showing the governing set's default status.
+- [ ] Only rows that currently *show* a resolved status get this behavior — a row with no status has no dot, and thus no click target for this. Nothing to build here for ungoverned rows.
+- [ ] **Module rows (folders) specifically:** a module's icon already has an existing plain-click behavior (opens the Module Contents modal) that would otherwise collide with the new click-the-dot behavior on a *governed* module. Resolution: click-the-dot changes status uniformly, same as any other row type, on modules too — **"View module contents" moves to the row's right-click menu** (a new menu item, added unconditionally for folder refs, not just governed ones, so the path stays consistent whether or not a module currently has a status) so it stays reachable once its plain click means something else. The drag-and-hold-to-open dwell mechanic (PR 9/12) is unaffected either way — it never went through a click at all.
+- [ ] Technical-check AC (per this batch's own established practice): confirm live that the module-icon's existing drag mechanics — drag-and-hold opens Module Contents, drag-and-drop triggers the add-to-module confirm dialog — are genuinely unaffected by the new click listener on the dot, on an actual governed module, not just reasoned about statically.
+- [ ] Edge case: the explicit override references a status that no longer exists in the governing set (status removed, or the governing set itself switched to a different one) — falls back to showing the set's own default, same graceful-degradation the rest of this feature already uses elsewhere; the stale override id itself isn't actively cleared (non-destructive, matches the pattern used for a stale `defaultStatusId` elsewhere in this codebase).
+- [ ] Data model: new optional `ViewNode.explicitStatusId?: string` (same shape/precedent as `statusEnabled`/`statusSetId` from PR 15 — per-node, so it moves and duplicates with a specific node instance, not globally ref-keyed).
+
+## PR 17 — Full "Statuses" modal + root-level assignment
+
+Slice — the remaining fields from the reference plugin's per-folder config, now applied per-item via the right-click modal from PR 15, plus root-level (whole-view) assignment.
 
 - [ ] All settings in the "Statuses" modal are greyed out until the master toggle (from PR 15) is turned on
 - [ ] **Inherit to subfolders** toggle — defaults to **off** (the reference plugin defaults this to on; Dan explicitly wants the opposite default for Atlas) — determines whether the assigned status set applies only to direct children or all the way down the tree
@@ -369,20 +385,20 @@ Third slice — the remaining fields from the reference plugin's per-folder conf
 - [ ] Right-click on the **view-name** selector (e.g. "Default") surfaces the same "Statuses" option, applying to the root level of that view
 - [ ] Edge case: turning the master toggle off doesn't discard the rest of the modal's configured values, just deactivates them (so turning it back on restores the prior setup)
 
-## PR 17 — Inheritance + move semantics
+## PR 18 — Inheritance + move semantics
 
-Fourth slice — how statuses behave as the bucket tree is reorganized (drag/drop, meta-nesting from PR 12, duplication from PR 13).
+Slice — how statuses behave as the bucket tree is reorganized (drag/drop, meta-nesting from PR 12, duplication from PR 13).
 
 - [ ] Moving an item that has its own status assigned: the status **moves with it**, unaffected by the move, regardless of where it lands
 - [ ] Moving an item that only has a status because it **inherits** one from a parent: if the new parent also has statuses turned on (with inheritance covering this item), it keeps working under the new parent; if the new parent does **not** have statuses turned on, the item **loses its status display** (it was never its own assignment, just inherited)
 - [ ] Edge case: an item duplicated via PR 13 — does the duplicate inherit/keep the same status as the original at time of duplication? (Not yet grilled — resolve during this PR's build, default assumption: yes, since it's a full clone including whatever it would inherit at its new position, same as any other item landing under an inheriting parent)
 - [ ] Edge case: meta-nesting (PR 12) a plain item under a status-inheriting parent — it should pick up the inherited status the same way a physically-nested item would
 
-## PR 18 — Truncated-status collapsing + hide filtering in the live tree
+## PR 19 — Truncated-status collapsing + hide filtering in the live tree
 
-Fifth slice — wiring PR 16's truncate/hide-completed/hide-cancelled settings into the actual live bucket/inbox rendering (PR 16 only captured the settings; this PR makes them do something).
+Slice — wiring PR 17's truncate/hide-completed/hide-cancelled settings into the actual live bucket/inbox rendering (PR 17 only captured the settings; this PR makes them do something).
 
-- [ ] Items whose status is truncated (per PR 16's per-status toggle) collapse down to a single placeholder row in the live tree instead of listing each individually
+- [ ] Items whose status is truncated (per PR 17's per-status toggle) collapse down to a single placeholder row in the live tree instead of listing each individually
 - [ ] Items whose status has `isCompleted` set are hidden from the tree when the containing item's "Hide completed" toggle is on
 - [ ] Items whose status has `isCancelled` set are hidden from the tree when the containing item's "Hide cancelled" toggle is on
 - [ ] Edge case: an item that's both truncated *and* would be hidden by hide-completed/cancelled — hide wins, it doesn't show up even as part of a truncated placeholder count
