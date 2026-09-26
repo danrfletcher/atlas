@@ -63,6 +63,24 @@ export function collectRootEntries(vault: Pick<Vault, "getRoot">): RootEntry[] {
 	return entries;
 }
 
+/** The one clash rule: the vault root already has a note `X.md` or a folder `X`, compared
+ * case-insensitively on the full target path (`Reading list.png` or `Projects/Reading list.md` don't
+ * count). `ignoreRootPaths` are root note paths that don't count (Create Module keeps its own name). */
+export function isNameTakenAtRoot(name: string, root: RootEntry[], ignoreRootPaths: string[] = []): boolean {
+	const lower = fold(name);
+	const noteName = `${lower}.md`;
+	const ignored = new Set(ignoreRootPaths.map(fold));
+	return root.some((entry) => {
+		const entryName = fold(entry.name);
+		if (entry.kind === "folder") return entryName === lower;
+		return entryName === noteName && !ignored.has(entryName);
+	});
+}
+
+export function clashMessage(name: string): string {
+	return `A note or folder called '${name}' already exists at the vault root`;
+}
+
 /** The name rules, in check order (first failure wins, one message at a time). Pure: never edits
  * `name`, never trims it. */
 export function validateName(name: string, options: NameRuleOptions = {}): NameValidation {
@@ -90,14 +108,7 @@ export function validateName(name: string, options: NameRuleOptions = {}): NameV
 		return fail("reserved", `'${name}' is a reserved name`);
 	}
 
-	const noteName = `${lower}.md`;
-	const ignored = new Set((options.ignoreRootPaths ?? []).map(fold));
-	const clash = (options.root ?? []).some((entry) => {
-		const entryName = fold(entry.name);
-		if (entry.kind === "folder") return entryName === lower;
-		return entryName === noteName && !ignored.has(entryName);
-	});
-	if (clash) return fail("clash", `A note or folder called '${name}' already exists at the vault root`);
+	if (isNameTakenAtRoot(name, options.root ?? [], options.ignoreRootPaths)) return fail("clash", clashMessage(name));
 
 	return { valid: true };
 }
