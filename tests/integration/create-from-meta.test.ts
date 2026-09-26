@@ -10,11 +10,6 @@ import { CARRIED, clone, file, folder, meta, setup, subtreeIds, tEmpty, tGov, tM
 const KINDS: CreateKind[] = ["block", "file", "module"];
 const POOL_ID = /^_pool\/\d{14}-[0-9a-z]{4}\.md$/;
 const notices = () => Notice.instances.map((n) => n.message);
-const findIn = (nodes: ViewNode[], id: string): ViewNode | undefined => {
-	let found: ViewNode | undefined;
-	walk(nodes, (n) => n.id === id && (found = n));
-	return found;
-};
 
 beforeEach(() => Notice.reset());
 
