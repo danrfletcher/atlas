@@ -3,7 +3,8 @@ import { App, Notice } from "obsidian";
 import { DEFAULT_SETTINGS } from "../../src/settings";
 import { UnitIndex } from "../../src/unit-index";
 import { ViewsManager } from "../../src/views";
-import { UnitRef, View, ViewNode } from "../../src/types";
+import { StatusGovernance, UnitRef, View, ViewNode } from "../../src/types";
+import { StatusesManager } from "../../src/statuses";
 import { noticeIfLinksNotUpdated } from "../../src/links-notice";
 
 const file = (path: string): UnitRef => ({ kind: "file", path });
@@ -260,5 +261,57 @@ describe("convertFileNodesToModule", () => {
 		expect(result).toEqual({ nodes: 3, manualPromotions: 1 });
 		expect(Notice.instances).toHaveLength(1);
 		expect(node(s, "n1").ref).toEqual({ kind: "folder", path: "Foo" });
+		expect(s.index.getManualPromotions()).toEqual([
+			{ kind: "folder", path: "Foo" },
+			file("Projects/Deep.md"),
+			{ kind: "block", path: "Foo.md", subpath: "^abc" },
+		]);
+	});
+
+	it("IT-N1 replaceMetaNodeWithUnit also still works with the links setting off", () => {
+		const s = setup();
+		s.app.vault.config.alwaysUpdateLinks = false;
+		expect(s.views.replaceMetaNodeWithUnit("v1", "m1", { kind: "folder", path: "Field tech" })).toBe(true);
+		noticeIfLinksNotUpdated(s.app);
+		expect(node(s, "m1").type).toBe("unit");
+		expect(node(s, "m1").ref).toEqual({ kind: "folder", path: "Field tech" });
+		expect(Notice.instances).toHaveLength(1);
+	});
+
+	it("only the new folder ref is deduped; unrelated duplicate promotions stay untouched", () => {
+		const dup = file("Projects/Deep.md");
+		const s = setup([dup, { ...dup }, file("Foo.md"), file("Foo.md"), { kind: "folder", path: "Foo" }]);
+		s.views.convertFileNodesToModule("Foo.md", "Foo", s.index);
+		expect(s.index.getManualPromotions()).toEqual([dup, dup, { kind: "folder", path: "Foo" }]);
+	});
+
+	it("IT-S6 a file node with an explicit status converts to a module, keeping it and switching resolver", () => {
+		const statuses = new StatusesManager(
+			[
+				{
+					id: "set1",
+					name: "Set",
+					defaultStatusId: "s-idea",
+					statuses: [
+						{ id: "s-idea", label: "Idea", color: "#888888" },
+						{ id: "s-done", label: "Done", color: "#00cc00" },
+					],
+				} as never,
+			],
+			[],
+			() => {}
+		);
+		const run = (applyTo: StatusGovernance["applyTo"]) => {
+			const s = setup();
+			const root: StatusGovernance = { statusEnabled: true, statusSetId: "set1", inheritToSubfolders: true, applyTo };
+			node(s, "n1").explicitStatusId = "s-done";
+			const before = statuses.resolveNodeStatus([root], node(s, "n1"))?.label ?? null;
+			s.views.convertFileNodesToModule("Foo.md", "Foo", s.index);
+			expect(node(s, "n1").ref).toEqual({ kind: "folder", path: "Foo" });
+			expect(node(s, "n1").explicitStatusId).toBe("s-done");
+			return { before, after: statuses.resolveNodeStatus([root], node(s, "n1"))?.label ?? null };
+		};
+		expect(run({ file: true, module: false })).toEqual({ before: "Done", after: null });
+		expect(run({ file: false, module: true })).toEqual({ before: null, after: "Done" });
 	});
 });

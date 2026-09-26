@@ -60,7 +60,8 @@ export class UnitIndex {
 
 	/** Create Module on a root file: a manual promotion of the file becomes one of the new module
 	 * (folder) instead. Also catches the interface-note path `<folder>/<folder>.md`, in case the
-	 * rename hook ran first; a duplicate result is dropped. Returns how many promotions changed;
+	 * rename hook ran first; a result equal to the new folder ref is dropped if already present
+	 * (other entries are never deduped). Returns how many promotions changed;
 	 * the caller persists (data-only, never touches disk). */
 	convertManualPromotionToModule(filePath: string, folderPath: string): number {
 		const folderRef: UnitRef = { kind: "folder", path: folderPath };
@@ -71,7 +72,8 @@ export class UnitIndex {
 			const matches = ref.kind === "file" && (ref.path === filePath || ref.path === interfacePath);
 			const candidate = matches ? folderRef : ref;
 			if (matches) changed++;
-			if (!next.some((existing) => unitRefsEqual(existing, candidate))) next.push(candidate);
+			if (unitRefsEqual(candidate, folderRef) && next.some((existing) => unitRefsEqual(existing, folderRef))) continue;
+			next.push(candidate);
 		}
 		if (changed === 0) return 0;
 		this.manualPromotions = next;
