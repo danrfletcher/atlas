@@ -4,13 +4,13 @@ const BASE36 = "0123456789abcdefghijklmnopqrstuvwxyz";
 
 /** `YYYYMMDDHHmmss-xxxx` — xxxx is 4 random base36 chars, so two blocks created in the same
  * second still get different IDs. The user never sees or types this; it's a filename only. */
-export function generateBlockId(now: Date): string {
+export function generateBlockId(now: Date, random: () => number = Math.random): string {
 	const pad = (n: number, len = 2) => String(n).padStart(len, "0");
 	const timestamp = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}${pad(now.getHours())}${pad(
 		now.getMinutes()
 	)}${pad(now.getSeconds())}`;
 	let suffix = "";
-	for (let i = 0; i < 4; i++) suffix += BASE36[Math.floor(Math.random() * BASE36.length)];
+	for (let i = 0; i < 4; i++) suffix += BASE36[Math.floor(random() * BASE36.length)];
 	return `${timestamp}-${suffix}`;
 }
 

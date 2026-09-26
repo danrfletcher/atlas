@@ -45,12 +45,12 @@ describe("fence regression", () => {
 		expect(read("src/settings.ts").match(/new Setting\(/g)).toHaveLength(17);
 		for (const f of NEW_FILES) expect(read(f), f).not.toMatch(/addCommand\(|addItem\(|new Setting\(|addSettingTab|registerEditorSuggest/);
 		const wired = [...readdirSync(join(root, "src"))].filter((f) => f.endsWith(".ts")).filter((f) => /openNameDialog/.test(read(`src/${f}`)));
-		expect(wired.sort()).toEqual(["create-module.ts", "main.ts", "name-dialog.ts", "test-harness.ts"]); // main.ts: graduation's clash dialog (PR-2); create-module.ts: PR-3
+		expect(wired.sort()).toEqual(["create-from-meta.ts", "create-module.ts", "main.ts", "name-dialog.ts", "test-harness.ts"]); // main.ts: graduation's clash dialog (PR-2); create-module.ts: PR-3; create-from-meta.ts: PR-4
 	});
 
 	it("RG-6 UI strings in the new files never say 'promote'", () => {
 		const uiCall = /(setText|createEl|createDiv|createSpan|Notice|setTitle|setButtonText|setPlaceholder)\(/;
-		for (const f of [...NEW_FILES, "src/create-module.ts"]) {
+		for (const f of [...NEW_FILES, "src/create-module.ts", "src/create-from-meta.ts"]) {
 			for (const line of read(f).split("\n")) {
 				if (uiCall.test(line)) expect(line, `${f}: ${line}`).not.toMatch(/promot/i);
 			}
