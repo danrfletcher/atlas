@@ -230,8 +230,10 @@ const groups = {
 	},
 	async "it9-after"() {
 		const data = JSON.parse(readFileSync(join(VAULT, ".obsidian/plugins/atlas/data.json"), "utf8"));
-		const refs = JSON.stringify(data.views);
-		check("EC-17 data.json holds the folder ref", refs.includes(`"kind":"folder","path":"${Q}"`) || refs.includes(`"kind": "folder",\n`) || refs.includes(Q));
+		const walk = (nodes) => nodes.flatMap((n) => [...(n.ref ? [n.ref] : []), ...walk(n.children ?? [])]);
+		const refList = data.views.flatMap((v) => walk(v.root));
+		const isRef = (r, kind, path) => r.kind === kind && r.path === path && Object.keys(r).length === 2;
+		check("EC-17 data.json holds {kind:'folder'} for the module and no file ref to the moved note", refList.some((r) => isRef(r, "folder", Q)) && !refList.some((r) => isRef(r, "file", Q + ".md")), refList.filter((r) => r.path?.startsWith(Q)));
 		check("EC-17 module row present, no missing rows", await page_(`return !!__cm.rowByText(${JSON.stringify(Q)})?.querySelector(".atlas-module-icon") && document.querySelectorAll(".atlas-missing").length === 1;`), "(the fixture's own Gone.md row is the one allowed missing row)");
 	},
 
