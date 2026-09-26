@@ -43,6 +43,7 @@ interface Rig {
 	scheduler: FakeScheduler;
 	openDialog: ReturnType<typeof vi.fn>;
 	afterMove: ReturnType<typeof vi.fn>;
+	onHiddenMove: ReturnType<typeof vi.fn>;
 	renameFile: ReturnType<typeof vi.spyOn>;
 	pool: { value: string };
 	resolved(): Promise<void>;
@@ -59,6 +60,7 @@ function rig(seed: (app: App) => void = () => {}): Rig {
 	const pool = { value: "_pool" };
 	const openDialog = vi.fn<(o: unknown) => Promise<string | null>>();
 	const afterMove = vi.fn();
+	const onHiddenMove = vi.fn();
 	const ctrl = new GraduationController({
 		vault: app.vault,
 		fileManager: app.fileManager,
@@ -67,6 +69,7 @@ function rig(seed: (app: App) => void = () => {}): Rig {
 		getExcludedFolders: () => ["_pool"],
 		notify: (message, ms) => void new Notice(message, ms),
 		afterMove,
+		onHiddenMove,
 		openDialog: openDialog as never,
 	});
 	app.vault.on("rename", (file: never, oldPath: string) => ctrl.handleRename(file, oldPath));
@@ -80,6 +83,7 @@ function rig(seed: (app: App) => void = () => {}): Rig {
 		scheduler,
 		openDialog,
 		afterMove,
+		onHiddenMove,
 		renameFile,
 		pool,
 		async resolved() {
@@ -697,6 +701,91 @@ describe("UT-9 / AC-5..8 the clash dialog", () => {
 		expect(r.openDialog).toHaveBeenCalledTimes(1);
 		expect(r.renameFile.mock.calls.at(-1)?.[1]).toBe(ID);
 		expect(file(r, ID)).toBe(f);
+	});
+
+	describe("T1/T2 a leading-dot name (Obsidian drops the file from its index ~100 ms after the rename)", () => {
+		/** What Obsidian does: the rename event, then, ~100 ms on, a `delete` event with the file still on disk. */
+		async function renameToDot(r: Rig, f: TFile, name = ".ideas"): Promise<void> {
+			await r.userRename(f, `_pool/${name}.md`);
+			await r.scheduler.advance(100);
+			await r.app.vault.delete(f);
+		}
+
+		it("opens the dialog at once instead of waiting for the link rewrite, and Cancel restores the old name", async () => {
+			const r = rig();
+			const f = r.app.vault.seedFile("_pool/Untitled.md");
+			r.openDialog.mockResolvedValue(null);
+			await r.userRename(f, "_pool/.ideas.md");
+			await r.scheduler.advance(0);
+			expect(r.openDialog).toHaveBeenCalledTimes(1);
+			expect(r.openDialog.mock.calls[0][0]).toMatchObject({ initialValue: ".ideas" });
+			await r.scheduler.advance(100);
+			await r.app.vault.delete(f); // hidden from the index while the dialog is up (or already answered)
+			await flush();
+			expect(r.renameFile).toHaveBeenCalledTimes(1);
+			expect(r.renameFile.mock.calls[0][1]).toBe("_pool/Untitled.md");
+			expect(f.path).toBe("_pool/Untitled.md");
+			expect(r.onHiddenMove).toHaveBeenCalledWith("_pool/.ideas.md", "_pool/Untitled.md");
+			expect(r.toasts()).toEqual([]);
+			expect(r.ctrl.pendingCount()).toBe(0);
+			expect(r.scheduler.size).toBe(0);
+		});
+
+		it("the delete event does not drop the record while the dialog is open; Create moves it to the root", async () => {
+			const r = rig();
+			const f = r.app.vault.seedFile(ID);
+			let close!: (v: string | null) => void;
+			r.openDialog.mockReturnValue(new Promise((resolve) => (close = resolve)));
+			await renameToDot(r, f);
+			expect(r.openDialog).toHaveBeenCalledTimes(1);
+			expect(r.ctrl.pendingCount()).toBe(1);
+			close("Ideas");
+			await flush();
+			await flush();
+			expect(r.renameFile.mock.calls.at(-1)?.[1]).toBe("Ideas.md");
+			expect(f.path).toBe("Ideas.md");
+			expect(r.onHiddenMove).toHaveBeenCalledWith("_pool/.ideas.md", "Ideas.md");
+			expect(r.toasts()).toEqual(["Moved 'Ideas' out of the pool"]);
+			expect(r.afterMove).toHaveBeenCalledTimes(1);
+			expect(r.ctrl.pendingCount()).toBe(0);
+		});
+
+		it("Cancel after the delete event puts the file back to its first name", async () => {
+			const r = rig();
+			const f = r.app.vault.seedFile(ID);
+			let close!: (v: string | null) => void;
+			r.openDialog.mockReturnValue(new Promise((resolve) => (close = resolve)));
+			await renameToDot(r, f);
+			close(null);
+			await flush();
+			await flush();
+			expect(f.path).toBe(ID);
+			expect(r.onHiddenMove).toHaveBeenCalledWith("_pool/.ideas.md", ID);
+			expect(r.toasts()).toEqual([]);
+			expect(r.ctrl.pendingCount()).toBe(0);
+			expect(r.ctrl.getOwnReverts().size).toBe(0);
+		});
+
+		it("a plain (non-hidden) failing name still waits for the link rewrite and never reports a hidden move", async () => {
+			const r = rig();
+			const f = r.app.vault.seedFile(ID);
+			r.openDialog.mockResolvedValue(null);
+			await r.userRename(f, "_pool/Ideas..md");
+			await r.scheduler.advance(0);
+			expect(r.openDialog).not.toHaveBeenCalled();
+			await r.scheduler.advance(FALLBACK_MS);
+			expect(r.openDialog).toHaveBeenCalledTimes(1);
+			expect(r.onHiddenMove).not.toHaveBeenCalled();
+		});
+
+		it("a real delete of a non-hidden pending file still drops the record", async () => {
+			const r = rig();
+			const f = r.app.vault.seedFile(ID);
+			await r.userRename(f, "_pool/Ideas.md");
+			await r.app.vault.delete(f);
+			expect(r.ctrl.pendingCount()).toBe(0);
+			expect(r.scheduler.size).toBe(0);
+		});
 	});
 
 	it("the dialog result after unload does not move or revert anything", async () => {
