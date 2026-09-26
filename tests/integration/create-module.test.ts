@@ -57,6 +57,7 @@ function setup(links: boolean | undefined = true) {
 	}
 	app.vault.config.alwaysUpdateLinks = links;
 	const persist = vi.fn();
+	const saved: View[][] = [];
 	const views = new ViewsManager(app, fixtureViews(), "default", persist);
 	const index = new UnitIndex(app, { ...DEFAULT_SETTINGS, excludedFolders: ["_pool"] }, [file("Multi.md"), file("Alpha/Sub/Doc.md"), file("Alpha/Alpha.md")]);
 	index.rebuild();
@@ -71,10 +72,12 @@ function setup(links: boolean | undefined = true) {
 	const deps = {
 		app,
 		convert: (from: string, to: string) => void views.convertFileNodesToModule(from, to, index),
+		// What data.json would hold at the moment of the flush.
+		save: async () => void saved.push(JSON.parse(JSON.stringify(views.getViews())) as View[]),
 		afterMove: () => void noticeIfLinksNotUpdated(app),
 	};
 	const listing = () => [...app.vault.getFiles().map((f) => f.path), ...[...app.vault.getRoot().children].filter((c) => "children" in c).map((c) => c.path + "/")].sort();
-	return { app, views, index, deps, renames, persist, listing };
+	return { app, views, index, deps, renames, persist, saved, listing };
 }
 
 const refs = (views: View[]): UnitRef[] => {
@@ -106,6 +109,16 @@ describe("Create Module end to end (mock vault, real views and index)", () => {
 		expect(find(after, "q")).toEqual({ ...find(before, "q"), ref: folder("Quarry drone LiDAR") });
 		expect(s.listing()).toContain("Quarry drone LiDAR/Quarry drone LiDAR.md");
 		expect(s.listing()).not.toContain("Quarry drone LiDAR.md");
+	});
+
+	it("EC-17 the views are flushed once, after conversion, holding the folder ref and no stale file ref", async () => {
+		const s = setup();
+		const target = s.app.vault.getAbstractFileByPath("Quarry drone LiDAR.md") as TFile;
+		await createModule(s.deps, target, target.path, "Quarry drone LiDAR");
+		expect(s.saved).toHaveLength(1);
+		const flushed = refs(s.saved[0]);
+		expect(find(s.saved[0], "q").ref).toEqual(folder("Quarry drone LiDAR"));
+		expect(flushed).not.toContainEqual(file("Quarry drone LiDAR.md"));
 	});
 
 	it("AC-6/AC-7/AC-12/EC-16 converts all four nodes, the manual promotion, leaves the block a block, one move", async () => {

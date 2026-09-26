@@ -40,6 +40,9 @@ export interface CreateModuleDeps {
 	app: Pick<App, "vault" | "fileManager">;
 	/** Converts every view node, duplicate and manual promotion that referenced the file. Data only. */
 	convert(filePath: string, folderPath: string): void;
+	/** Writes data.json now. The views manager only schedules a debounced save, and the file is gone
+	 * from disk by then, so a reload inside the debounce window would leave a stale file ref behind. */
+	save(): Promise<void>;
 	/** Runs after the move went through: the "links weren't updated" notice when Obsidian's setting is off. */
 	afterMove(): void;
 }
@@ -93,6 +96,11 @@ export async function createModule(deps: CreateModuleDeps, file: TFile, original
 	}
 
 	deps.convert(originalPath, plan.folder);
+	try {
+		await deps.save();
+	} catch (error) {
+		new Notice(`Atlas: the module "${name}" was created, but saving the views failed: ${describe(error)}`, ERROR_NOTICE_MS);
+	}
 	deps.afterMove();
 	return { ok: true, folder: plan.folder, target: plan.target };
 }

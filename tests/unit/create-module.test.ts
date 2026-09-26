@@ -157,6 +157,7 @@ function deps(overrides: Partial<Parameters<typeof createModule>[0]> = {}) {
 	return {
 		app,
 		convert: vi.fn(),
+		save: vi.fn(async () => {}),
 		afterMove: vi.fn(),
 		...overrides,
 	};
@@ -167,6 +168,7 @@ describe("UT-5 order of operations", () => {
 		const order: string[] = [];
 		const d = deps({
 			convert: vi.fn(() => order.push("convert")),
+			save: vi.fn(async () => void order.push("save")),
 			afterMove: vi.fn(() => order.push("afterMove")),
 		});
 		const createFolder = vi.spyOn(app.vault, "createFolder").mockImplementation(async (p) => {
@@ -179,7 +181,7 @@ describe("UT-5 order of operations", () => {
 		});
 		const result = await createModule(d, file("Foo.md"), "Foo.md", "Foo");
 		expect(result).toEqual({ ok: true, folder: "Foo", target: "Foo/Foo.md" });
-		expect(order).toEqual(["createFolder:Foo", "renameFile:Foo/Foo.md", "convert", "afterMove"]);
+		expect(order).toEqual(["createFolder:Foo", "renameFile:Foo/Foo.md", "convert", "save", "afterMove"]);
 		expect(createFolder).toHaveBeenCalledTimes(1);
 		expect(rename).toHaveBeenCalledTimes(1);
 		expect(d.convert).toHaveBeenCalledWith("Foo.md", "Foo");
@@ -206,6 +208,31 @@ describe("UT-5 order of operations", () => {
 	});
 });
 
+describe("EC-17 the save is flushed, not debounced", () => {
+	it("awaits the save after the conversion, so data.json is written before createModule resolves", async () => {
+		let written = false;
+		const d = deps({
+			convert: vi.fn(),
+			save: vi.fn(async () => {
+				await Promise.resolve();
+				await Promise.resolve();
+				written = true;
+			}),
+		});
+		await createModule(d, file("Foo.md"), "Foo.md", "Foo");
+		expect(d.save).toHaveBeenCalledTimes(1);
+		expect(written).toBe(true);
+	});
+
+	it("a failing save gives one notice, still reports success and still shows the links notice", async () => {
+		const d = deps({ save: vi.fn(async () => Promise.reject(new Error("disk full"))) });
+		const result = await createModule(d, file("Foo.md"), "Foo.md", "Foo");
+		expect(result).toEqual({ ok: true, folder: "Foo", target: "Foo/Foo.md" });
+		expect(d.afterMove).toHaveBeenCalledTimes(1);
+		expect(notices()).toEqual(['Atlas: the module "Foo" was created, but saving the views failed: disk full']);
+	});
+});
+
 describe("UT-6 fault injection: the move fails", () => {
 	it("deletes the folder Atlas made, leaves the file and the views alone, and shows one error notice", async () => {
 		const d = deps();
@@ -222,6 +249,7 @@ describe("UT-6 fault injection: the move fails", () => {
 		expect(app.vault.getAbstractFileByPath("Foo.md")).toBe(foo);
 		expect(foo.path).toBe("Foo.md");
 		expect(d.convert).not.toHaveBeenCalled();
+		expect(d.save).not.toHaveBeenCalled();
 		expect(d.afterMove).not.toHaveBeenCalled();
 		expect(notices()).toEqual(['Atlas: couldn\'t create module "Foo": disk on fire']);
 	});
@@ -343,7 +371,7 @@ describe("UT-9 content is never touched", () => {
 });
 
 function flow(): CreateModuleFlowDeps & { convert: ReturnType<typeof vi.fn>; afterMove: ReturnType<typeof vi.fn> } {
-	return { app, convert: vi.fn(), afterMove: vi.fn(), getPoolFolder: () => "_pool", getExcludedFolders: () => ["_pool"] };
+	return { app, convert: vi.fn(), save: vi.fn(async () => {}), afterMove: vi.fn(), getPoolFolder: () => "_pool", getExcludedFolders: () => ["_pool"] };
 }
 
 describe("UT-10 dialog wiring", () => {

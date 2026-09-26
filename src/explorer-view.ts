@@ -1608,6 +1608,7 @@ export class AtlasExplorerView extends ItemView {
 			{
 				app: plugin.app,
 				convert: (filePath, folderPath) => void plugin.viewsManager.convertFileNodesToModule(filePath, folderPath, plugin.unitIndex),
+				save: () => plugin.flushSave(),
 				afterMove: () => void noticeIfLinksNotUpdated(plugin.app),
 				getPoolFolder: () => plugin.settings.poolFolder,
 				getExcludedFolders: () => plugin.settings.excludedFolders,

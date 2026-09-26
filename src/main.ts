@@ -168,6 +168,12 @@ export default class AtlasPlugin extends Plugin {
 		}
 	}
 
+	/** Saves right away and drops any pending debounced save: for changes that must survive an immediate reload. */
+	async flushSave(): Promise<void> {
+		this.persistDebounced.cancel();
+		await this.persistNow();
+	}
+
 	private async persistNow(): Promise<void> {
 		await this.saveData({
 			settings: this.settings,
