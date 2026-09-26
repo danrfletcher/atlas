@@ -275,22 +275,70 @@ describe("createFromMeta on T-many (mock vault, real views and index)", () => {
 		expect([...b.app.vault.contents.values()].pop()).toBe("# Notes\n");
 	});
 
-	it("EC-9 the row is indexed the moment the node is replaced (never a missing row, never in the inbox)", async () => {
+	it("EC-9 once Create is done the index lists the unit, the node points at it and the inbox is unchanged", async () => {
 		for (const kind of KINDS) {
 			const s = setup(tMany());
-			let seen: string[] = [];
-			const original = s.views.replaceMetaNodeWithUnit.bind(s.views);
-			s.deps.replaceMetaNodeWithUnit = (v, n, ref) => {
-				// at the instant the tree changes, the index must already know the unit
-				seen = s.index.getUnits().map((u) => (u.type === "folder-unit" ? `folder:${u.path}` : `file:${u.path}`));
-				return original(v, n, ref);
-			};
+			const inbox = () => s.views.getInboxUnits(s.index.getUnits(), "default", "view").map((u) => u.path);
+			const before = inbox();
 			const result = await createFromMeta(s.deps, kind, "default", "ft", "Field tech");
 			expect(result.ok).toBe(true);
 			const ref = (result as { ref: UnitRef }).ref;
-			expect(seen).toContain(`${ref.kind}:${ref.path}`);
-			expect(s.views.getInboxUnits(s.index.getUnits(), "default", "view").map((u) => u.path)).not.toContain(ref.path);
+			expect(s.index.getUnits().map((u) => (u.type === "folder-unit" ? `folder:${u.path}` : `file:${u.path}`))).toContain(`${ref.kind}:${ref.path}`);
+			expect(s.views.getNode("default", "ft")!.ref).toEqual(ref);
+			expect(inbox()).toEqual(before);
 		}
+	});
+
+	it("EC-9 the new unit is never in the inbox while the disk step is still running (after the folder exists, before the note resolves)", async () => {
+		for (const kind of KINDS) {
+			const s = setup(tMany());
+			const inboxPaths = () => s.views.getInboxUnits(s.index.getUnits(), "default", "view").map((u) => u.path);
+			const before = inboxPaths();
+			const samples: string[][] = [];
+			// every index notification is a chance for the explorer to redraw: sample the inbox at each one
+			s.index.onChange(() => samples.push(inboxPaths()));
+			const originalCreate = s.app.vault.create.bind(s.app.vault);
+			s.app.vault.create = async (path: string, data: string) => {
+				// the folder's create event has already fired; the note is still being written
+				samples.push(inboxPaths());
+				await new Promise((resolve) => setTimeout(resolve, 5));
+				samples.push(inboxPaths());
+				return originalCreate(path, data);
+			};
+			const result = await createFromMeta(s.deps, kind, "default", "ft", "Field tech");
+			expect(result.ok).toBe(true);
+			expect(samples.length).toBeGreaterThan(0);
+			for (const sample of samples) expect(sample, kind).toEqual(before);
+			expect(inboxPaths()).toEqual(before);
+		}
+	});
+
+	it("EC-9 control: without the hold, the module folder is listed as unplaced mid-create (the check above can fail)", async () => {
+		const s = setup(tMany());
+		s.deps.holdUnit = () => () => {};
+		const inboxPaths = () => s.views.getInboxUnits(s.index.getUnits(), "default", "view").map((u) => u.path);
+		let midCreate: string[] = [];
+		const originalCreate = s.app.vault.create.bind(s.app.vault);
+		s.app.vault.create = async (path: string, data: string) => {
+			midCreate = inboxPaths();
+			return originalCreate(path, data);
+		};
+		await createFromMeta(s.deps, "module", "default", "ft", "Field tech");
+		expect(midCreate).toContain("Field tech");
+	});
+
+	it("EC-9/EC-10 the hold is released after a failed create, so nothing stays hidden", async () => {
+		const s = setup(tMany());
+		const release = vi.fn();
+		s.deps.holdUnit = vi.fn(() => release);
+		s.app.vault.create = async () => {
+			throw new Error("disk full");
+		};
+		const result = await createFromMeta(s.deps, "module", "default", "ft", "Field tech");
+		expect(result.ok).toBe(false);
+		expect(s.deps.holdUnit).toHaveBeenCalledWith("Field tech");
+		expect(release).toHaveBeenCalledTimes(1);
+		expect(s.views.getNode("default", "ft")!.type).toBe("meta");
 	});
 
 	it("EC-13 flushes data.json once, holding the new node and no meta node", async () => {

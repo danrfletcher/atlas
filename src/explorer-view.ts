@@ -1627,6 +1627,7 @@ export class AtlasExplorerView extends ItemView {
 				getExcludedFolders: () => plugin.settings.excludedFolders,
 				getNode: (viewId, nodeId) => plugin.viewsManager.getNode(viewId, nodeId),
 				replaceMetaNodeWithUnit: (viewId, nodeId, ref) => plugin.viewsManager.replaceMetaNodeWithUnit(viewId, nodeId, ref),
+				holdUnit: (path) => plugin.unitIndex.holdUnit(path),
 				save: () => plugin.flushSave(),
 			},
 			kind,

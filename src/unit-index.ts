@@ -18,6 +18,8 @@ export class UnitIndex {
 	private promotedBlocks = new Map<string, Unit>();
 	private manualPromotions: UnitRef[];
 	private changeListeners = new Set<() => void>();
+	/** Paths whose units are kept out of `getUnits` (a count each, so overlapping holds are safe). */
+	private held = new Map<string, number>();
 
 	constructor(private app: App, private settings: AtlasSettings, manualPromotions: UnitRef[]) {
 		this.manualPromotions = manualPromotions;
@@ -33,13 +35,31 @@ export class UnitIndex {
 	}
 
 	getUnits(): Unit[] {
-		return [
+		const all = [
 			...this.folderUnits.values(),
 			...this.baseFileUnits.values(),
 			...this.promotedFiles.values(),
 			...this.promotedFolders.values(),
 			...this.promotedBlocks.values(),
 		];
+		return this.held.size === 0 ? all : all.filter((unit) => !this.held.has(unit.path));
+	}
+
+	/** Keeps the unit at `path` out of `getUnits` until the returned release is called (once; extra
+	 * calls do nothing). The index itself still updates from vault events, so nothing is lost: Create
+	 * uses this so a folder or file it is still setting up is not listed as unplaced before its view
+	 * node has been swapped in. Release tells listeners, so views redraw with the unit visible. */
+	holdUnit(path: string): () => void {
+		this.held.set(path, (this.held.get(path) ?? 0) + 1);
+		let released = false;
+		return () => {
+			if (released) return;
+			released = true;
+			const left = (this.held.get(path) ?? 1) - 1;
+			if (left > 0) this.held.set(path, left);
+			else this.held.delete(path);
+			this.notifyChange();
+		};
 	}
 
 	getManualPromotions(): UnitRef[] {

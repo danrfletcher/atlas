@@ -125,6 +125,7 @@ export function setup(root: ViewNode[], options: { pool?: string; extraViews?: V
 		getExcludedFolders: () => [pool, "_to_delete"],
 		getNode: (viewId: string, nodeId: string) => views.getNode(viewId, nodeId),
 		replaceMetaNodeWithUnit: (viewId: string, nodeId: string, ref: UnitRef) => views.replaceMetaNodeWithUnit(viewId, nodeId, ref),
+		holdUnit: (path: string) => index.holdUnit(path),
 		save: async () => void saved.push(clone(views.getViews())),
 	};
 	const listing = () => [

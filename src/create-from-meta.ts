@@ -72,6 +72,9 @@ export interface CreateFromMetaDeps {
 	/** The views manager's read and replace calls (data only, never disk). */
 	getNode(viewId: string, nodeId: string): ViewNode | null;
 	replaceMetaNodeWithUnit(viewId: string, nodeId: string, ref: UnitRef): boolean;
+	/** Keeps the unit at `path` out of the unit index's list until the returned release is called, so
+	 * the vault create event can't show the new item as unplaced before its view node is swapped in. */
+	holdUnit(path: string): () => void;
 	/** Writes data.json now, so a reload right after Create can't bring the meta folder back. */
 	save(): Promise<void>;
 	/** Clock and random source for the block ID (injectable for tests). */
@@ -129,6 +132,10 @@ export async function createFromMeta(deps: CreateFromMetaDeps, kind: CreateKind,
 
 	let ref: UnitRef;
 	let path: string;
+	let release: () => void = () => {};
+	const hold = (target: string): void => {
+		release = deps.holdUnit(target);
+	};
 	try {
 		if (kind === "block") {
 			const pool = usablePoolFolder(deps.getPoolFolder());
@@ -136,15 +143,18 @@ export async function createFromMeta(deps: CreateFromMetaDeps, kind: CreateKind,
 			if (!(vault.getAbstractFileByPath(pool) instanceof TFolder)) made.pool = await vault.createFolder(pool);
 			const free = freeBlockPath(vault, pool, deps.now?.() ?? new Date(), deps.random);
 			if (!free) return fail("no free block ID was available", await rollback());
+			hold(free);
 			made.file = await vault.create(free, buildBlockContent(name));
 			path = free;
 			ref = { kind: "file", path };
 		} else if (kind === "file") {
 			path = filePath(name);
+			hold(path);
 			made.file = await vault.create(path, buildBlockContent(name));
 			ref = { kind: "file", path };
 		} else {
 			const paths = modulePaths(name);
+			hold(paths.folder);
 			made.folder = await vault.createFolder(paths.folder);
 			made.file = await vault.create(paths.note, buildBlockContent(name));
 			path = paths.folder;
@@ -153,11 +163,21 @@ export async function createFromMeta(deps: CreateFromMetaDeps, kind: CreateKind,
 	} catch (error) {
 		// Only things this run created are in `made` (a create call that threw made nothing), so a
 		// half-made module leaves nothing behind and an existing file is never touched.
-		return fail(describe(error), await rollback());
+		const leftover = await rollback();
+		release();
+		return fail(describe(error), leftover);
 	}
 
 	// The folder may have gone while the disk step ran (a data sync): don't leave an orphan behind.
-	if (!deps.replaceMetaNodeWithUnit(viewId, nodeId, ref)) return fail("the folder no longer exists", await rollback());
+	// The unit stays held through the swap and is released right after it, so any redraw (the release
+	// tells the index's listeners) sees the new node and the unit together, never the unit while the
+	// meta node is still in the tree.
+	if (!deps.replaceMetaNodeWithUnit(viewId, nodeId, ref)) {
+		const leftover = await rollback();
+		release();
+		return fail("the folder no longer exists", leftover);
+	}
+	release();
 	try {
 		await deps.save();
 	} catch (error) {
