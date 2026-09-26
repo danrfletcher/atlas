@@ -245,6 +245,7 @@ describe("UT-6 fault injection: the move fails", () => {
 		expect(createFolder).toHaveBeenCalledWith("Foo");
 		expect(del).toHaveBeenCalledTimes(1);
 		expect(del.mock.calls[0][0].path).toBe("Foo");
+		expect(del.mock.calls[0][1]).toBe(true); // a folder needs force, or Obsidian throws EISDIR
 		expect(app.vault.getAbstractFileByPath("Foo")).toBeNull();
 		expect(app.vault.getAbstractFileByPath("Foo.md")).toBe(foo);
 		expect(foo.path).toBe("Foo.md");
@@ -252,6 +253,18 @@ describe("UT-6 fault injection: the move fails", () => {
 		expect(d.save).not.toHaveBeenCalled();
 		expect(d.afterMove).not.toHaveBeenCalled();
 		expect(notices()).toEqual(['Atlas: couldn\'t create module "Foo": disk on fire']);
+	});
+
+	it("the rollback really removes the folder in a vault that refuses a non-forced folder delete, so a retry works", async () => {
+		const foo = file("Foo.md");
+		const rename = vi.spyOn(app.fileManager, "renameFile").mockRejectedValueOnce(new Error("disk on fire"));
+		expect((await createModule(deps(), foo, "Foo.md", "Foo")).ok).toBe(false);
+		expect(app.vault.getAbstractFileByPath("Foo")).toBeNull();
+		expect(notices()).toEqual(['Atlas: couldn\'t create module "Foo": disk on fire']); // no "couldn't remove the folder" tail
+		rename.mockRestore();
+		const retry = await createModule(deps(), foo, "Foo.md", "Foo");
+		expect(retry).toEqual({ ok: true, folder: "Foo", target: "Foo/Foo.md" });
+		expect(foo.path).toBe("Foo/Foo.md");
 	});
 
 	it("the promise resolves even when the rejection is not an Error", async () => {

@@ -171,8 +171,10 @@ export class Vault {
 		this.emit("modify", file);
 	}
 
-	async delete(entry: TAbstractFile): Promise<void> {
+	/** Like Obsidian 1.13.7: deleting a folder without `force` throws EISDIR, and the folder stays. */
+	async delete(entry: TAbstractFile, force?: boolean): Promise<void> {
 		this.calls.push("delete");
+		if (entry instanceof TFolder && !force) throw new Error("Path is a directory: rm returned EISDIR");
 		this.unlink(entry);
 		this.emit("delete", entry);
 	}

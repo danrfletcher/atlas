@@ -88,7 +88,9 @@ export async function createModule(deps: CreateModuleDeps, file: TFile, original
 		const reason = describe(error);
 		if (folder.children.length > 0) return fail(reason, `. The folder "${plan.folder}" isn't empty, so Atlas left it in place`);
 		try {
-			await vault.delete(folder);
+			// `force` is required for a folder: Obsidian's plain delete throws EISDIR on one. The
+			// emptiness check just above is what makes recursive removal safe here.
+			await vault.delete(folder, true);
 		} catch (deleteError) {
 			return fail(reason, `. Atlas couldn't remove the empty folder "${plan.folder}" either (${describe(deleteError)})`);
 		}
