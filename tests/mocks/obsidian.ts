@@ -284,7 +284,43 @@ export class Modal {
 
 export class FuzzySuggestModal extends Modal {}
 export class ItemView {}
-export class Menu {}
+export class MenuItem {
+	title = "";
+	icon = "";
+	clickHandler: (() => void) | null = null;
+	setTitle(title: string): this {
+		this.title = title;
+		return this;
+	}
+	setIcon(icon: string): this {
+		this.icon = icon;
+		return this;
+	}
+	onClick(cb: () => void): this {
+		this.clickHandler = cb;
+		return this;
+	}
+}
+
+/** Recording `Menu`: `titles()` lists the item titles in order (separators excluded). */
+export class Menu {
+	items: MenuItem[] = [];
+	separators = 0;
+	addItem(cb: (item: MenuItem) => void): this {
+		const item = new MenuItem();
+		cb(item);
+		this.items.push(item);
+		return this;
+	}
+	addSeparator(): this {
+		this.separators++;
+		return this;
+	}
+	showAtMouseEvent(_evt: MouseEvent): void {}
+	titles(): string[] {
+		return this.items.map((item) => item.title);
+	}
+}
 export class Plugin {}
 export class PluginSettingTab {}
 export class WorkspaceLeaf {}
