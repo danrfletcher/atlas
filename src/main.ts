@@ -71,6 +71,11 @@ export default class AtlasPlugin extends Plugin {
 			getExcludedFolders: () => this.settings.excludedFolders,
 			notify: (message, durationMs) => void new Notice(message, durationMs),
 			afterMove: () => void noticeIfLinksNotUpdated(this.app),
+			onHiddenMove: (oldPath, newPath) => {
+				// Obsidian sends no rename event for a file it has hidden, so replay the placement hooks.
+				if (this.unitIndex.rewriteManualPromotions(oldPath, newPath)) this.persistDebounced();
+				this.viewsManager.onVaultRename(oldPath, newPath);
+			},
 			openDialog: (options) => openNameDialog(this.app, options),
 		});
 		this.addSettingTab(new AtlasSettingTab(this.app, this));
