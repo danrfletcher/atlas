@@ -81,7 +81,7 @@ export class TFolder extends TAbstractFile {
 	}
 }
 
-type VaultEvent = "create" | "delete" | "rename";
+type VaultEvent = "create" | "delete" | "rename" | "modify";
 
 /** In-memory vault. Every mutating call is recorded in `calls` so tests can assert "no disk API". */
 export class Vault {
@@ -166,8 +166,9 @@ export class Vault {
 		return folder;
 	}
 
-	async modify(_file: TFile, _data: string): Promise<void> {
+	async modify(file: TFile, _data: string): Promise<void> {
 		this.calls.push("modify");
+		this.emit("modify", file);
 	}
 
 	async delete(entry: TAbstractFile): Promise<void> {
@@ -178,6 +179,7 @@ export class Vault {
 
 	async rename(entry: TAbstractFile, newPath: string): Promise<void> {
 		this.calls.push("rename");
+		if (this.entries.has(newPath)) throw new Error("Destination file already exists!");
 		const oldPath = entry.path;
 		this.unlink(entry);
 		this.link(entry, newPath);
@@ -192,13 +194,21 @@ export class Vault {
 }
 
 export class MetadataCache {
+	private listeners = new Set<() => void>();
 	getFileCache(_file: TFile): null {
 		return null;
 	}
 	getFirstLinkpathDest(_link: string, _from: string): null {
 		return null;
 	}
-	on(): void {}
+	on(name: string, cb: () => void): { name: string; cb: () => void } {
+		if (name === "resolved") this.listeners.add(cb);
+		return { name, cb };
+	}
+	/** Test helper: what Obsidian does once the link graph has re-resolved. */
+	trigger(name: "resolved"): void {
+		if (name === "resolved") for (const cb of this.listeners) cb();
+	}
 }
 
 export class FileManager {

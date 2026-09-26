@@ -9,7 +9,9 @@ import { FreeBlockTextCache, freeBlockLivePreviewPlugin, registerBlockLinkDispla
 import { ViewsManager } from "./views";
 import { ATLAS_VIEW_TYPE, AtlasExplorerView } from "./explorer-view";
 import { registerF10Commands } from "./f10-commands";
-import { closeNameDialog } from "./name-dialog";
+import { closeNameDialog, openNameDialog } from "./name-dialog";
+import { GraduationController } from "./graduation";
+import { noticeIfLinksNotUpdated } from "./links-notice";
 import { registerTestHarness } from "./test-harness";
 import { DEFAULT_COLOR_PALETTE, StatusSet, StatusesManager } from "./statuses";
 
@@ -40,6 +42,7 @@ export default class AtlasPlugin extends Plugin {
 	/** Public so the explorer (F8/F11) can reuse it instead of re-reading free-block files on every render. */
 	freeBlockTextCache: FreeBlockTextCache;
 	private linkSuggest: AtlasLinkSuggest;
+	graduation: GraduationController;
 	private persistDebounced: Debouncer<[], void>;
 
 	async onload() {
@@ -60,6 +63,16 @@ export default class AtlasPlugin extends Plugin {
 			data?.colorPalette ?? [...DEFAULT_COLOR_PALETTE],
 			() => this.persistDebounced()
 		);
+		this.graduation = new GraduationController({
+			vault: this.app.vault,
+			fileManager: this.app.fileManager,
+			scheduler: { setTimeout: (cb, ms) => window.setTimeout(cb, ms), clearTimeout: (handle) => window.clearTimeout(handle as number) },
+			getPoolFolder: () => this.settings.poolFolder,
+			getExcludedFolders: () => this.settings.excludedFolders,
+			notify: (message, durationMs) => void new Notice(message, durationMs),
+			afterMove: () => void noticeIfLinksNotUpdated(this.app),
+			openDialog: (options) => openNameDialog(this.app, options),
+		});
 		this.addSettingTab(new AtlasSettingTab(this.app, this));
 
 		this.linkSuggest = new AtlasLinkSuggest(this);
@@ -84,16 +97,28 @@ export default class AtlasPlugin extends Plugin {
 		});
 
 		this.registerEvent(this.app.vault.on("create", (file) => this.unitIndex.onVaultCreate(file)));
-		this.registerEvent(this.app.vault.on("delete", (file) => this.unitIndex.onVaultDelete(file.path)));
+		this.registerEvent(
+			this.app.vault.on("delete", (file) => {
+				this.unitIndex.onVaultDelete(file.path);
+				this.graduation.handleDelete(file);
+			})
+		);
 		this.registerEvent(
 			this.app.vault.on("rename", (file, oldPath) => {
 				const promotionsChanged = this.unitIndex.onVaultRename(file, oldPath);
 				this.viewsManager.onVaultRename(oldPath, file.path); // saves itself if anything changed
 				if (this.onModuleFolderRename(oldPath, file.path)) this.persistDebounced();
 				if (promotionsChanged) this.persistDebounced();
+				this.graduation.handleRename(file, oldPath); // last: only records the file and schedules the move for a later tick
 			})
 		);
-		this.registerEvent(this.app.metadataCache.on("resolved", () => this.unitIndex.onMetadataResolved()));
+		this.registerEvent(this.app.vault.on("modify", () => this.graduation.handleModify()));
+		this.registerEvent(
+			this.app.metadataCache.on("resolved", () => {
+				this.unitIndex.onMetadataResolved();
+				this.graduation.handleResolved();
+			})
+		);
 
 		registerAddBlockCommand(this);
 		registerF10Commands(this);
@@ -102,6 +127,7 @@ export default class AtlasPlugin extends Plugin {
 	}
 
 	onunload() {
+		this.graduation?.dispose(); // before closing the dialog, so a dismissed one doesn't revert or move anything
 		closeNameDialog();
 		removeSuggesterPrecedence(this.app, this.linkSuggest);
 		this.persistDebounced?.run(); // flush any pending save rather than losing up to 500ms of drags

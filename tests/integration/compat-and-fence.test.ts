@@ -37,7 +37,7 @@ describe("data compatibility (a v0.2.1 data.json)", () => {
 });
 
 describe("fence regression", () => {
-	const NEW_FILES = ["src/name-rules.ts", "src/name-dialog.ts", "src/links-notice.ts", "src/test-harness.ts"];
+	const NEW_FILES = ["src/name-rules.ts", "src/name-dialog.ts", "src/links-notice.ts", "src/test-harness.ts", "src/graduation.ts"];
 
 	it("RG-1/2/3 adds no setting, command or menu item", () => {
 		const commands = [...read("src/commands.ts").matchAll(/id: "([^"]+)"/g), ...read("src/f10-commands.ts").matchAll(/id: "([^"]+)"/g)].map((m) => m[1]);
@@ -45,7 +45,7 @@ describe("fence regression", () => {
 		expect(read("src/settings.ts").match(/new Setting\(/g)).toHaveLength(17);
 		for (const f of NEW_FILES) expect(read(f), f).not.toMatch(/addCommand\(|addItem\(|new Setting\(|addSettingTab|registerEditorSuggest/);
 		const wired = [...readdirSync(join(root, "src"))].filter((f) => f.endsWith(".ts")).filter((f) => /openNameDialog/.test(read(`src/${f}`)));
-		expect(wired.sort()).toEqual(["name-dialog.ts", "test-harness.ts"]);
+		expect(wired.sort()).toEqual(["main.ts", "name-dialog.ts", "test-harness.ts"]); // main.ts: graduation's clash dialog (PR-2)
 	});
 
 	it("RG-6 UI strings in the new files never say 'promote'", () => {
