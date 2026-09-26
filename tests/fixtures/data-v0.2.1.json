@@ -1,0 +1,37 @@
+{
+	"settings": {
+		"poolFolder": "_pool",
+		"excludedFolders": [".obsidian", "_pool", "_to_delete"],
+		"interfaceNoteAcceptAltNames": false,
+		"replaceNativeExplorerOnStartup": true,
+		"blockDisplayLength": 80,
+		"defaultViewId": "default",
+		"confirmAddToModule": true,
+		"glowEnabled": false,
+		"retainIcons": false,
+		"retainIconMatchBackground": false
+	},
+	"manualPromotions": [{ "kind": "file", "path": "Foo.md" }, { "kind": "block", "path": "Foo.md", "subpath": "^abc" }],
+	"views": [
+		{
+			"id": "default",
+			"name": "Default",
+			"inboxMode": "view",
+			"statusEnabled": true,
+			"statusSetId": "set1",
+			"root": [
+				{
+					"id": "m1",
+					"type": "meta",
+					"label": "Field tech",
+					"collapsed": false,
+					"children": [{ "id": "n1", "type": "unit", "ref": { "kind": "file", "path": "Foo.md" }, "explicitStatusId": "s1", "children": [] }]
+				}
+			]
+		}
+	],
+	"activeViewId": "default",
+	"expandedModuleFolders": ["Projects/Sub"],
+	"statusSets": [],
+	"colorPalette": ["#ff0000"]
+}

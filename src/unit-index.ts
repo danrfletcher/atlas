@@ -58,6 +58,29 @@ export class UnitIndex {
 		this.computePromotions();
 	}
 
+	/** Create Module on a root file: a manual promotion of the file becomes one of the new module
+	 * (folder) instead. Also catches the interface-note path `<folder>/<folder>.md`, in case the
+	 * rename hook ran first; a result equal to the new folder ref is dropped if already present
+	 * (other entries are never deduped). Returns how many promotions changed;
+	 * the caller persists (data-only, never touches disk). */
+	convertManualPromotionToModule(filePath: string, folderPath: string): number {
+		const folderRef: UnitRef = { kind: "folder", path: folderPath };
+		const interfacePath = `${folderPath}/${folderPath.split("/").pop()}.md`;
+		let changed = 0;
+		const next: UnitRef[] = [];
+		for (const ref of this.manualPromotions) {
+			const matches = ref.kind === "file" && (ref.path === filePath || ref.path === interfacePath);
+			const candidate = matches ? folderRef : ref;
+			if (matches) changed++;
+			if (unitRefsEqual(candidate, folderRef) && next.some((existing) => unitRefsEqual(existing, folderRef))) continue;
+			next.push(candidate);
+		}
+		if (changed === 0) return 0;
+		this.manualPromotions = next;
+		this.computePromotions();
+		return changed;
+	}
+
 	/** A path (folder or file) is excluded unless it's inside the pool folder — the pool folder
 	 * itself is excluded from being a folder-unit, but its contents are never excluded as files. */
 	private isExcluded(path: string): boolean {

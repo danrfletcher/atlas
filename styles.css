@@ -634,3 +634,51 @@
 .atlas-color-save-btn {
 	flex: 1;
 }
+
+/* Shared "name it" dialog: live-validated text box (colours come from theme variables). */
+.atlas-name-input {
+	width: 100%;
+}
+
+/* The extra element/attribute/:not() terms outrank Obsidian's `input[type=text]:not(:disabled):hover`
+ * and `:focus` rules, so the border keeps its colour while the pointer is over the box. */
+input.atlas-name-input.atlas-name-valid[type="text"]:not(:disabled) {
+	border-color: var(--color-green);
+}
+
+input.atlas-name-input.atlas-name-invalid[type="text"]:not(:disabled) {
+	border-color: var(--color-red);
+}
+
+.atlas-name-message {
+	margin-top: 6px;
+	color: var(--color-red);
+	font-size: var(--font-ui-small);
+	line-height: 1.4;
+	min-height: 1.4em; /* the line stays reserved when valid, so the dialog doesn't jump */
+	overflow-wrap: anywhere;
+}
+
+.atlas-name-message.atlas-hidden {
+	visibility: hidden;
+}
+
+.atlas-name-buttons {
+	display: flex;
+	justify-content: flex-end;
+	gap: 8px;
+	margin-top: 16px;
+}
+
+.atlas-name-create-wrap {
+	display: inline-flex;
+}
+
+.atlas-name-create-wrap:has(button:disabled) {
+	cursor: not-allowed;
+}
+
+.atlas-name-buttons button:disabled {
+	opacity: 0.5;
+	pointer-events: none; /* pointer events land on the wrapper, which keeps focus in the box */
+}
