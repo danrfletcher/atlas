@@ -9,6 +9,8 @@ import { FreeBlockTextCache, freeBlockLivePreviewPlugin, registerBlockLinkDispla
 import { ViewsManager } from "./views";
 import { ATLAS_VIEW_TYPE, AtlasExplorerView } from "./explorer-view";
 import { registerF10Commands } from "./f10-commands";
+import { closeNameDialog } from "./name-dialog";
+import { registerTestHarness } from "./test-harness";
 import { DEFAULT_COLOR_PALETTE, StatusSet, StatusesManager } from "./statuses";
 
 interface AtlasData {
@@ -95,9 +97,12 @@ export default class AtlasPlugin extends Plugin {
 
 		registerAddBlockCommand(this);
 		registerF10Commands(this);
+
+		if (__ATLAS_TEST__) this.register(registerTestHarness(this));
 	}
 
 	onunload() {
+		closeNameDialog();
 		removeSuggesterPrecedence(this.app, this.linkSuggest);
 		this.persistDebounced?.run(); // flush any pending save rather than losing up to 500ms of drags
 		console.debug("[Atlas] unloading");

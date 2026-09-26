@@ -634,3 +634,41 @@
 .atlas-color-save-btn {
 	flex: 1;
 }
+
+/* Shared "name it" dialog: live-validated text box (colours come from theme variables). */
+.atlas-name-input {
+	width: 100%;
+}
+
+.atlas-name-input.atlas-name-valid,
+.atlas-name-input.atlas-name-valid:focus {
+	border-color: var(--color-green);
+}
+
+.atlas-name-input.atlas-name-invalid,
+.atlas-name-input.atlas-name-invalid:focus {
+	border-color: var(--color-red);
+}
+
+.atlas-name-message {
+	margin-top: 6px;
+	color: var(--color-red);
+	font-size: var(--font-ui-small);
+	overflow-wrap: anywhere;
+}
+
+.atlas-name-message.atlas-hidden {
+	display: none;
+}
+
+.atlas-name-buttons {
+	display: flex;
+	justify-content: flex-end;
+	gap: 8px;
+	margin-top: 16px;
+}
+
+.atlas-name-buttons button:disabled {
+	opacity: 0.5;
+	cursor: not-allowed;
+}
