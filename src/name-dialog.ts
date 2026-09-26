@@ -56,8 +56,16 @@ class NameDialog extends Modal {
 
 		const buttons = contentEl.createDiv({ cls: "atlas-name-buttons" });
 		buttons.createEl("button", { text: "Cancel" }).addEventListener("click", () => this.settle(null));
-		this.createBtn = buttons.createEl("button", { text: "Create", cls: "mod-cta" });
+		// A disabled button swallows the click and lets focus fall to the page, so the wrapper
+		// (which receives the pointer events while the button is disabled) keeps focus in the box.
+		const createWrap = buttons.createSpan({ cls: "atlas-name-create-wrap" });
+		this.createBtn = createWrap.createEl("button", { text: "Create", cls: "mod-cta" });
 		this.createBtn.addEventListener("click", () => this.submit());
+		createWrap.addEventListener("mousedown", (evt) => {
+			if (!this.createBtn.disabled) return;
+			evt.preventDefault();
+			this.inputEl.focus();
+		});
 
 		this.inputEl.addEventListener("input", () => {
 			const stripped = this.inputEl.value.replace(/[\r\n]/g, "");

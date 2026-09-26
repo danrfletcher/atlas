@@ -70,6 +70,22 @@ describe("name dialog", () => {
 		expect(modals()).toHaveLength(0);
 	});
 
+	it("UT-D6 pressing the disabled Create keeps focus in the box and typing works", () => {
+		open("Reading list");
+		const wrap = button("Create").parentElement!;
+		expect(wrap.classList.contains("atlas-name-create-wrap")).toBe(true);
+		inputEl().blur();
+		const evt = new MouseEvent("mousedown", { bubbles: true, cancelable: true });
+		wrap.dispatchEvent(evt);
+		expect(evt.defaultPrevented).toBe(true);
+		expect(document.activeElement).toBe(inputEl());
+		type("Fine");
+		expect(button("Create").disabled).toBe(false);
+		const again = new MouseEvent("mousedown", { bubbles: true, cancelable: true });
+		wrap.dispatchEvent(again);
+		expect(again.defaultPrevented).toBe(false);
+	});
+
 	it("UT-D5 Enter or Create click on invalid does not resolve or close", async () => {
 		const { results } = open("Reading list");
 		key("Enter");
