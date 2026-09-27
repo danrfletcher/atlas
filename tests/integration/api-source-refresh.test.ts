@@ -1,7 +1,7 @@
 import * as http from "node:http";
 import type { AddressInfo } from "node:net";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { ApiSourceController, ViewLoadTrigger, dotStateFor, dotTooltip } from "../../src/api-source-controller";
+import { ApiSourceController, ConfirmDeleteAnswer, ViewLoadTrigger, dotStateFor, dotTooltip } from "../../src/api-source-controller";
 import { RequestFn, ScheduleTimeout } from "../../src/api-http";
 import { ApiSourceConfig, ViewNode } from "../../src/types";
 
@@ -326,6 +326,73 @@ describe("ApiSourceController — integration against a real HTTP server", () =>
 		expect(node.apiCache?.ok).toBe(false);
 		expect(node.apiCache?.error).not.toContain(secretToken);
 		expect(JSON.stringify(node.apiCache)).not.toContain(secretToken);
+	});
+
+	it("R5: removing the source while its fetch is still in flight leaves the now-sourceless node untouched by the stale result", async () => {
+		const node = makeNode("n18");
+		node.apiSource = baseSource(`${base}/ok`);
+		const controller = new ApiSourceController();
+		let resolveRequest: ((result: { status: number; text: string }) => void) | null = null;
+		const deferredRequest: RequestFn = () =>
+			new Promise((resolve) => {
+				resolveRequest = resolve;
+			});
+
+		// Production always passes `node.apiSource` itself as `source` (see explorer-view.ts's
+		// `refreshApiSource`) — mirrored here so the identity check inside `doRefresh` has something
+		// real to compare against.
+		const run = controller.refresh(node, node.apiSource, [], () => {}, { requestImpl: deferredRequest });
+
+		// "Remove data source" (G4) runs while the fetch above is still pending.
+		node.apiSource = undefined;
+		node.apiItemState = { "1": { id: "1", label: "One" } };
+		node.apiItemOrder = ["1"];
+
+		resolveRequest?.({ status: 200, text: JSON.stringify([{ id: "1", name: "One" }, { id: "2", name: "Two" }]) });
+		await run;
+
+		// The stale fetch must never write a cache back onto a node that no longer has a source, and
+		// must never touch the static rows G4 left behind.
+		expect(node.apiCache).toBeUndefined();
+		expect(node.apiItemState).toEqual({ "1": { id: "1", label: "One" } });
+		expect(node.apiItemOrder).toEqual(["1"]);
+	});
+
+	it("R5: removing the source while an Overwrite delete confirmation is still pending leaves the removed rows alone, even if later confirmed", async () => {
+		const node = makeNode("n19");
+		const overwriteSource = baseSource(`${base}/ok`, { mode: "overwrite", confirmBeforeDelete: true });
+		node.apiSource = overwriteSource;
+		node.apiItemState = { "1": { id: "1", label: "One" }, "2": { id: "2", label: "Two" }, "3": { id: "3", label: "Three" } };
+		node.apiItemOrder = ["1", "2", "3"];
+		const controller = new ApiSourceController();
+		let resolveConfirm: ((answer: ConfirmDeleteAnswer) => void) | null = null;
+		const confirmDelete = (): Promise<ConfirmDeleteAnswer> =>
+			new Promise((resolve) => {
+				resolveConfirm = resolve;
+			});
+
+		// `/ok` returns ids "1" and "2" only — "3" vanished, so this Overwrite refresh needs confirmation.
+		const run = controller.refresh(node, overwriteSource, [], () => {}, { requestImpl: nodeFetchRequestImpl, confirmDelete });
+		// The confirmation only arrives after a real network round trip to `base` — poll (bounded) rather
+		// than guessing a fixed delay.
+		for (let i = 0; i < 100 && resolveConfirm === null; i++) {
+			await new Promise((resolve) => setTimeout(resolve, 5));
+		}
+		expect(resolveConfirm).not.toBeNull();
+
+		// "Remove data source" (G4) runs while the confirmation is still awaiting an answer.
+		node.apiSource = undefined;
+		resolveConfirm?.("confirmed");
+		await run;
+
+		// A later "confirmed" answer must not resurrect a cache or delete "3" on a node whose source is
+		// already gone — G4's static rows must survive exactly as they were at removal.
+		expect(node.apiCache).toBeUndefined();
+		expect(node.apiItemState).toEqual({
+			"1": { id: "1", label: "One" },
+			"2": { id: "2", label: "Two" },
+			"3": { id: "3", label: "Three" },
+		});
 	});
 });
 

@@ -130,6 +130,14 @@ export class ApiSourceController {
 	private async doRefresh(node: ViewNode, source: ApiSourceConfig, headers: ApiHeader[], persist: () => void, deps: RefreshDeps): Promise<void> {
 		const now = deps.now ?? (() => Date.now());
 		const trigger = deps.trigger ?? "manual";
+		// R5: `node` is a live reference into the view tree, so another call (Remove data source, a
+		// later save, Delete folder) can mutate `node.apiSource` out from under this refresh while it's
+		// awaiting the fetch or a confirm-delete answer. Captured once, up front, and re-checked after
+		// every await below — a refresh that started against a source no longer in place must never
+		// write its cache/rows/itemState back onto the node, or "Remove data source" (G4: rows survive
+		// as static, source+cache dropped) could be silently undone by a refresh that was already in
+		// flight when it ran.
+		const startingApiSource = node.apiSource;
 		try {
 			const headerRecord: Record<string, string> = {};
 			for (const header of headers) if (header.key) headerRecord[header.key] = header.value;
@@ -139,6 +147,8 @@ export class ApiSourceController {
 				timeoutMs: deps.timeoutMs ?? HTTP_TIMEOUT_MS,
 				scheduleTimeout: deps.scheduleTimeout,
 			});
+
+			if (node.apiSource !== startingApiSource) return;
 
 			if (!result.ok) {
 				node.apiCache = emptyCache(node.apiCache, now(), result.error.message);
@@ -196,6 +206,8 @@ export class ApiSourceController {
 			}
 
 			const answer: ConfirmDeleteAnswer = deps.confirmDelete ? await deps.confirmDelete(plan.deletedCount) : "dismissed";
+
+			if (node.apiSource !== startingApiSource) return;
 
 			if (answer === "confirmed") {
 				node.apiItemState = plan.result.itemState;
