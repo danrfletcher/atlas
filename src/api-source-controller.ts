@@ -1,7 +1,13 @@
 import { isMapError, mapResponseRows } from "./api-mapping";
-import { mergeApiItems } from "./api-merge";
+import { planApiRefresh } from "./api-refresh-plan";
 import { httpGetJson, HTTP_TIMEOUT_MS, RequestFn, ScheduleTimeout } from "./api-http";
 import { ApiCache, ApiHeader, ApiSourceConfig, ViewNode } from "./types";
+
+/** The outcome of a confirm-delete prompt (G6b(ii)): "confirmed"/"cancelled" are both an *answer* —
+ * either button, deliberately clicked; "dismissed" is Escape or the view/modal closing with neither
+ * button clicked (edge case: "dismissed ... counts as unanswered on an automatic refresh and as Cancel
+ * on a manual one" — `ApiSourceController` applies that distinction, not the confirm function itself). */
+export type ConfirmDeleteAnswer = "confirmed" | "cancelled" | "dismissed";
 
 export interface RefreshDeps {
 	/** R1: how to actually issue the request — production wiring supplies an adapter around
@@ -11,12 +17,26 @@ export interface RefreshDeps {
 	timeoutMs?: number;
 	scheduleTimeout?: ScheduleTimeout;
 	now?: () => number;
+	/** G5/G6b: which of the three independent refresh controls triggered this call — "manual" (the
+	 * "Refresh now" menu item) always asks again when confirmation is needed, ignoring any existing
+	 * "awaiting confirmation" state; "automatic" (the view-load or every-X-minutes triggers) asks at
+	 * most once per Folder and otherwise leaves it amber and unchanged. Defaults to "manual" so every
+	 * existing (pre-PR-3) caller keeps behaving exactly as it always did. */
+	trigger?: "manual" | "automatic";
+	/** G6b(ii): asks the user to confirm deleting `count` rows. Required only when a refresh actually
+	 * needs to ask (Overwrite, guard on, would delete rows) — a refresh that never needs confirmation
+	 * never touches this. Absent where one is needed is treated the same as "dismissed" (the safe
+	 * default: never delete without having actually asked). */
+	confirmDelete?: (count: number) => Promise<ConfirmDeleteAnswer>;
 }
 
-export type DotState = "green" | "grey" | "red";
+export type DotState = "green" | "grey" | "red" | "amber";
 
-/** G11: green = last refresh ok; grey = never refreshed; red = last refresh failed. */
-export function dotStateFor(cache: ApiCache | undefined): DotState {
+/** G11: green = last refresh ok; grey = never refreshed; red = last refresh failed; amber (PR-3) =
+ * an automatic refresh's delete confirmation went unanswered — takes priority over whatever the cache
+ * itself says, since nothing from that refresh was actually applied. */
+export function dotStateFor(cache: ApiCache | undefined, awaitingConfirmation?: boolean): DotState {
+	if (awaitingConfirmation) return "amber";
 	if (!cache || cache.fetchedAt === null) return "grey";
 	return cache.ok ? "green" : "red";
 }
@@ -30,8 +50,11 @@ function relativeTime(fromMs: number, nowMs: number): string {
 	return "just now";
 }
 
-/** G11 tooltip: error + time of last success. E2/E4: also surfaces skipped/truncated counts. */
-export function dotTooltip(cache: ApiCache | undefined, nowMs: number): string {
+/** G11 tooltip: error + time of last success. E2/E4: also surfaces skipped/truncated counts. PR-3:
+ * amber takes over the whole tooltip — the cache's own state is moot since nothing from the refresh
+ * that triggered it was actually applied. */
+export function dotTooltip(cache: ApiCache | undefined, nowMs: number, awaitingConfirmation?: boolean): string {
+	if (awaitingConfirmation) return "Waiting for confirmation to delete rows";
 	if (!cache || cache.fetchedAt === null) return "Never refreshed";
 	const parts: string[] = [];
 	if (cache.ok) {
@@ -106,6 +129,7 @@ export class ApiSourceController {
 
 	private async doRefresh(node: ViewNode, source: ApiSourceConfig, headers: ApiHeader[], persist: () => void, deps: RefreshDeps): Promise<void> {
 		const now = deps.now ?? (() => Date.now());
+		const trigger = deps.trigger ?? "manual";
 		try {
 			const headerRecord: Record<string, string> = {};
 			for (const header of headers) if (header.key) headerRecord[header.key] = header.value;
@@ -130,22 +154,70 @@ export class ApiSourceController {
 			}
 
 			const fetchedAt = now();
-			const merged = mergeApiItems(node.apiItemState ?? {}, node.apiItemOrder ?? [], mapped.rows, source.mode, {
+			const plan = planApiRefresh({
+				prevState: node.apiItemState ?? {},
+				prevOrder: node.apiItemOrder ?? [],
+				rows: mapped.rows,
+				mode: source.mode,
 				truncated: mapped.truncated,
 				nowIso: new Date(fetchedAt).toISOString(),
+				// G6b: absent/`undefined` means the guard is on — only an explicit `false` turns it off.
+				keepOnEmpty: source.keepOnEmpty ?? true,
+				confirmBeforeDelete: source.confirmBeforeDelete ?? true,
 			});
 
-			node.apiItemState = merged.itemState;
-			node.apiItemOrder = merged.order;
-			node.apiCache = {
-				fetchedAt,
-				ok: true,
-				error: null,
-				rows: mapped.rows,
-				skippedCount: mapped.skippedCount,
-				truncated: mapped.truncated,
-				lastSuccessAt: fetchedAt,
+			const applyCacheSuccess = () => {
+				node.apiCache = {
+					fetchedAt,
+					ok: true,
+					error: null,
+					rows: mapped.rows,
+					skippedCount: mapped.skippedCount,
+					truncated: mapped.truncated,
+					lastSuccessAt: fetchedAt,
+				};
 			};
+
+			if (!plan.needsConfirmation) {
+				node.apiItemState = plan.result.itemState;
+				node.apiItemOrder = plan.result.order;
+				node.apiAwaitingConfirmation = false;
+				applyCacheSuccess();
+				persist();
+				return;
+			}
+
+			// G6b(ii): this refresh would delete `plan.deletedCount` row(s) and the guard is on.
+			if (trigger === "automatic" && node.apiAwaitingConfirmation) {
+				// Already asked once for this Folder and got no answer — G6b: ask at most once per
+				// Folder until answered or dismissed. Leave everything exactly as it is; only a manual
+				// "Refresh now" (which always asks again) or an actual answer changes this.
+				return;
+			}
+
+			const answer: ConfirmDeleteAnswer = deps.confirmDelete ? await deps.confirmDelete(plan.deletedCount) : "dismissed";
+
+			if (answer === "confirmed") {
+				node.apiItemState = plan.result.itemState;
+				node.apiItemOrder = plan.result.order;
+				node.apiAwaitingConfirmation = false;
+				applyCacheSuccess();
+				persist();
+				return;
+			}
+
+			if (answer === "cancelled" || trigger === "manual") {
+				// Explicit Cancel, or a manual refresh's dismiss (edge case: counts as Cancel on manual)
+				// — keep every row and all itemState exactly as it was; the fetch itself still succeeded.
+				node.apiAwaitingConfirmation = false;
+				applyCacheSuccess();
+				persist();
+				return;
+			}
+
+			// Dismissed on an automatic trigger: unanswered — keep rows untouched, go amber, and leave
+			// the cache alone (nothing from this refresh was actually applied).
+			node.apiAwaitingConfirmation = true;
 			persist();
 		} catch (err) {
 			// R17/E9: `ViewsManager` sanitizes `apiSource`/`apiItemOrder`/`apiItemState` on load, but this

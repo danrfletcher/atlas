@@ -436,6 +436,18 @@
 	background-color: var(--color-red, #e53935);
 }
 
+/* PR-3 (G11): amber — an automatic refresh's delete confirmation went unanswered. */
+.atlas-api-dot-amber {
+	background-color: var(--color-orange, #f0a020);
+}
+
+/* PR-3 (G5b): inline validation message under the "Refresh every X minutes" field. */
+.atlas-api-field-error {
+	color: var(--text-error, #e53935);
+	font-size: var(--font-ui-smaller);
+	margin: 0 0 8px;
+}
+
 .atlas-badge {
 	font-size: var(--font-ui-smaller);
 	padding: 0 4px;

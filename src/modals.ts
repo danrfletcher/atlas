@@ -336,3 +336,45 @@ export class ConfirmModal extends Modal {
 		this.contentEl.empty();
 	}
 }
+
+/** G6b(ii): confirms deleting `count` row(s) before an Overwrite refresh applies. Unlike `ConfirmModal`,
+ * the caller needs to tell "Cancel" (a deliberate button click) apart from "dismissed" (Escape, or the
+ * whole Atlas view closing out from under an open modal) — an automatic refresh's confirmation treats
+ * those two differently (G6b: dismissed keeps rows and goes amber; an explicit Cancel just keeps rows).
+ * `onOpen`'s two buttons both call `close()` themselves after recording which one fired; `onClose()`
+ * fires on every path (both buttons *and* Escape/outside-click alike, per Obsidian's `Modal` lifecycle)
+ * and reports "dismissed" only when neither button already claimed the answer. */
+export class ConfirmDeleteRowsModal extends Modal {
+	private answered: "confirmed" | "cancelled" | null = null;
+
+	constructor(app: App, private count: number, private onAnswer: (answer: "confirmed" | "cancelled" | "dismissed") => void) {
+		super(app);
+	}
+
+	onOpen(): void {
+		const { contentEl } = this;
+		const noun = this.count === 1 ? "row" : "rows";
+		contentEl.createEl("p", { text: `This refresh will delete ${this.count} ${noun} no longer in the response. This can't be undone.` });
+		new Setting(contentEl)
+			.addButton((btn) =>
+				btn.setButtonText("Cancel").onClick(() => {
+					this.answered = "cancelled";
+					this.close();
+				})
+			)
+			.addButton((btn) =>
+				btn
+					.setWarning()
+					.setButtonText("Delete rows")
+					.onClick(() => {
+						this.answered = "confirmed";
+						this.close();
+					})
+			);
+	}
+
+	onClose(): void {
+		this.contentEl.empty();
+		this.onAnswer(this.answered ?? "dismissed");
+	}
+}
