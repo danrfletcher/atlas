@@ -448,6 +448,22 @@
 	margin: 0 0 8px;
 }
 
+/* PR-4 (G3): persistent unsandboxed-code warning next to the JS mapping editor — visible without
+ * scrolling, so it sits directly above the textarea rather than in a tooltip/collapsed section. */
+.atlas-api-js-warning {
+	color: var(--text-warning, #f0a020);
+	font-size: var(--font-ui-smaller);
+	margin: 0 0 8px;
+}
+
+/* PR-4 (G3): the Test button's row/skip/truncate summary or mapping error — never saves or touches
+ * the cache, so it's styled like any other inline status line rather than a field error. */
+.atlas-api-test-result {
+	color: var(--text-muted);
+	font-size: var(--font-ui-smaller);
+	margin: 0 0 8px;
+}
+
 .atlas-badge {
 	font-size: var(--font-ui-smaller);
 	padding: 0 4px;

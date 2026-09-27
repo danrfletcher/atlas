@@ -1,8 +1,10 @@
 import { App, ButtonComponent, Modal, Notice, Platform, Setting } from "obsidian";
-import { canSaveApiSource, findArrayFields, sampleFieldsForArrayField } from "./api-mapping";
+import { canSaveApiSource, findArrayFields, isMapError, mapResponseRows, sampleFieldsForArrayField } from "./api-mapping";
+import { generateJsFromMapping, runJsMapping, validateJsSource } from "./api-js-mapping";
 import { httpGetJson } from "./api-http";
 import { obsidianRequestImpl } from "./api-request-obsidian";
 import { validateRefreshMinutes } from "./api-refresh-timer";
+import { ConfirmModal } from "./modals";
 import { ApiFieldMapping, ApiHeader, ApiSourceConfig } from "./types";
 
 export interface ApiSourceModalResult {
@@ -45,6 +47,17 @@ export class ApiSourceModal extends Modal {
 	 * attribute, so re-syncing only the latter (as this used to) left the button unclickable forever
 	 * after any full `render()` recreated it in a disabled state. */
 	private saveButton: ButtonComponent | null = null;
+	/** PR-4/G3: "drag" (default) behaves exactly as PR-2/PR-3; "js" replaces the mapping step with
+	 * `jsSource`. `mapping` itself is never cleared on drag→js — only a confirmed js→drag switch
+	 * clears `jsSource` (see the mode dropdown's `onChange`), so toggling modes never loses either
+	 * side's state until the user actually confirms discarding it. */
+	private mappingMode: "drag" | "js";
+	private jsSource: string;
+	/** Test button output (row/skip/truncate summary or the mapping error) — mode-aware, never saves
+	 * or touches the cache. Persists across re-renders until the next Test run, a mode switch, or a
+	 * fresh Fetch sample. */
+	private testResult: string | null = null;
+	private testResultEl: HTMLElement | null = null;
 
 	constructor(app: App, initial: ApiSourceConfig | null, initialHeaders: ApiHeader[], private onSave: (result: ApiSourceModalResult) => void) {
 		super(app);
@@ -57,6 +70,8 @@ export class ApiSourceModal extends Modal {
 		this.refreshEveryMinutesEnabled = initial?.refreshEveryMinutesEnabled ?? false;
 		this.refreshEveryMinutesRaw = initial?.refreshEveryMinutes !== undefined ? String(initial.refreshEveryMinutes) : "";
 		this.mapping = initial?.mapping ? { ...initial.mapping } : { idField: "", labelField: "", secondaryField: undefined };
+		this.mappingMode = initial?.mappingMode === "js" ? "js" : "drag";
+		this.jsSource = initial?.jsSource ?? "";
 	}
 
 	onOpen(): void {
@@ -110,7 +125,70 @@ export class ApiSourceModal extends Modal {
 			btn.setButtonText("Fetch sample").onClick(() => void this.fetchSample())
 		);
 
-		if (this.arrayFieldCandidates.length > 0) {
+		new Setting(contentEl)
+			.setName("Mapping mode")
+			.addDropdown((dropdown) => {
+				dropdown.addOption("drag", "Drag fields");
+				dropdown.addOption("js", "JavaScript");
+				dropdown.setValue(this.mappingMode);
+				dropdown.onChange((value) => {
+					const next = value as "drag" | "js";
+					if (next === this.mappingMode) return;
+					if (this.mappingMode === "js" && next === "drag") {
+						// G3: re-render first so the dropdown's own displayed value snaps back to "js"
+						// until the user actually confirms — Cancel (no callback at all, see
+						// `ConfirmModal`) must leave the mode and the code untouched.
+						this.render();
+						new ConfirmModal(
+							this.app,
+							"Switching to drag-field mapping discards the JavaScript code — this can't be undone.",
+							"Discard code",
+							() => {
+								this.mappingMode = "drag";
+								this.jsSource = "";
+								this.testResult = null;
+								this.render();
+							}
+						).open();
+						return;
+					}
+					this.mappingMode = next;
+					this.testResult = null;
+					if (next === "js") this.jsSource = generateJsFromMapping(this.mapping);
+					this.render();
+				});
+			});
+
+		if (this.mappingMode === "js") {
+			contentEl.createEl("p", {
+				cls: "atlas-api-js-warning",
+				text: "JavaScript runs with Atlas's full trust — there is no sandbox. An infinite loop or a function that never resolves has no separate timeout of its own; only the request itself is capped.",
+			});
+
+			let jsErrorEl: HTMLElement | null = null;
+			const updateJsValidity = () => {
+				const validation = validateJsSource(this.jsSource);
+				jsErrorEl?.setText(validation.ok ? "" : validation.error);
+				this.updateSaveButton();
+			};
+			new Setting(contentEl)
+				.setName("Mapping function")
+				.setDesc("(response) => [{ id, label, secondary, extra }] — secondary and extra are optional.")
+				.addTextArea((text) =>
+					text.setValue(this.jsSource).onChange((value) => {
+						this.jsSource = value;
+						updateJsValidity();
+					})
+				);
+			jsErrorEl = contentEl.createEl("p", { cls: "atlas-api-field-error" });
+			updateJsValidity();
+		}
+
+		new Setting(contentEl).addButton((btn) => btn.setButtonText("Test").onClick(() => void this.runTest()));
+		this.testResultEl = contentEl.createEl("p", { cls: "atlas-api-test-result" });
+		this.testResultEl.setText(this.testResult ?? "");
+
+		if (this.mappingMode === "drag" && this.arrayFieldCandidates.length > 0) {
 			new Setting(contentEl)
 				.setName("Array field")
 				.setDesc("The response is an object — pick which field holds the list of rows.")
@@ -126,7 +204,7 @@ export class ApiSourceModal extends Modal {
 				});
 		}
 
-		if (this.sampleFields.length > 0) {
+		if (this.mappingMode === "drag" && this.sampleFields.length > 0) {
 			new Setting(contentEl).setName("Map fields").setDesc("Drag a field onto a target below.").setHeading();
 			const chipsEl = contentEl.createDiv({ cls: "atlas-api-field-chips" });
 			for (const field of this.sampleFields) {
@@ -241,7 +319,12 @@ export class ApiSourceModal extends Modal {
 	}
 
 	private canSave(): boolean {
-		if (!canSaveApiSource(this.url, this.mapping)) return false;
+		if (this.mappingMode === "js") {
+			if (!this.url.trim()) return false;
+			if (!validateJsSource(this.jsSource).ok) return false;
+		} else if (!canSaveApiSource(this.url, this.mapping)) {
+			return false;
+		}
 		if (this.refreshEveryMinutesEnabled && !validateRefreshMinutes(this.refreshEveryMinutesRaw).ok) return false;
 		return true;
 	}
@@ -276,8 +359,29 @@ export class ApiSourceModal extends Modal {
 		this.lastResponse = result.json;
 		this.arrayFieldCandidates = findArrayFields(result.json);
 		this.sampleFields = sampleFieldsForArrayField(result.json, this.mapping.arrayField);
+		this.testResult = null;
 		if (this.sampleFields.length === 0 && this.arrayFieldCandidates.length === 0 && !Array.isArray(result.json)) {
 			new Notice("Atlas: response is not a JSON list and has no array field to pick.");
+		}
+		this.render();
+	}
+
+	/** G3: "The Test button, Fetch sample and Save all use the active mode." Runs the active mode's
+	 * mapping against the last-fetched sample and shows the resulting row/skip/truncate summary or the
+	 * mapping error — never saves, never touches `apiCache`. */
+	private async runTest(): Promise<void> {
+		if (this.lastResponse === null) {
+			new Notice("Fetch a sample first.");
+			return;
+		}
+		const result = this.mappingMode === "js" ? await runJsMapping(this.jsSource, this.lastResponse) : mapResponseRows(this.lastResponse, this.mapping);
+		if (isMapError(result)) {
+			this.testResult = `Error: ${result.error}`;
+		} else {
+			const parts = [`${result.rows.length} row(s)`];
+			if (result.skippedCount > 0) parts.push(`${result.skippedCount} skipped`);
+			if (result.truncated) parts.push("truncated at 5,000");
+			this.testResult = parts.join(", ");
 		}
 		this.render();
 	}
@@ -295,6 +399,8 @@ export class ApiSourceModal extends Modal {
 			refreshEveryMinutes: refreshEveryMinutesValidation?.ok ? refreshEveryMinutesValidation.minutes : undefined,
 			keepOnEmpty: this.keepOnEmpty,
 			confirmBeforeDelete: this.confirmBeforeDelete,
+			mappingMode: this.mappingMode === "js" ? "js" : undefined,
+			jsSource: this.mappingMode === "js" ? this.jsSource : undefined,
 		};
 		this.close();
 		this.onSave({ source, headers: this.headers.filter((h) => h.key.trim().length > 0) });
