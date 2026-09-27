@@ -14,6 +14,8 @@ import { GraduationController } from "./graduation";
 import { noticeIfLinksNotUpdated } from "./links-notice";
 import { registerTestHarness } from "./test-harness";
 import { DEFAULT_COLOR_PALETTE, StatusSet, StatusesManager } from "./statuses";
+import { ApiHeadersStore } from "./api-headers-store";
+import { ApiSourceController } from "./api-source-controller";
 
 interface AtlasData {
 	settings: AtlasSettings;
@@ -39,6 +41,10 @@ export default class AtlasPlugin extends Plugin {
 	unitIndex: UnitIndex;
 	viewsManager: ViewsManager;
 	statusesManager: StatusesManager;
+	/** G13: device-local (never-synced) storage for API data-source request headers. */
+	apiHeadersStore: ApiHeadersStore;
+	/** G1/G6/G11: the fetch → map → merge → persist pipeline for API-backed Folders. */
+	apiSourceController: ApiSourceController;
 	/** Public so the explorer (F8/F11) can reuse it instead of re-reading free-block files on every render. */
 	freeBlockTextCache: FreeBlockTextCache;
 	private linkSuggest: AtlasLinkSuggest;
@@ -78,6 +84,8 @@ export default class AtlasPlugin extends Plugin {
 			},
 			openDialog: (options) => openNameDialog(this.app, options),
 		});
+				this.apiHeadersStore = new ApiHeadersStore(this.app);
+		this.apiSourceController = new ApiSourceController();
 		this.addSettingTab(new AtlasSettingTab(this.app, this));
 
 		this.linkSuggest = new AtlasLinkSuggest(this);
