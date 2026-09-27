@@ -1,4 +1,4 @@
-import { App, Modal, Notice, Platform, Setting } from "obsidian";
+import { App, ButtonComponent, Modal, Notice, Platform, Setting } from "obsidian";
 import { canSaveApiSource, findArrayFields, sampleFieldsForArrayField } from "./api-mapping";
 import { httpGetJson } from "./api-http";
 import { obsidianRequestImpl } from "./api-request-obsidian";
@@ -40,7 +40,11 @@ export class ApiSourceModal extends Modal {
 	private sampleFields: string[] = [];
 	private arrayFieldCandidates: string[] = [];
 	private lastResponse: unknown = null;
-	private saveButton: HTMLButtonElement | null = null;
+	/** T1: must be the `ButtonComponent` itself, not just its `buttonEl` — Obsidian's click handler
+	 * gates on the component's own internal `disabled` field, not the DOM element's `disabled`
+	 * attribute, so re-syncing only the latter (as this used to) left the button unclickable forever
+	 * after any full `render()` recreated it in a disabled state. */
+	private saveButton: ButtonComponent | null = null;
 
 	constructor(app: App, initial: ApiSourceConfig | null, initialHeaders: ApiHeader[], private onSave: (result: ApiSourceModalResult) => void) {
 		super(app);
@@ -226,7 +230,7 @@ export class ApiSourceModal extends Modal {
 		const footer = new Setting(contentEl);
 		footer.addButton((btn) => btn.setButtonText("Cancel").onClick(() => this.close()));
 		footer.addButton((btn) => {
-			this.saveButton = btn.buttonEl;
+			this.saveButton = btn;
 			btn
 				.setCta()
 				.setButtonText("Save")
@@ -243,7 +247,7 @@ export class ApiSourceModal extends Modal {
 	}
 
 	private updateSaveButton(): void {
-		if (this.saveButton) this.saveButton.disabled = !this.canSave();
+		this.saveButton?.setDisabled(!this.canSave());
 	}
 
 	/** R2: was deriving `sampleFields` from the *top-level* response's own keys (`Object.keys`) no
