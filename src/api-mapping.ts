@@ -29,7 +29,7 @@ export interface MapResult {
 	truncated: boolean;
 }
 
-function toStringField(obj: Record<string, unknown>, field: string): string {
+export function toStringField(obj: Record<string, unknown>, field: string): string {
 	const value = obj[field];
 	return value === undefined || value === null ? "" : String(value);
 }

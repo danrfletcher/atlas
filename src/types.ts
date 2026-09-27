@@ -182,6 +182,14 @@ export interface ApiSourceConfig {
 	 * asks for confirmation first (`ApiSourceController`'s confirm-delete flow) instead of deleting
 	 * outright. */
 	confirmBeforeDelete?: boolean;
+	/** PR-4 (G3): "drag" (default, absent) maps via `mapping` exactly as PR-2/PR-3; "js" replaces the
+	 * mapping step with `jsSource` instead. `mapping` is kept as-is while in "js" mode (never cleared),
+	 * so switching back to drag restores whatever drag mapping was last set. */
+	mappingMode?: "drag" | "js";
+	/** PR-4 (G3): the JS mapper's full source, `(response) => [{id, label, secondary, extra}]` — only
+	 * meaningful while `mappingMode` is "js". Not a secret (covered by the modal's own warning instead);
+	 * stored in synced `data.json` like the rest of `source`, unlike headers (`ApiHeadersStore`). */
+	jsSource?: string;
 }
 
 /** A row exactly as mapped from a response — this is all the cache ever holds, never the raw
@@ -190,6 +198,10 @@ export interface ApiMappedRow {
 	id: string;
 	label: string;
 	secondary?: string;
+	/** PR-4/PR-5: extra named fields alongside id/label/secondary — populated by JS mode now; a
+	 * drag-mapping equivalent is PR-5's job. Carried through the cache unchanged for PR-5's click
+	 * action to read once it exists. */
+	extra?: Record<string, unknown>;
 }
 
 export interface ApiCache {
