@@ -1,5 +1,6 @@
 import { App } from "obsidian";
 import type { UnitIndex } from "./unit-index";
+import { clampRefreshMinutes } from "./api-refresh-timer";
 import { ApiFieldMapping, ApiItemState, ApiSourceConfig, DEFAULT_VIEW_NAME, StatusGovernance, Unit, UnitRef, View, ViewNode, createEmptyView, rewriteRefPath, unitRefsEqual, unitToRef } from "./types";
 
 function generateNodeId(): string {
@@ -48,8 +49,11 @@ function sanitizeApiItemState(raw: unknown, key: string): ApiItemState | null {
  * `mergeApiItems`'s own iteration over the same, and `mapResponseRows` reading `mapping.arrayField` off
  * `undefined`. Called once, here, on load — so every other API-source code path can assume these
  * fields are always well-shaped afterwards instead of re-guarding at every use site. An `apiSource`
- * missing a usable `mapping` is dropped entirely (along with its cache/state, same as `setApiSource`
- * clearing a source does) rather than guessed at — there's no safe default id/label field to invent. */
+ * missing a usable `mapping` is dropped entirely (rather than guessed at — there's no safe default id/
+ * label field to invent), but PR-3's G4 means that no longer implies wiping `apiItemState`/
+ * `apiItemOrder` too: a Folder can legitimately have rows with no source at all (source removed, or a
+ * `data.json` that dropped just the `apiSource` object by hand), and those rows are sanitized on their
+ * own merits below, independent of whether `apiSource` survived. */
 function sanitizeApiFields(node: ViewNode): void {
 	if (node.apiSource) {
 		const raw = node.apiSource as Partial<ApiSourceConfig> & { mapping?: Partial<ApiFieldMapping> };
@@ -58,6 +62,13 @@ function sanitizeApiFields(node: ViewNode): void {
 		if (typeof raw.url !== "string" || !validMapping) {
 			node.apiSource = undefined;
 		} else {
+			// G5b: an out-of-range `refreshEveryMinutes` reaching here some other way (hand-edited
+			// `data.json`) is clamped up rather than rejected outright; a toggle left on with no usable
+			// number at all is forced off instead of inventing one (there is deliberately no fixed
+			// default value for this field).
+			const rawMinutes = raw.refreshEveryMinutes;
+			const validMinutes = typeof rawMinutes === "number" && Number.isFinite(rawMinutes) && rawMinutes > 0;
+			const refreshEveryMinutes = validMinutes ? clampRefreshMinutes(rawMinutes) : undefined;
 			node.apiSource = {
 				url: raw.url,
 				method: "GET",
@@ -67,13 +78,21 @@ function sanitizeApiFields(node: ViewNode): void {
 					secondaryField: typeof mapping.secondaryField === "string" ? mapping.secondaryField : undefined,
 					arrayField: typeof mapping.arrayField === "string" ? mapping.arrayField : undefined,
 				},
-				mode: raw.mode === "append" ? "append" : "merge",
+				mode: raw.mode === "append" ? "append" : raw.mode === "overwrite" ? "overwrite" : "merge",
 				refreshOnViewLoad: !!raw.refreshOnViewLoad,
+				refreshEveryMinutesEnabled: !!raw.refreshEveryMinutesEnabled && refreshEveryMinutes !== undefined,
+				refreshEveryMinutes,
+				keepOnEmpty: typeof raw.keepOnEmpty === "boolean" ? raw.keepOnEmpty : undefined,
+				confirmBeforeDelete: typeof raw.confirmBeforeDelete === "boolean" ? raw.confirmBeforeDelete : undefined,
 			};
 		}
 	}
 
-	if (node.apiSource) {
+	// G4: rows survive a source's removal as plain static rows — sanitize `apiItemState`/`apiItemOrder`
+	// whenever either is actually present (or a source exists to have produced them), rather than only
+	// when `apiSource` currently exists.
+	const hasApiState = !!node.apiSource || node.apiItemState !== undefined || node.apiItemOrder !== undefined;
+	if (hasApiState) {
 		if (!node.apiItemState || typeof node.apiItemState !== "object" || Array.isArray(node.apiItemState)) {
 			node.apiItemState = {};
 		} else {
@@ -89,11 +108,19 @@ function sanitizeApiFields(node: ViewNode): void {
 		} else {
 			node.apiItemOrder = node.apiItemOrder.filter((id) => typeof id === "string" && Object.prototype.hasOwnProperty.call(node.apiItemState, id));
 		}
-		if (!node.apiCache || typeof node.apiCache !== "object") node.apiCache = undefined;
 	} else {
-		node.apiCache = undefined;
 		node.apiItemState = undefined;
 		node.apiItemOrder = undefined;
+	}
+
+	// Cache and the awaiting-confirmation flag are meaningless without a live source — G4's static rows
+	// never show a dot at all (that's `explorer-view.ts`'s job, gated on `apiSource`, not this).
+	if (node.apiSource) {
+		if (!node.apiCache || typeof node.apiCache !== "object") node.apiCache = undefined;
+		if (typeof node.apiAwaitingConfirmation !== "boolean") node.apiAwaitingConfirmation = undefined;
+	} else {
+		node.apiCache = undefined;
+		node.apiAwaitingConfirmation = undefined;
 	}
 
 	for (const child of node.children) sanitizeApiFields(child);
@@ -104,6 +131,24 @@ function sanitizeViewsApiFields(views: View[]): void {
 	for (const view of views) {
 		for (const node of view.root) sanitizeApiFields(node);
 	}
+}
+
+/** G7: a deep copy of a source config — `duplicateNode`'s clone must never share `mapping` (or any
+ * later-added nested object) by reference with the original, or editing one's field mapping would
+ * silently edit the other's too. */
+function cloneApiSource(source: ApiSourceConfig): ApiSourceConfig {
+	return { ...source, mapping: { ...source.mapping } };
+}
+
+/** G7 (extended to G4's static rows): a deep copy of a Folder's per-id row state — `noteRef` is itself
+ * an object, so a shallow copy of the map would still leave both copies' rows pointing at (and able to
+ * mutate) the very same `UnitRef`. */
+function cloneApiItemState(state: Record<string, ApiItemState>): Record<string, ApiItemState> {
+	const out: Record<string, ApiItemState> = {};
+	for (const [id, item] of Object.entries(state)) {
+		out[id] = { ...item, noteRef: item.noteRef ? { ...item.noteRef } : item.noteRef };
+	}
+	return out;
 }
 
 export interface MetaTarget {
@@ -392,15 +437,35 @@ export class ViewsManager {
 	 * object reference as the original. Every write site (`modals.ts`, `updateStatusGovernance`)
 	 * happens to replace that reference wholesale rather than mutating in place, so this wouldn't
 	 * currently cause a visible bug either way — but a clone silently entangled with its original is
-	 * a landmine for the next person to touch this, so copy them explicitly rather than lean on that. */
+	 * a landmine for the next person to touch this, so copy them explicitly rather than lean on that.
+	 *
+	 * G7: the same shallow-spread hazard applies to a Folder's API fields, and here it *was* live —
+	 * `apiSource`/`apiItemState`/`apiItemOrder` would otherwise be the very same objects on both nodes,
+	 * so editing one's mapping or an item's status would silently edit the other's too. A duplicate's
+	 * source is deep-copied; its cache and rows are never carried over at all (G7: "copy starts with
+	 * grey dot, no rows until first refresh") — a node with leftover static rows but no source (G4) still
+	 * gets its own independent copy of those, for the same reference-sharing reason. */
 	private cloneNode(node: ViewNode): ViewNode {
-		return {
+		const clone: ViewNode = {
 			...node,
 			id: generateNodeId(),
 			applyTo: node.applyTo ? { ...node.applyTo } : node.applyTo,
 			truncatedStatuses: node.truncatedStatuses ? { ...node.truncatedStatuses } : node.truncatedStatuses,
 			children: node.children.map((child) => this.cloneNode(child)),
 		};
+
+		if (node.apiSource) {
+			clone.apiSource = cloneApiSource(node.apiSource);
+			clone.apiItemState = {};
+			clone.apiItemOrder = [];
+		} else if (node.apiItemState) {
+			clone.apiItemState = cloneApiItemState(node.apiItemState);
+			clone.apiItemOrder = node.apiItemOrder ? [...node.apiItemOrder] : [];
+		}
+		clone.apiCache = undefined;
+		clone.apiAwaitingConfirmation = undefined;
+
+		return clone;
 	}
 
 	private isSameOrDescendant(node: ViewNode, targetId: string): boolean {
@@ -521,6 +586,7 @@ export class ViewsManager {
 		this.save();
 	}
 
+<<<<<<< HEAD
 	/** Create Module on a root file: every node (every view, every duplicate) referencing the file
 	 * becomes a module node, keeping id, position, fold state, status settings and children. Also
 	 * matches `<folder>/<folder>.md`, so it gives the same result before or after the rename hook.
@@ -559,10 +625,12 @@ export class ViewsManager {
 		return true;
 	}
 
-	/** G1/E6: sets (or clears, passing `undefined`) a Folder's API data source. Clearing also drops
-	 * its cache/item state — those have no meaning detached from a configured source. The device-local
-	 * headers entry is a separate store the caller owns (see `ApiHeadersStore`); this method only ever
-	 * touches the synced view data. */
+	/** G1/G4/E6: sets a Folder's API data source, or removes it (passing `undefined` — "Remove data
+	 * source", G4). Removing drops the cache and the awaiting-confirmation flag (meaningless without a
+	 * live source, and it stops refreshing entirely — no more dot at all) but deliberately keeps
+	 * `apiItemState`/`apiItemOrder` untouched: the rows themselves, with whatever status/notes they
+	 * already had, survive as plain static rows. The device-local headers entry is a separate store the
+	 * caller owns (see `ApiHeadersStore`); this method only ever touches the synced view data. */
 	setApiSource(viewId: string, nodeId: string, source: ApiSourceConfig | undefined): void {
 		const view = this.getView(viewId);
 		const found = view && this.findNode(view.root, nodeId);
@@ -570,8 +638,7 @@ export class ViewsManager {
 		found.node.apiSource = source;
 		if (!source) {
 			found.node.apiCache = undefined;
-			found.node.apiItemState = undefined;
-			found.node.apiItemOrder = undefined;
+			found.node.apiAwaitingConfirmation = undefined;
 		}
 		this.save();
 	}
