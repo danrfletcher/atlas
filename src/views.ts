@@ -59,7 +59,15 @@ function sanitizeApiFields(node: ViewNode): void {
 		const raw = node.apiSource as Partial<ApiSourceConfig> & { mapping?: Partial<ApiFieldMapping> };
 		const mapping = raw.mapping;
 		const validMapping = !!mapping && typeof mapping.idField === "string" && typeof mapping.labelField === "string";
-		if (typeof raw.url !== "string" || !validMapping) {
+		// PR-4/G3: in "js" mode the mapping step is replaced by `jsSource` — a JS-mode source is valid
+		// on a usable `jsSource` string, not a usable drag `mapping` (which may never have been touched
+		// at all for a source built entirely in JS mode). `mapping` is still sanitized/kept either way
+		// (defaulted to empty fields if absent) so a later switch back to drag has something to show,
+		// matching "mapping is retained unchanged while in js mode."
+		const isJsMode = raw.mappingMode === "js";
+		const validJsSource = typeof raw.jsSource === "string";
+		const mappingOrJsValid = isJsMode ? validJsSource : validMapping;
+		if (typeof raw.url !== "string" || !mappingOrJsValid) {
 			node.apiSource = undefined;
 		} else {
 			// G5b/R6: any out-of-range `refreshEveryMinutes` reaching here some other way (hand-edited
@@ -76,10 +84,10 @@ function sanitizeApiFields(node: ViewNode): void {
 				url: raw.url,
 				method: "GET",
 				mapping: {
-					idField: mapping.idField as string,
-					labelField: mapping.labelField as string,
-					secondaryField: typeof mapping.secondaryField === "string" ? mapping.secondaryField : undefined,
-					arrayField: typeof mapping.arrayField === "string" ? mapping.arrayField : undefined,
+					idField: typeof mapping?.idField === "string" ? mapping.idField : "",
+					labelField: typeof mapping?.labelField === "string" ? mapping.labelField : "",
+					secondaryField: typeof mapping?.secondaryField === "string" ? mapping.secondaryField : undefined,
+					arrayField: typeof mapping?.arrayField === "string" ? mapping.arrayField : undefined,
 				},
 				mode: raw.mode === "append" ? "append" : raw.mode === "overwrite" ? "overwrite" : "merge",
 				refreshOnViewLoad: !!raw.refreshOnViewLoad,
@@ -87,6 +95,8 @@ function sanitizeApiFields(node: ViewNode): void {
 				refreshEveryMinutes,
 				keepOnEmpty: typeof raw.keepOnEmpty === "boolean" ? raw.keepOnEmpty : undefined,
 				confirmBeforeDelete: typeof raw.confirmBeforeDelete === "boolean" ? raw.confirmBeforeDelete : undefined,
+				mappingMode: isJsMode ? "js" : undefined,
+				jsSource: typeof raw.jsSource === "string" ? raw.jsSource : undefined,
 			};
 		}
 	}

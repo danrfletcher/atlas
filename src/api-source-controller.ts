@@ -1,4 +1,5 @@
 import { isMapError, mapResponseRows } from "./api-mapping";
+import { runJsMapping } from "./api-js-mapping";
 import { planApiRefresh } from "./api-refresh-plan";
 import { httpGetJson, HTTP_TIMEOUT_MS, RequestFn, ScheduleTimeout } from "./api-http";
 import { ApiCache, ApiHeader, ApiSourceConfig, ViewNode } from "./types";
@@ -172,7 +173,14 @@ export class ApiSourceController {
 				return;
 			}
 
-			const mapped = mapResponseRows(result.json, source.mapping);
+			// PR-4/G3: JS mode replaces the mapping step only — everything above (fetch) and below
+			// (plan/merge/persist) is identical for both modes. `runJsMapping` awaits a Promise-
+			// returning function, a genuine async gap unlike `mapResponseRows`'s synchronous mapping, so
+			// `sourceChanged()` is re-checked once more right after it, same as after the fetch.
+			const mapped = source.mappingMode === "js" ? await runJsMapping(source.jsSource ?? "", result.json) : mapResponseRows(result.json, source.mapping);
+
+			if (sourceChanged()) return;
+
 			if (isMapError(mapped)) {
 				node.apiCache = emptyCache(node.apiCache, now(), mapped.error);
 				persist();
