@@ -368,22 +368,28 @@
 	border-radius: 3px;
 }
 
-/* T2/R21: the label must never fully vanish under flex shrink pressure, but it also must not
+/* T2/R21/R22: the label must never fully vanish under flex shrink pressure, but it also must not
  * grow to fill the row — this class is shared by every row kind (bucket, inbox, Folder, API,
  * truncation, Module Contents), and a positive flex-grow here pushes every trailing badge/suffix
  * (promoted badge, "in <file>", "(missing)", API secondary/last-seen text, the Folder's own
- * connection dot) to the row's right edge instead of sitting just after the label. `.atlas-row-secondary`
- * (there can be two on an API "not found" row — the normal secondary-value span plus the
- * not-found/last-seen span) has no `overflow` set, so its automatic min-width equals its
- * content's min-content width. `.atlas-row-text` had none either, but `overflow: hidden` alone
- * already zeroes its automatic min-width per the flexbox spec, so it was the only child squeezed
- * to 0 when the row ran out of room. Give the label a shrink floor (`flex: 0 1 auto` plus a real
- * `min-width`) without letting it grow, and cap/shrink the secondary spans instead so both share
- * the squeeze. */
+ * connection dot) to the row's right edge instead of sitting just after the label.
+ * R22: a fixed-length `min-width` here clamps the box *upward* too, so any label shorter than the
+ * floor (CLI rows like "go"/"jq"/"gh", a Folder named "AI") gets padded with blank space and its
+ * trailing text/dot is pushed away from it on every row kind, not just the one row that needed
+ * protecting. Keep this shared rule at `min-width: 0` and give the API "not found" row (the only
+ * row with two `.atlas-row-secondary` spans, see below) its own scoped floor instead. */
 .atlas-row-text {
 	overflow: hidden;
 	text-overflow: ellipsis;
 	flex: 0 1 auto;
+	min-width: 0;
+}
+
+/* T2/R22: only an API row's "not found" state renders a second `.atlas-row-secondary` span (the
+ * normal secondary-value span plus the not-found/last-seen span), which is what let the label
+ * shrink to 0 in the first place. Give the label a floor scoped to that exact row shape, so short
+ * labels elsewhere (CLI tool names, Folder names) don't get a padded box they don't need. */
+.atlas-row-api-item.atlas-not-found .atlas-row-text {
 	min-width: 3em;
 }
 
@@ -396,6 +402,14 @@
 	flex: 0 1 auto;
 	min-width: 0;
 	max-width: 40%;
+}
+
+/* T2/R22: the second secondary span only appears on a "not found" row alongside the first — cap
+ * it more tightly and let it shrink faster than the first, so the two secondaries share the
+ * squeeze instead of both hogging space at the label's expense. */
+.atlas-row-secondary ~ .atlas-row-secondary {
+	flex-shrink: 3;
+	max-width: 30%;
 }
 
 /* T1/T3 (G11): connection dot for an API-backed Folder — green ok / grey never-refreshed /

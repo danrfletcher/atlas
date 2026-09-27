@@ -25,8 +25,13 @@ describe("styles.css — API row rendering (T1/T2/T3)", () => {
 		}
 	});
 
-	it("T2: gives the row label a shrink floor so it can't be squeezed to zero width", () => {
+	it("R22: the shared row-text rule has no fixed-length min-width floor, so short labels on any row kind don't get padded with blank space", () => {
 		const text = ruleBody(".atlas-row-text");
+		expect(text).toMatch(/min-width\s*:\s*0\b/);
+	});
+
+	it("T2: gives the not-found API row's label a shrink floor so it can't be squeezed to zero width, scoped to that row shape only", () => {
+		const text = ruleBody(".atlas-row-api-item.atlas-not-found .atlas-row-text");
 		expect(text).toMatch(/min-width\s*:\s*(?!0\b)/);
 	});
 
