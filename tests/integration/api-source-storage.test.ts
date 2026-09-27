@@ -19,7 +19,17 @@ class FakeLocalStorageHost {
 const SECRET = "Bearer super-secret-token-xyz";
 
 function makeSource(url = "https://api.example.com/items"): ApiSourceConfig {
-	return { url, method: "GET", mapping: { idField: "id", labelField: "name" }, mode: "merge", refreshOnViewLoad: false };
+	return {
+		url,
+		method: "GET",
+		mapping: { idField: "id", labelField: "name" },
+		mode: "merge",
+		refreshOnViewLoad: false,
+		refreshEveryMinutesEnabled: false,
+		refreshEveryMinutes: undefined,
+		keepOnEmpty: undefined,
+		confirmBeforeDelete: undefined,
+	};
 }
 
 describe("ApiHeadersStore — G13: device-local only, keyed per Folder", () => {
@@ -244,7 +254,7 @@ describe("R17/E9 — corrupt or missing apiSource/apiCache/apiItemState/apiItemO
 		expect(sanitized.apiItemOrder).toEqual([]);
 	});
 
-	it("an apiSource with no mapping is dropped entirely, along with its cache/state, rather than crashing mapResponseRows later", () => {
+	it("an apiSource with no mapping is dropped entirely, along with its cache — but PR-3's G4 means its rows survive as static rows, not wiped", () => {
 		const node = nodeWithApiSource({
 			apiSource: { url: "https://api.example.com" } as unknown as ApiSourceConfig,
 			apiCache: { fetchedAt: 1, ok: true, error: null, rows: [], skippedCount: 0, truncated: false },
@@ -254,8 +264,8 @@ describe("R17/E9 — corrupt or missing apiSource/apiCache/apiItemState/apiItemO
 		const sanitized = loadedNode(node);
 		expect(sanitized.apiSource).toBeUndefined();
 		expect(sanitized.apiCache).toBeUndefined();
-		expect(sanitized.apiItemState).toBeUndefined();
-		expect(sanitized.apiItemOrder).toBeUndefined();
+		expect(sanitized.apiItemState).toEqual({ "1": { id: "1", label: "One" } });
+		expect(sanitized.apiItemOrder).toEqual(["1"]);
 	});
 
 	it("an apiSource that isn't even an object is dropped, not thrown on", () => {
@@ -264,7 +274,7 @@ describe("R17/E9 — corrupt or missing apiSource/apiCache/apiItemState/apiItemO
 		expect(sanitized.apiSource).toBeUndefined();
 	});
 
-	it("a node with no apiSource at all has its stray apiCache/apiItemState/apiItemOrder cleared too", () => {
+	it("a node with no apiSource at all still has its stray apiCache cleared, but PR-3's G4 means leftover apiItemState/apiItemOrder survive as static rows", () => {
 		const node: ViewNode = {
 			id: "n1",
 			type: "meta",
@@ -275,8 +285,8 @@ describe("R17/E9 — corrupt or missing apiSource/apiCache/apiItemState/apiItemO
 		};
 		const sanitized = loadedNode(node);
 		expect(sanitized.apiCache).toBeUndefined();
-		expect(sanitized.apiItemState).toBeUndefined();
-		expect(sanitized.apiItemOrder).toBeUndefined();
+		expect(sanitized.apiItemState).toEqual({ "1": { id: "1", label: "One" } });
+		expect(sanitized.apiItemOrder).toEqual(["1"]);
 	});
 
 	it("sanitizing recurses into nested meta-folder children", () => {
