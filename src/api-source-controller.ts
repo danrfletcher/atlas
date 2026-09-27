@@ -130,14 +130,30 @@ export class ApiSourceController {
 	private async doRefresh(node: ViewNode, source: ApiSourceConfig, headers: ApiHeader[], persist: () => void, deps: RefreshDeps): Promise<void> {
 		const now = deps.now ?? (() => Date.now());
 		const trigger = deps.trigger ?? "manual";
-		// R5: `node` is a live reference into the view tree, so another call (Remove data source, a
+		// R5/R8: `node` is a live reference into the view tree, so another call (Remove data source, a
 		// later save, Delete folder) can mutate `node.apiSource` out from under this refresh while it's
-		// awaiting the fetch or a confirm-delete answer. Captured once, up front, and re-checked after
-		// every await below — a refresh that started against a source no longer in place must never
-		// write its cache/rows/itemState back onto the node, or "Remove data source" (G4: rows survive
-		// as static, source+cache dropped) could be silently undone by a refresh that was already in
-		// flight when it ran.
+		// awaiting the fetch or a confirm-delete answer. Re-checked after every await below — a refresh
+		// that started against a source no longer in place must never write its cache/rows/itemState
+		// back onto the node, or "Remove data source" (G4: rows survive as static, source+cache dropped)
+		// could be silently undone by a refresh that was already in flight when it ran.
+		//
+		// R8: a *different reference* is not necessarily a *changed* source. Saving the Data source
+		// modal without changing anything still calls `setApiSource` with a brand-new object
+		// (src/views.ts), so `node.apiSource` becomes a different reference even though nothing
+		// changed. `ApiSourceController.refresh` already merges that unchanged-config Save into this
+		// same in-flight promise (matching `sourceKey`, which also covers headers, for the purpose of
+		// deduping requests) rather than starting a second request — so if this bail were purely
+		// identity-based, the one run everybody is waiting on would quietly no-op, dropping the fetch
+		// result or a just-confirmed delete with nothing to replace it. Only fall back to a content
+		// comparison (never involving headers — `node.apiSource` doesn't hold them) once the reference
+		// has actually moved; one side becoming/staying `undefined` while the other isn't is always a
+		// real change (the source was added or removed).
 		const startingApiSource = node.apiSource;
+		const sourceChanged = (): boolean => {
+			if (node.apiSource === startingApiSource) return false;
+			if (node.apiSource === undefined || startingApiSource === undefined) return true;
+			return JSON.stringify(node.apiSource) !== JSON.stringify(startingApiSource);
+		};
 		try {
 			const headerRecord: Record<string, string> = {};
 			for (const header of headers) if (header.key) headerRecord[header.key] = header.value;
@@ -148,7 +164,7 @@ export class ApiSourceController {
 				scheduleTimeout: deps.scheduleTimeout,
 			});
 
-			if (node.apiSource !== startingApiSource) return;
+			if (sourceChanged()) return;
 
 			if (!result.ok) {
 				node.apiCache = emptyCache(node.apiCache, now(), result.error.message);
@@ -207,7 +223,7 @@ export class ApiSourceController {
 
 			const answer: ConfirmDeleteAnswer = deps.confirmDelete ? await deps.confirmDelete(plan.deletedCount) : "dismissed";
 
-			if (node.apiSource !== startingApiSource) return;
+			if (sourceChanged()) return;
 
 			if (answer === "confirmed") {
 				node.apiItemState = plan.result.itemState;

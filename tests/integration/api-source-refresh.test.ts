@@ -394,6 +394,72 @@ describe("ApiSourceController — integration against a real HTTP server", () =>
 			"3": { id: "3", label: "Three" },
 		});
 	});
+
+	it("R8: saving the Data source modal with no actual change while a delete confirmation is pending must not drop the pending refresh", async () => {
+		const node = makeNode("n20");
+		node.apiSource = baseSource(`${base}/ok`, { mode: "overwrite", confirmBeforeDelete: true });
+		node.apiItemState = { "1": { id: "1", label: "One" }, "2": { id: "2", label: "Two" }, "3": { id: "3", label: "Three" } };
+		node.apiItemOrder = ["1", "2", "3"];
+		const controller = new ApiSourceController();
+		let resolveConfirm: ((answer: ConfirmDeleteAnswer) => void) | null = null;
+		let confirmCalls = 0;
+		const confirmDelete = (): Promise<ConfirmDeleteAnswer> => {
+			confirmCalls++;
+			return new Promise((resolve) => {
+				resolveConfirm = resolve;
+			});
+		};
+
+		// `/ok` returns ids "1" and "2" only — "3" vanished, so this Overwrite refresh needs confirmation.
+		const run = controller.refresh(node, node.apiSource, [], () => {}, { requestImpl: nodeFetchRequestImpl, confirmDelete });
+		for (let i = 0; i < 100 && resolveConfirm === null; i++) {
+			await new Promise((resolve) => setTimeout(resolve, 5));
+		}
+		expect(resolveConfirm).not.toBeNull();
+
+		// The user opens the Data source modal and clicks Save without changing anything. Production
+		// (openApiSourceModal) always calls setApiSource with a brand-new object, even when the content
+		// is identical, and then re-invokes refresh with that new object as `node.apiSource`.
+		node.apiSource = baseSource(`${base}/ok`, { mode: "overwrite", confirmBeforeDelete: true });
+		const resave = controller.refresh(node, node.apiSource, [], () => {}, { requestImpl: nodeFetchRequestImpl, confirmDelete });
+		// Same (unchanged) config merges into the same in-flight promise rather than firing a second request.
+		expect(resave).toBe(run);
+
+		// The user then clicks "Delete rows" on the still-showing modal.
+		resolveConfirm?.("confirmed");
+		await Promise.all([run, resave]);
+
+		expect(confirmCalls).toBe(1);
+		expect(node.apiCache?.ok).toBe(true);
+		expect(Object.keys(node.apiItemState ?? {}).sort()).toEqual(["1", "2"]);
+		expect(node.apiItemState?.["1"]).toEqual(expect.objectContaining({ id: "1", label: "One" }));
+		expect(node.apiItemState?.["2"]).toEqual(expect.objectContaining({ id: "2", label: "Two" }));
+		expect(node.apiItemOrder).toEqual(["1", "2"]);
+	});
+
+	it("R8: saving the Data source modal with no actual change while a plain (non-confirm) fetch is in flight still applies the completed refresh", async () => {
+		const node = makeNode("n21");
+		node.apiSource = baseSource(`${base}/ok`);
+		const controller = new ApiSourceController();
+		let resolveRequest: ((result: { status: number; text: string }) => void) | null = null;
+		const deferredRequest: RequestFn = () =>
+			new Promise((resolve) => {
+				resolveRequest = resolve;
+			});
+
+		const run = controller.refresh(node, node.apiSource, [], () => {}, { requestImpl: deferredRequest });
+
+		// Unchanged Save: new object reference, identical content.
+		node.apiSource = baseSource(`${base}/ok`);
+		const resave = controller.refresh(node, node.apiSource, [], () => {}, { requestImpl: deferredRequest });
+		expect(resave).toBe(run);
+
+		resolveRequest?.({ status: 200, text: JSON.stringify([{ id: "1", name: "One" }, { id: "2", name: "Two" }]) });
+		await Promise.all([run, resave]);
+
+		expect(node.apiCache?.ok).toBe(true);
+		expect(node.apiCache?.rows).toEqual([{ id: "1", label: "One" }, { id: "2", label: "Two" }]);
+	});
 });
 
 describe("R17/E9 — doRefresh never rejects; any thrown error becomes a red-dot cache error", () => {
