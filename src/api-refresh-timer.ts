@@ -3,25 +3,33 @@
  * that reaches one some other way (hand-edited `data.json`) is clamped up here on load instead. */
 export const MIN_REFRESH_MINUTES = 5;
 
+/** R2: `RefreshEveryTimers.start` passes `minutes * 60 * 1000` straight to `setTimeout`, which takes a
+ * 32-bit signed integer of milliseconds — anything above `2^31 - 1` ms overflows and fires almost
+ * immediately instead of after the requested delay, and `fire()` re-arms itself with the same
+ * overflowing delay, so an Overwrite Folder with confirmation off would refresh (and delete) back to
+ * back forever. Floored to the largest whole-minute value that still fits. */
+export const MAX_REFRESH_MINUTES = Math.floor(2147483647 / 60000);
+
 export type RefreshMinutesValidation = { ok: true; minutes: number } | { ok: false; error: string };
 
 /** G5b: validates the modal's raw text-field input for "Refresh every [X] minutes". Blank, zero,
- * non-numeric and below-minimum values are all rejected with an inline message; only a whole number of
- * at least `MIN_REFRESH_MINUTES` is accepted. */
+ * non-numeric, below-minimum and above-maximum values are all rejected with an inline message; only a
+ * whole number between `MIN_REFRESH_MINUTES` and `MAX_REFRESH_MINUTES` is accepted. */
 export function validateRefreshMinutes(raw: string): RefreshMinutesValidation {
 	const trimmed = raw.trim();
 	if (!trimmed) return { ok: false, error: `Enter a number of minutes (minimum ${MIN_REFRESH_MINUTES}).` };
 	if (!/^\d+$/.test(trimmed)) return { ok: false, error: "Enter a whole number of minutes." };
 	const minutes = Number(trimmed);
 	if (minutes < MIN_REFRESH_MINUTES) return { ok: false, error: `Minimum is ${MIN_REFRESH_MINUTES} minutes.` };
+	if (minutes > MAX_REFRESH_MINUTES) return { ok: false, error: `Maximum is ${MAX_REFRESH_MINUTES} minutes.` };
 	return { ok: true, minutes };
 }
 
-/** Load-time safety net for a `refreshEveryMinutes` that reached storage below the minimum some other
- * way (hand-edited `data.json`) — clamped up rather than rejected outright, so the Folder keeps
- * refreshing instead of silently losing its timer. */
+/** Load-time safety net for a `refreshEveryMinutes` that reached storage outside the valid range some
+ * other way (hand-edited `data.json`) — clamped into range rather than rejected outright, so the Folder
+ * keeps refreshing (on a timer that can't overflow `setTimeout`) instead of silently losing its timer. */
 export function clampRefreshMinutes(minutes: number): number {
-	return Math.max(MIN_REFRESH_MINUTES, minutes);
+	return Math.min(MAX_REFRESH_MINUTES, Math.max(MIN_REFRESH_MINUTES, minutes));
 }
 
 export interface RefreshTimerDeps {

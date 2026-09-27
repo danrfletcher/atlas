@@ -62,12 +62,15 @@ function sanitizeApiFields(node: ViewNode): void {
 		if (typeof raw.url !== "string" || !validMapping) {
 			node.apiSource = undefined;
 		} else {
-			// G5b: an out-of-range `refreshEveryMinutes` reaching here some other way (hand-edited
-			// `data.json`) is clamped up rather than rejected outright; a toggle left on with no usable
-			// number at all is forced off instead of inventing one (there is deliberately no fixed
-			// default value for this field).
+			// G5b/R6: any out-of-range `refreshEveryMinutes` reaching here some other way (hand-edited
+			// `data.json`) is clamped into range rather than rejected outright — including zero and
+			// negative values, per the spec's "interval change to below 5 minutes ... is clamped to 5 at
+			// load" (clampRefreshMinutes floors at MIN_REFRESH_MINUTES regardless of how far below it the
+			// stored value is). A toggle left on with no usable number at all (missing, or not a finite
+			// number) is forced off instead of inventing one (there is deliberately no fixed default value
+			// for this field).
 			const rawMinutes = raw.refreshEveryMinutes;
-			const validMinutes = typeof rawMinutes === "number" && Number.isFinite(rawMinutes) && rawMinutes > 0;
+			const validMinutes = typeof rawMinutes === "number" && Number.isFinite(rawMinutes);
 			const refreshEveryMinutes = validMinutes ? clampRefreshMinutes(rawMinutes) : undefined;
 			node.apiSource = {
 				url: raw.url,

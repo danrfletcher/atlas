@@ -308,6 +308,42 @@ describe("R17/E9 — corrupt or missing apiSource/apiCache/apiItemState/apiItemO
 		expect(sanitized.apiItemOrder).toEqual(["1"]);
 		expect(sanitized.apiItemState).toEqual({ "1": { id: "1", label: "One" } });
 	});
+
+	it("R6: a hand-edited refreshEveryMinutes of zero is clamped to the minimum, not treated as invalid and switched off", () => {
+		const node = nodeWithApiSource({
+			apiSource: { ...makeSource(), refreshEveryMinutesEnabled: true, refreshEveryMinutes: 0 },
+		});
+		const sanitized = loadedNode(node);
+		expect(sanitized.apiSource!.refreshEveryMinutesEnabled).toBe(true);
+		expect(sanitized.apiSource!.refreshEveryMinutes).toBe(5);
+	});
+
+	it("R6: a hand-edited negative refreshEveryMinutes is clamped to the minimum, not treated as invalid and switched off", () => {
+		const node = nodeWithApiSource({
+			apiSource: { ...makeSource(), refreshEveryMinutesEnabled: true, refreshEveryMinutes: -30 },
+		});
+		const sanitized = loadedNode(node);
+		expect(sanitized.apiSource!.refreshEveryMinutesEnabled).toBe(true);
+		expect(sanitized.apiSource!.refreshEveryMinutes).toBe(5);
+	});
+
+	it("R6: a hand-edited refreshEveryMinutes above the setTimeout-overflow ceiling is clamped down, not left to overflow", () => {
+		const node = nodeWithApiSource({
+			apiSource: { ...makeSource(), refreshEveryMinutesEnabled: true, refreshEveryMinutes: 999999999 },
+		});
+		const sanitized = loadedNode(node);
+		expect(sanitized.apiSource!.refreshEveryMinutesEnabled).toBe(true);
+		expect(sanitized.apiSource!.refreshEveryMinutes).toBe(35791);
+	});
+
+	it("a toggle left on with a non-numeric refreshEveryMinutes is forced off, since there's no value to clamp", () => {
+		const node = nodeWithApiSource({
+			apiSource: { ...makeSource(), refreshEveryMinutesEnabled: true, refreshEveryMinutes: "not a number" as unknown as number },
+		});
+		const sanitized = loadedNode(node);
+		expect(sanitized.apiSource!.refreshEveryMinutesEnabled).toBe(false);
+		expect(sanitized.apiSource!.refreshEveryMinutes).toBeUndefined();
+	});
 });
 
 describe("R20/E9 — corrupt individual apiItemState entries never crash on load", () => {

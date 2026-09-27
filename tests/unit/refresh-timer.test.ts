@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { clampRefreshMinutes, MIN_REFRESH_MINUTES, RefreshEveryTimers, RefreshTimerDeps, RefreshTimerNode, validateRefreshMinutes } from "../../src/api-refresh-timer";
+import { clampRefreshMinutes, MAX_REFRESH_MINUTES, MIN_REFRESH_MINUTES, RefreshEveryTimers, RefreshTimerDeps, RefreshTimerNode, validateRefreshMinutes } from "../../src/api-refresh-timer";
 
 describe("validateRefreshMinutes — G5b inline validation", () => {
 	it("rejects blank input", () => {
@@ -46,6 +46,16 @@ describe("validateRefreshMinutes — G5b inline validation", () => {
 		const result = validateRefreshMinutes(` ${MIN_REFRESH_MINUTES + 10} `);
 		expect(result).toEqual({ ok: true, minutes: MIN_REFRESH_MINUTES + 10 });
 	});
+
+	it("R2: rejects a value above the maximum — anything higher would overflow setTimeout's 32-bit ms limit", () => {
+		const result = validateRefreshMinutes(String(MAX_REFRESH_MINUTES + 1));
+		expect(result.ok).toBe(false);
+	});
+
+	it("R2: accepts exactly the maximum", () => {
+		const result = validateRefreshMinutes(String(MAX_REFRESH_MINUTES));
+		expect(result).toEqual({ ok: true, minutes: MAX_REFRESH_MINUTES });
+	});
 });
 
 describe("clampRefreshMinutes — load-time safety net for a hand-edited data.json", () => {
@@ -59,6 +69,14 @@ describe("clampRefreshMinutes — load-time safety net for a hand-edited data.js
 
 	it("clamps zero up to the minimum", () => {
 		expect(clampRefreshMinutes(0)).toBe(MIN_REFRESH_MINUTES);
+	});
+
+	it("R2: clamps a value above the maximum down, rather than letting it overflow setTimeout's 32-bit ms limit", () => {
+		expect(clampRefreshMinutes(MAX_REFRESH_MINUTES + 100000)).toBe(MAX_REFRESH_MINUTES);
+	});
+
+	it("R2: leaves exactly the maximum untouched", () => {
+		expect(clampRefreshMinutes(MAX_REFRESH_MINUTES)).toBe(MAX_REFRESH_MINUTES);
 	});
 });
 
