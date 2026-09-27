@@ -318,6 +318,11 @@ export class AtlasExplorerView extends ItemView {
 	 * Alive only for as long as this Atlas leaf itself is open — `onClose()` stops every one of them. */
 	private refreshEveryTimers = new RefreshEveryTimers();
 	private unsubscribers: (() => void)[] = [];
+	/** R1: a `ConfirmDeleteRowsModal` opened from `refreshApiSource` belongs to the app, not this leaf —
+	 * Obsidian never closes it just because the leaf that opened it did. Tracked here so `onClose` can
+	 * close every still-open one itself, resolving it as "dismissed" (the edge case: "confirmation modal
+	 * dismissed by ... view close counts as unanswered on an automatic refresh"). */
+	private openConfirmDeleteModals: ConfirmDeleteRowsModal[] = [];
 	private renderQueued = false;
 	/** F11: rebuilt once per render from the flat unit list, so resolving a ref is O(1) instead of
 	 * an O(n) `find` per row — at thousands of units the naive scan-per-row was O(n^2) per render. */
@@ -389,6 +394,10 @@ export class AtlasExplorerView extends ItemView {
 	async onClose(): Promise<void> {
 		for (const unsub of this.unsubscribers) unsub();
 		this.refreshEveryTimers.stopAll();
+		// R1: closing each modal fires its own onClose, which reports "dismissed" and (via the callback
+		// wired in refreshApiSource) removes itself from this array — iterate a copy so that in-loop
+		// mutation of the live array never skips an entry.
+		for (const modal of [...this.openConfirmDeleteModals]) modal.close();
 	}
 
 	/** Collapses bursts of index/view change events (a drag can fire several) into one render. */
@@ -462,7 +471,15 @@ export class AtlasExplorerView extends ItemView {
 		void this.plugin.apiSourceController.refresh(node, node.apiSource, headers, () => this.plugin.viewsManager.notifyExternalMutation(), {
 			requestImpl: obsidianRequestImpl,
 			trigger,
-			confirmDelete: (count) => new Promise((resolve) => new ConfirmDeleteRowsModal(this.plugin.app, count, resolve).open()),
+			confirmDelete: (count) =>
+				new Promise((resolve) => {
+					const modal = new ConfirmDeleteRowsModal(this.plugin.app, count, (answer) => {
+						this.openConfirmDeleteModals = this.openConfirmDeleteModals.filter((m) => m !== modal);
+						resolve(answer);
+					});
+					this.openConfirmDeleteModals.push(modal);
+					modal.open();
+				}),
 		});
 	}
 
