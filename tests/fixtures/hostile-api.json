@@ -1,0 +1,47 @@
+[
+  {
+    "id": "evil-1",
+    "name": "Evil Semicolon",
+    "path": "; rm -rf ~; touch /tmp/pwn_semicolon"
+  },
+  {
+    "id": "evil-2",
+    "name": "Evil Subshell",
+    "path": "$(touch /tmp/pwn_subshell)"
+  },
+  {
+    "id": "evil-3",
+    "name": "Evil Backticks",
+    "path": "`touch /tmp/pwn_backticks`"
+  },
+  {
+    "id": "evil-4",
+    "name": "Evil Pipe",
+    "path": "| touch /tmp/pwn_pipe"
+  },
+  {
+    "id": "evil-5",
+    "name": "Evil And",
+    "path": "&& touch /tmp/pwn_and"
+  },
+  {
+    "id": "evil-6",
+    "name": "Evil Redirection",
+    "path": "> /tmp/pwn_redirect"
+  },
+  {
+    "id": "evil-7",
+    "name": "Evil Newline",
+    "path": "\ntouch /tmp/pwn_newline\n"
+  },
+  {
+    "id": "evil-8",
+    "name": "Evil Flag",
+    "path": "--all"
+  },
+  {
+    "id": "evil-9",
+    "name": "Evil Leading Dash",
+    "path": "-rf"
+  }
+]
