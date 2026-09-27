@@ -106,46 +106,58 @@ export class ApiSourceController {
 
 	private async doRefresh(node: ViewNode, source: ApiSourceConfig, headers: ApiHeader[], persist: () => void, deps: RefreshDeps): Promise<void> {
 		const now = deps.now ?? (() => Date.now());
-		const headerRecord: Record<string, string> = {};
-		for (const header of headers) if (header.key) headerRecord[header.key] = header.value;
+		try {
+			const headerRecord: Record<string, string> = {};
+			for (const header of headers) if (header.key) headerRecord[header.key] = header.value;
 
-		const result = await httpGetJson(source.url, headerRecord, {
-			requestImpl: deps.requestImpl,
-			timeoutMs: deps.timeoutMs ?? HTTP_TIMEOUT_MS,
-			scheduleTimeout: deps.scheduleTimeout,
-		});
+			const result = await httpGetJson(source.url, headerRecord, {
+				requestImpl: deps.requestImpl,
+				timeoutMs: deps.timeoutMs ?? HTTP_TIMEOUT_MS,
+				scheduleTimeout: deps.scheduleTimeout,
+			});
 
-		if (!result.ok) {
-			node.apiCache = emptyCache(node.apiCache, now(), result.error.message);
+			if (!result.ok) {
+				node.apiCache = emptyCache(node.apiCache, now(), result.error.message);
+				persist();
+				return;
+			}
+
+			const mapped = mapResponseRows(result.json, source.mapping);
+			if (isMapError(mapped)) {
+				node.apiCache = emptyCache(node.apiCache, now(), mapped.error);
+				persist();
+				return;
+			}
+
+			const fetchedAt = now();
+			const merged = mergeApiItems(node.apiItemState ?? {}, node.apiItemOrder ?? [], mapped.rows, source.mode, {
+				truncated: mapped.truncated,
+				nowIso: new Date(fetchedAt).toISOString(),
+			});
+
+			node.apiItemState = merged.itemState;
+			node.apiItemOrder = merged.order;
+			node.apiCache = {
+				fetchedAt,
+				ok: true,
+				error: null,
+				rows: mapped.rows,
+				skippedCount: mapped.skippedCount,
+				truncated: mapped.truncated,
+				lastSuccessAt: fetchedAt,
+			};
 			persist();
-			return;
-		}
-
-		const mapped = mapResponseRows(result.json, source.mapping);
-		if (isMapError(mapped)) {
-			node.apiCache = emptyCache(node.apiCache, now(), mapped.error);
+		} catch (err) {
+			// R17/E9: `ViewsManager` sanitizes `apiSource`/`apiItemOrder`/`apiItemState` on load, but this
+			// is the last line of defense against any other corrupt/unexpected shape reaching this
+			// pipeline — without it, a thrown error here (rather than a rejected `RequestResult`) would
+			// reject this whole promise. That would leave the dot in its stale previous state (never
+			// red, per the caller's `void` refresh call turning it into an unhandled rejection instead of
+			// a shown error), and — since `refresh()`'s R15 follow-up chains onto this promise with
+			// `.then` — would silently drop any queued follow-up refresh for a newer config too.
+			node.apiCache = emptyCache(node.apiCache, now(), err instanceof Error ? err.message : "Unexpected error");
 			persist();
-			return;
 		}
-
-		const fetchedAt = now();
-		const merged = mergeApiItems(node.apiItemState ?? {}, node.apiItemOrder ?? [], mapped.rows, source.mode, {
-			truncated: mapped.truncated,
-			nowIso: new Date(fetchedAt).toISOString(),
-		});
-
-		node.apiItemState = merged.itemState;
-		node.apiItemOrder = merged.order;
-		node.apiCache = {
-			fetchedAt,
-			ok: true,
-			error: null,
-			rows: mapped.rows,
-			skippedCount: mapped.skippedCount,
-			truncated: mapped.truncated,
-			lastSuccessAt: fetchedAt,
-		};
-		persist();
 	}
 }
 

@@ -329,6 +329,70 @@ describe("ApiSourceController — integration against a real HTTP server", () =>
 	});
 });
 
+describe("R17/E9 — doRefresh never rejects; any thrown error becomes a red-dot cache error", () => {
+	it("a source with no mapping (mapResponseRows would read undefined.arrayField) is caught, not thrown, and reported as a failed refresh", async () => {
+		const node = makeNode("n14");
+		const controller = new ApiSourceController();
+		const brokenSource = { url: `http://example.invalid/broken`, method: "GET", mode: "merge", refreshOnViewLoad: false } as unknown as ApiSourceConfig;
+		const okRequest: RequestFn = async () => ({ status: 200, text: JSON.stringify([{ id: "1", name: "One" }]) });
+
+		await expect(controller.refresh(node, brokenSource, [], () => {}, { requestImpl: okRequest })).resolves.toBeUndefined();
+		expect(node.apiCache?.ok).toBe(false);
+		expect(dotStateFor(node.apiCache)).toBe("red");
+	});
+
+	it("a corrupt apiItemOrder that reaches refresh (not an array) is caught by doRefresh instead of rejecting the whole promise", async () => {
+		const node = makeNode("n15");
+		node.apiItemOrder = {} as unknown as string[];
+		const controller = new ApiSourceController();
+		const okRequest: RequestFn = async () => ({ status: 200, text: JSON.stringify([{ id: "1", name: "One" }]) });
+
+		await expect(controller.refresh(node, baseSource("http://example.invalid/ok"), [], () => {}, { requestImpl: okRequest })).resolves.toBeUndefined();
+		expect(node.apiCache?.ok).toBe(false);
+		expect(dotStateFor(node.apiCache)).toBe("red");
+	});
+
+	it("a caught error still keeps the previous good cache's rows, same as an ordinary failed refresh (E1/R3)", async () => {
+		const node = makeNode("n16");
+		const controller = new ApiSourceController();
+		const okRequest: RequestFn = async () => ({ status: 200, text: JSON.stringify([{ id: "1", name: "One" }]) });
+		await controller.refresh(node, baseSource("http://example.invalid/ok"), [], () => {}, { requestImpl: okRequest, now: () => 1000 });
+		expect(node.apiCache?.rows).toHaveLength(1);
+
+		const brokenSource = { url: `http://example.invalid/broken`, method: "GET", mode: "merge", refreshOnViewLoad: false } as unknown as ApiSourceConfig;
+		await controller.refresh(node, brokenSource, [], () => {}, { requestImpl: okRequest, now: () => 2000 });
+		expect(node.apiCache?.ok).toBe(false);
+		expect(node.apiCache?.rows).toHaveLength(1);
+		expect(node.apiCache?.lastSuccessAt).toBe(1000);
+	});
+
+	it("a queued R15 follow-up refresh still runs after the in-flight refresh throws, instead of being silently dropped", async () => {
+		const node = makeNode("n17");
+		const controller = new ApiSourceController();
+		let resolveFirst: ((result: { status: number; text: string }) => void) | null = null;
+		const firstRequest: RequestFn = () =>
+			new Promise((resolve) => {
+				resolveFirst = resolve;
+			});
+		let secondCalls = 0;
+		const secondRequest: RequestFn = async () => {
+			secondCalls++;
+			return { status: 200, text: JSON.stringify([{ id: "new", name: "New" }]) };
+		};
+		const brokenSource = { url: "http://example.invalid/broken", method: "GET", mode: "merge", refreshOnViewLoad: false } as unknown as ApiSourceConfig;
+		const newSource = baseSource("http://example.invalid/new");
+
+		const first = controller.refresh(node, brokenSource, [], () => {}, { requestImpl: firstRequest });
+		const second = controller.refresh(node, newSource, [], () => {}, { requestImpl: secondRequest });
+
+		resolveFirst?.({ status: 200, text: JSON.stringify([{ id: "1", name: "One" }]) });
+		await Promise.all([first, second]);
+
+		expect(secondCalls).toBe(1);
+		expect(node.apiCache?.rows).toEqual([{ id: "new", label: "New" }]);
+	});
+});
+
 describe("ViewLoadTrigger — G5a: fires once per open, not on every re-render", () => {
 	it("activate() returns true only on the transition into active", () => {
 		const trigger = new ViewLoadTrigger();
