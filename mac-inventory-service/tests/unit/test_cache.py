@@ -121,6 +121,31 @@ class CacheSchedulingTests(unittest.TestCase):
         cache.stop()
         self.assertGreaterEqual(len(calls), 2)
 
+    def test_a_hung_endpoint_does_not_block_another_endpoints_refresh(self):
+        # R8: each endpoint refreshes on its own thread, so a scan stuck on a hung
+        # brew/mas call can't delay another endpoint's background refresh.
+        block = threading.Event()
+        fast_calls = []
+
+        def hung_scan():
+            block.wait(5)
+            return []
+
+        def fast_scan():
+            fast_calls.append(1)
+            return []
+
+        cache = Cache({"slow": hung_scan, "fast": fast_scan}, interval=0.05)
+        cache.start()
+        try:
+            time.sleep(0.3)
+            self.assertGreaterEqual(len(fast_calls), 2)
+            self.assertTrue(cache.get("fast").ok)
+            self.assertIsNone(cache.get("slow").fetched_at)  # still stuck on its first scan
+        finally:
+            block.set()
+            cache.stop()
+
 
 if __name__ == "__main__":
     unittest.main()

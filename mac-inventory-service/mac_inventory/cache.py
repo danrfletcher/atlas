@@ -53,14 +53,19 @@ class EndpointCache:
 
 
 class Cache:
-    """Owns one EndpointCache per named endpoint and an optional background refresher."""
+    """Owns one EndpointCache per named endpoint and an optional background refresher.
+
+    Each endpoint refreshes on its own thread (R8): a hung or slow brew/mas call on
+    one endpoint must not delay another endpoint's refresh, since each can take up
+    to COMMAND_TIMEOUT_SECONDS per shell-out and /cli makes several of those calls.
+    """
 
     def __init__(self, scanners: Dict[str, Callable[[], List[dict]]], interval: float):
         self._scanners = scanners
         self._interval = interval
         self._endpoints = {name: EndpointCache() for name in scanners}
         self._stop = threading.Event()
-        self._thread: Optional[threading.Thread] = None
+        self._threads: List[threading.Thread] = []
 
     def get(self, name: str) -> Snapshot:
         return self._endpoints[name].get()
@@ -71,17 +76,20 @@ class Cache:
             self._endpoints[endpoint_name].refresh(self._scanners[endpoint_name])
 
     def start(self) -> None:
-        if self._thread is not None:
+        if self._threads:
             return
-        self._thread = threading.Thread(target=self._run, daemon=True)
-        self._thread.start()
+        for name in self._scanners:
+            thread = threading.Thread(target=self._run_endpoint, args=(name,), daemon=True)
+            self._threads.append(thread)
+            thread.start()
 
     def stop(self) -> None:
         self._stop.set()
-        if self._thread:
-            self._thread.join(timeout=2)
+        for thread in self._threads:
+            thread.join(timeout=2)
+        self._threads = []
 
-    def _run(self) -> None:
+    def _run_endpoint(self, name: str) -> None:
         while not self._stop.is_set():
-            self.refresh_now()
+            self._endpoints[name].refresh(self._scanners[name])
             self._stop.wait(self._interval)
