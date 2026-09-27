@@ -173,6 +173,10 @@ export interface ApiCache {
 	skippedCount: number;
 	/** E4: true when the response had more than 5,000 valid rows. */
 	truncated: boolean;
+	/** R3/G11: the time of the *last successful* refresh, carried through subsequent failures so the
+	 * dot's tooltip can keep reporting it ("unreachable, last updated 3 h ago") instead of the failed
+	 * attempt's own time. `undefined`/absent means never successfully refreshed. */
+	lastSuccessAt?: number;
 }
 
 /** One API row's durable, per-id state (G6c: status and note never change on refresh; label and
