@@ -1,6 +1,6 @@
 import * as http from "node:http";
 import type { AddressInfo } from "node:net";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { ApiSourceController, ConfirmDeleteAnswer, dotStateFor } from "../../src/api-source-controller";
 import { RequestFn } from "../../src/api-http";
 import { ApiSourceConfig, ViewNode } from "../../src/types";
@@ -61,13 +61,17 @@ describe("Overwrite fill mode — integration against a real local HTTP server",
 				const items = Array.from({ length: 6000 }, (_, i) => ({ id: String(i), name: `Item ${i}` }));
 				res.writeHead(200, { "content-type": "application/json" });
 				res.end(JSON.stringify(items));
+			} else if (url === "/notalist") {
+				res.writeHead(200, { "content-type": "application/json" });
+				res.end(JSON.stringify({ items: "not an array" }));
+			} else if (url === "/slow") {
+				// R7(b): genuinely never responds — the connection is left open and only cleaned up when
+				// the server closes at the end of the suite. The client-side timeout below fires well
+				// before any real 15s elapse.
 			} else {
 				res.writeHead(404);
 				res.end();
 			}
-			// A slow endpoint is served by never calling res.end() at all — the client-side timeout below
-			// fires well before any real 15s elapse, so this connection is simply left open and cleaned
-			// up when the server closes at the end of the suite.
 		});
 		await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
 		const address = server.address() as AddressInfo;
@@ -78,13 +82,19 @@ describe("Overwrite fill mode — integration against a real local HTTP server",
 		server.close();
 	});
 
-	it("F1: every request issued by this suite's scenarios is a GET, never any other verb", async () => {
+	// R7(c): every scenario below issues at most one request against `server` — reset before each test
+	// rather than ad hoc in a couple of them, so a stray request from an earlier test can never inflate
+	// a later one's count.
+	beforeEach(() => {
 		requestLog = [];
+	});
+
+	it("F1: a refresh issues exactly one GET request, never any other verb and never more than one", async () => {
 		const node = makeNode("f1");
 		const controller = new ApiSourceController();
 		await controller.refresh(node, overwriteSource(`${base}/ok`), [], () => {}, { requestImpl: nodeFetchRequestImpl });
-		expect(requestLog.length).toBeGreaterThan(0);
-		expect(requestLog.every((r) => r.method === "GET")).toBe(true);
+		expect(requestLog.length).toBe(1);
+		expect(requestLog[0].method).toBe("GET");
 	});
 
 	it("G6/E1: an ok response overwrites — new rows added, previously-seen rows no longer reported are deleted outright", async () => {
@@ -136,59 +146,99 @@ describe("Overwrite fill mode — integration against a real local HTTP server",
 		expect(node.apiItemState).toEqual({ "1": expect.objectContaining({ id: "1" }) });
 	});
 
-	it("E3: a request slower than the configured timeout fails as unreachable, with no real 15s wait", async () => {
-		const node = makeNode("f6");
+	it("E3: a request slower than the configured timeout fails as unreachable against the real /slow fixture, without deleting prior rows", async () => {
+		// R7(b): seeded with a prior row and driven through the real `nodeFetchRequestImpl` against the
+		// mock server's genuinely-never-responds `/slow` route (a real slow connection, not a stubbed
+		// `RequestFn`), with a real short `timeoutMs` — the client-side timeout fires well before any
+		// real 15s elapse.
+		const node = makeNode("f6", { "1": { id: "1", label: "One" } }, ["1"]);
 		const controller = new ApiSourceController();
-		const neverResolves: RequestFn = () => new Promise(() => {});
-		let firedTimeout: (() => void) | null = null;
-		// scheduleTimeout only registers the callback here; firing it ourselves simulates the 15s
-		// elapsing instantly, matching the existing E3 pattern in api-source-refresh.test.ts.
-		const run = controller.refresh(node, overwriteSource(`${base}/slow-never-responds`), [], () => {}, {
-			requestImpl: neverResolves,
-			timeoutMs: 50,
-			scheduleTimeout: (ms, onTimeout) => {
-				firedTimeout = onTimeout;
-				return () => {
-					firedTimeout = null;
-				};
-			},
+		await controller.refresh(node, overwriteSource(`${base}/slow`), [], () => {}, {
+			requestImpl: nodeFetchRequestImpl,
+			timeoutMs: 100,
 		});
-		expect(firedTimeout).not.toBeNull();
-		firedTimeout?.();
-		await run;
 		expect(node.apiCache?.ok).toBe(false);
 		expect(node.apiCache?.error).toBe("unreachable");
 		expect(dotStateFor(node.apiCache)).toBe("red");
+		// A timed-out refresh must never delete rows it never got far enough to reconcile.
+		expect(node.apiItemState).toEqual({ "1": { id: "1", label: "One" } });
 	});
 
-	it("E8: a 401/auth failure never touches existing rows and turns the dot red", async () => {
+	it("E8: a 401/auth failure never touches existing rows, turns the dot red, and never asks to confirm a delete", async () => {
 		const node = makeNode("f7", { "1": { id: "1", label: "One" } }, ["1"]);
 		const controller = new ApiSourceController();
-		await controller.refresh(node, overwriteSource(`${base}/auth401`), [], () => {}, { requestImpl: nodeFetchRequestImpl });
+		let confirmCalled = false;
+		const confirmDelete = async (): Promise<ConfirmDeleteAnswer> => {
+			confirmCalled = true;
+			return "confirmed";
+		};
+		await controller.refresh(node, overwriteSource(`${base}/auth401`, { confirmBeforeDelete: true }), [], () => {}, {
+			requestImpl: nodeFetchRequestImpl,
+			confirmDelete,
+		});
 
 		expect(node.apiCache?.ok).toBe(false);
 		expect(node.apiCache?.error).toBe("auth failed");
 		expect(node.apiItemState).toEqual({ "1": { id: "1", label: "One" } });
 		expect(dotStateFor(node.apiCache)).toBe("red");
+		// R7(d): a failed fetch never reaches the plan/confirm step at all — nothing to delete was ever computed.
+		expect(confirmCalled).toBe(false);
 	});
 
-	it("a 500 server error never touches existing rows and turns the dot red", async () => {
+	it("a 500 server error never touches existing rows, turns the dot red, and never asks to confirm a delete", async () => {
 		const node = makeNode("f8", { "1": { id: "1", label: "One" } }, ["1"]);
 		const controller = new ApiSourceController();
-		await controller.refresh(node, overwriteSource(`${base}/fail500`), [], () => {}, { requestImpl: nodeFetchRequestImpl });
+		let confirmCalled = false;
+		const confirmDelete = async (): Promise<ConfirmDeleteAnswer> => {
+			confirmCalled = true;
+			return "confirmed";
+		};
+		await controller.refresh(node, overwriteSource(`${base}/fail500`, { confirmBeforeDelete: true }), [], () => {}, {
+			requestImpl: nodeFetchRequestImpl,
+			confirmDelete,
+		});
 
 		expect(node.apiCache?.ok).toBe(false);
 		expect(node.apiItemState).toEqual({ "1": { id: "1", label: "One" } });
+		expect(confirmCalled).toBe(false);
 	});
 
-	it("E1: a non-JSON body fails without deleting anything", async () => {
+	it("E1: a non-JSON body fails without deleting anything or asking to confirm a delete", async () => {
 		const node = makeNode("f9", { "1": { id: "1", label: "One" } }, ["1"]);
 		const controller = new ApiSourceController();
-		await controller.refresh(node, overwriteSource(`${base}/badjson`), [], () => {}, { requestImpl: nodeFetchRequestImpl });
+		let confirmCalled = false;
+		const confirmDelete = async (): Promise<ConfirmDeleteAnswer> => {
+			confirmCalled = true;
+			return "confirmed";
+		};
+		await controller.refresh(node, overwriteSource(`${base}/badjson`, { confirmBeforeDelete: true }), [], () => {}, {
+			requestImpl: nodeFetchRequestImpl,
+			confirmDelete,
+		});
 
 		expect(node.apiCache?.ok).toBe(false);
 		expect(node.apiCache?.error).toMatch(/not valid JSON/i);
 		expect(node.apiItemState).toEqual({ "1": { id: "1", label: "One" } });
+		expect(confirmCalled).toBe(false);
+	});
+
+	it("E1: a response that isn't a JSON list (an object with no matching arrayField) fails without deleting anything or asking to confirm a delete", async () => {
+		const node = makeNode("f9b", { "1": { id: "1", label: "One" } }, ["1"]);
+		const controller = new ApiSourceController();
+		let confirmCalled = false;
+		const confirmDelete = async (): Promise<ConfirmDeleteAnswer> => {
+			confirmCalled = true;
+			return "confirmed";
+		};
+		await controller.refresh(node, overwriteSource(`${base}/notalist`, { confirmBeforeDelete: true }), [], () => {}, {
+			requestImpl: nodeFetchRequestImpl,
+			confirmDelete,
+		});
+
+		expect(node.apiCache?.ok).toBe(false);
+		expect(node.apiCache?.error).toMatch(/not a json list/i);
+		expect(node.apiItemState).toEqual({ "1": { id: "1", label: "One" } });
+		expect(confirmCalled).toBe(false);
 	});
 
 	it("E4: 6,000 rows truncates at the 5,000 cap and skips deletion/not-found for that refresh", async () => {
@@ -203,7 +253,6 @@ describe("Overwrite fill mode — integration against a real local HTTP server",
 	});
 
 	it("F1/G13: no non-GET write is ever issued, and the header/token value never leaks into a cached error", async () => {
-		requestLog = [];
 		const node = makeNode("f11");
 		const controller = new ApiSourceController();
 		const secretToken = "Bearer super-secret-overwrite-token";
