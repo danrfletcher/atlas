@@ -1,7 +1,7 @@
 import { App } from "obsidian";
 import type { UnitIndex } from "./unit-index";
 import { clampRefreshMinutes } from "./api-refresh-timer";
-import { ApiFieldMapping, ApiItemState, ApiSourceConfig, DEFAULT_VIEW_NAME, StatusGovernance, Unit, UnitRef, View, ViewNode, createEmptyView, rewriteRefPath, unitRefsEqual, unitToRef } from "./types";
+import { ApiClickAction, ApiFieldMapping, ApiItemState, ApiSourceConfig, DEFAULT_VIEW_NAME, StatusGovernance, Unit, UnitRef, View, ViewNode, createEmptyView, rewriteRefPath, unitRefsEqual, unitToRef } from "./types";
 
 function generateNodeId(): string {
 	return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
@@ -80,6 +80,20 @@ function sanitizeApiFields(node: ViewNode): void {
 			const rawMinutes = raw.refreshEveryMinutes;
 			const validMinutes = typeof rawMinutes === "number" && Number.isFinite(rawMinutes);
 			const refreshEveryMinutes = validMinutes ? clampRefreshMinutes(rawMinutes) : undefined;
+			const rawExtras = mapping?.extraFields ?? (mapping as unknown as { extras?: unknown })?.extras;
+			const extraFields: Record<string, string> = {};
+			if (rawExtras && typeof rawExtras === "object" && !Array.isArray(rawExtras)) {
+				for (const [k, v] of Object.entries(rawExtras)) {
+					if (typeof k === "string" && typeof v === "string" && /^[a-zA-Z0-9_]+$/.test(k)) {
+						extraFields[k] = v;
+					}
+				}
+			}
+			const extraFieldsRecord = Object.keys(extraFields).length > 0 ? extraFields : undefined;
+			const rawAction = raw.action ?? raw.clickAction;
+			const action: ApiClickAction | undefined =
+				rawAction === "none" || rawAction === "run-command" || rawAction === "open-attachment" ? rawAction : undefined;
+			const command = typeof raw.command === "string" ? raw.command : undefined;
 			node.apiSource = {
 				url: raw.url,
 				method: "GET",
@@ -88,6 +102,7 @@ function sanitizeApiFields(node: ViewNode): void {
 					labelField: typeof mapping?.labelField === "string" ? mapping.labelField : "",
 					secondaryField: typeof mapping?.secondaryField === "string" ? mapping.secondaryField : undefined,
 					arrayField: typeof mapping?.arrayField === "string" ? mapping.arrayField : undefined,
+					extraFields: extraFieldsRecord,
 				},
 				mode: raw.mode === "append" ? "append" : raw.mode === "overwrite" ? "overwrite" : "merge",
 				refreshOnViewLoad: !!raw.refreshOnViewLoad,
@@ -97,6 +112,9 @@ function sanitizeApiFields(node: ViewNode): void {
 				confirmBeforeDelete: typeof raw.confirmBeforeDelete === "boolean" ? raw.confirmBeforeDelete : undefined,
 				mappingMode: isJsMode ? "js" : undefined,
 				jsSource: typeof raw.jsSource === "string" ? raw.jsSource : undefined,
+				action,
+				clickAction: action,
+				command,
 			};
 		}
 	}
@@ -139,6 +157,16 @@ function sanitizeApiFields(node: ViewNode): void {
 	for (const child of node.children) sanitizeApiFields(child);
 }
 
+/** G9b: resolves the effective click action for a source, defaulting to "open-attachment". */
+export function resolveClickAction(source: ApiSourceConfig | undefined | null): ApiClickAction {
+	return source?.action ?? source?.clickAction ?? "open-attachment";
+}
+
+/** G2: resolves the extra fields mapping for a source, defaulting to empty record. */
+export function resolveExtraFields(mapping: ApiFieldMapping | undefined | null): Record<string, string> {
+	return mapping?.extraFields ?? {};
+}
+
 /** R17/E9: sanitizes every view's tree in place before anything else touches it. */
 function sanitizeViewsApiFields(views: View[]): void {
 	for (const view of views) {
@@ -150,7 +178,13 @@ function sanitizeViewsApiFields(views: View[]): void {
  * later-added nested object) by reference with the original, or editing one's field mapping would
  * silently edit the other's too. */
 function cloneApiSource(source: ApiSourceConfig): ApiSourceConfig {
-	return { ...source, mapping: { ...source.mapping } };
+	return {
+		...source,
+		mapping: {
+			...source.mapping,
+			extraFields: source.mapping.extraFields ? { ...source.mapping.extraFields } : undefined,
+		},
+	};
 }
 
 export interface ApiSourceIdPair {

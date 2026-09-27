@@ -293,4 +293,56 @@ describe("T1/T3/T5/T7 — ApiSourceModal's Save button after an empty-then-valid
 			headers: [],
 		});
 	});
+
+	it("supports click action configuration and validates command placeholders", () => {
+		const onSave = vi.fn();
+		const config = validConfig();
+		config.mapping.extraFields = { path: "item_path" };
+		const modal = new ApiSourceModal({} as any, config, [], onSave);
+		(modal as any).onOpen();
+
+		// Switch click action to run-command
+		const clickActionSetting = settingNamed(modal, "Action on click");
+		expect(clickActionSetting).toBeTruthy();
+		clickActionSetting.components[0].select("run-command");
+
+		// Check warning text exists
+		const warningEl = (modal as any).contentEl.children.find((c: any) => c.cls === "atlas-api-command-warning");
+		expect(warningEl?.textContent).toContain("Commands run with the user's trust");
+
+		// Command setting is now present
+		const commandSetting = settingNamed(modal, "Command");
+		expect(commandSetting).toBeTruthy();
+
+		const commandField = commandSetting.components[0];
+		const errorEls = () => (modal as any).contentEl.children.filter((c: any) => c.cls === "atlas-api-field-error");
+
+		// Type unbalanced quote -> rejected
+		commandField.type('echo "hello');
+		expect((modal as any).saveButton.disabled).toBe(true);
+		expect(errorEls().some((e: any) => e.textContent.includes("Unbalanced quote"))).toBe(true);
+
+		// Type unknown placeholder -> rejected
+		commandField.type("echo {unknown_prop}");
+		expect((modal as any).saveButton.disabled).toBe(true);
+		expect(errorEls().some((e: any) => e.textContent.includes("Unknown placeholder"))).toBe(true);
+
+		// Type valid placeholder -> accepted
+		commandField.type("echo {path}");
+		expect((modal as any).saveButton.disabled).toBe(false);
+
+		// Save and verify payload
+		(modal as any).saveButton.simulateClick();
+		expect(onSave).toHaveBeenCalledWith({
+			source: expect.objectContaining({
+				action: "run-command",
+				clickAction: "run-command",
+				command: "echo {path}",
+				mapping: expect.objectContaining({
+					extraFields: { path: "item_path" },
+				}),
+			}),
+			headers: [],
+		});
+	});
 });

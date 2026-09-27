@@ -17,6 +17,8 @@ import { ViewLoadTrigger, dotStateFor, dotTooltip } from "./api-source-controlle
 import { obsidianRequestImpl } from "./api-request-obsidian";
 import { apiItemMatchesFilter, formatLocalDateFromIso } from "./api-mapping";
 import { MIN_REFRESH_MINUTES, RefreshEveryTimers } from "./api-refresh-timer";
+import { executeApiCommand } from "./api-command-runner";
+import { resolveArgv, tokenizeCommand } from "./command-argv";
 
 export const ATLAS_VIEW_TYPE = "atlas-explorer";
 
@@ -560,13 +562,52 @@ export class AtlasExplorerView extends ItemView {
 
 	/** G9: "Add note / block / module" — the only context-menu action for an API item besides status
 	 * (G10: no drag, nest, reorder, remove, rename, or duplicate, all of which require a real
-	 * `ViewNode`, which items never get). Status itself is set via the dot click (R5), not this menu. */
+	 * `ViewNode`, which items never get). With action = run command, the attachment stays reachable
+	 * from this menu. Status itself is set via the dot click (R5), not this menu. */
 	private showApiItemMenu(evt: MouseEvent, view: View, folderNode: ViewNode, item: ApiItemState): void {
 		const menu = new Menu();
+		if (item.noteRef) {
+			menu.addItem((mi) => mi.setTitle("Open attachment").setIcon("file-text").onClick(() => void this.openApiItemAttachment(item)));
+			menu.addSeparator();
+		}
 		menu.addItem((mi) => mi.setTitle("Add note").setIcon("file-plus").onClick(() => void this.attachApiItem(view, folderNode, item, "file")));
 		menu.addItem((mi) => mi.setTitle("Add block").setIcon("square-plus").onClick(() => void this.attachApiItem(view, folderNode, item, "block")));
 		menu.addItem((mi) => mi.setTitle("Add module").setIcon("folder-plus").onClick(() => void this.attachApiItem(view, folderNode, item, "folder")));
 		menu.showAtMouseEvent(evt);
+	}
+
+	/** G9/G9b: handles click on an API item row according to the folder's configured click action. */
+	private async handleApiItemClick(folderNode: ViewNode, item: ApiItemState): Promise<void> {
+		const action = folderNode.apiSource?.action ?? folderNode.apiSource?.clickAction ?? "open-attachment";
+		if (action === "none") return;
+		if (action === "open-attachment") {
+			if (item.noteRef) await this.openApiItemAttachment(item);
+			return;
+		}
+		if (action === "run-command") {
+			// G13: Click-action commands are not available on mobile
+			if (Platform.isMobile) return;
+			const command = folderNode.apiSource?.command;
+			if (!command || !command.trim()) return;
+
+			const tokenResult = tokenizeCommand(command);
+			if (!tokenResult.ok) {
+				new Notice(`Atlas: command error — ${tokenResult.error}`);
+				return;
+			}
+
+			// Read extra fields from the cached mapped row
+			const cachedRow = folderNode.apiCache?.rows.find((r) => r.id === item.id);
+			const extra = cachedRow?.extra;
+
+			const resolved = resolveArgv(tokenResult.tokens, extra);
+			if (!resolved.ok) {
+				new Notice(`Atlas: ${resolved.error}`);
+				return;
+			}
+
+			await executeApiCommand(resolved.argv);
+		}
 	}
 
 	/** G8: a throwaway pseudo-`ViewNode` so an API item can go through the same status-resolution
@@ -601,10 +642,9 @@ export class AtlasExplorerView extends ItemView {
 			row.createSpan({ cls: "atlas-row-secondary", text });
 		}
 
-		// G9/R7: default click opens the attached note — a no-op until one is actually attached, never
-		// a silent create-and-link.
+		// G9/G9b: click opens attachment or runs terminal command per source clickAction config
 		row.addEventListener("click", () => {
-			if (item.noteRef) void this.openApiItemAttachment(item);
+			void this.handleApiItemClick(folderNode, item);
 		});
 
 		// G9/R7: "Add note / block / module" — status is set via the dot click instead (R5).

@@ -456,6 +456,13 @@
 	margin: 0 0 8px;
 }
 
+/* PR-5 (G9b): persistent command trust/shell warning next to click-action command field. */
+.atlas-api-command-warning {
+	color: var(--text-warning, #f0a020);
+	font-size: var(--font-ui-smaller);
+	margin: 0 0 8px;
+}
+
 /* PR-4 (G3): the Test button's row/skip/truncate summary or mapping error — never saves or touches
  * the cache, so it's styled like any other inline status line rather than a field error. */
 .atlas-api-test-result {

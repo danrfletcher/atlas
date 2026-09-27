@@ -1,29 +1,30 @@
 import { App, ButtonComponent, Modal, Notice, Platform, Setting } from "obsidian";
-import { canSaveApiSource, findArrayFields, isMapError, mapResponseRows, sampleFieldsForArrayField } from "./api-mapping";
+import { canSaveApiSource, findArrayFields, isMapError, isValidExtraFieldName, mapResponseRows, sampleFieldsForArrayField } from "./api-mapping";
 import { generateJsFromMapping, runJsMapping, validateJsSource } from "./api-js-mapping";
 import { httpGetJson } from "./api-http";
 import { obsidianRequestImpl } from "./api-request-obsidian";
 import { validateRefreshMinutes } from "./api-refresh-timer";
+import { resolveArgv, validateCommand } from "./command-argv";
 import { ConfirmModal } from "./modals";
-import { ApiFieldMapping, ApiHeader, ApiSourceConfig } from "./types";
+import { ApiClickAction, ApiFieldMapping, ApiHeader, ApiSourceConfig } from "./types";
 
 export interface ApiSourceModalResult {
 	source: ApiSourceConfig;
 	headers: ApiHeader[];
 }
 
-const MAPPING_TARGETS: { key: keyof ApiFieldMapping; label: string; required: boolean }[] = [
+const MAPPING_TARGETS: { key: "idField" | "labelField" | "secondaryField"; label: string; required: boolean }[] = [
 	{ key: "idField", label: "ID (required)", required: true },
 	{ key: "labelField", label: "Label (required)", required: true },
 	{ key: "secondaryField", label: "Secondary (optional)", required: false },
 ];
 
 /**
- * G1/PR-3: "Data source…" modal on a Folder. URL + device-local headers + GET-only fetch, a sample
- * fetch that lists the response's fields as draggable chips (G2), three drop targets (id/label
- * required, secondary optional), Merge/Append/Overwrite fill modes, Overwrite's two guards (G6b, greyed
- * out and their values retained unless Overwrite is selected), and the two independent refresh toggles
- * (G5a "when Atlas view loads", G5b "every X minutes").
+ * G1/PR-3/PR-5: "Data source…" modal on a Folder. URL + device-local headers + GET-only fetch, a sample
+ * fetch that lists the response's fields as draggable chips (G2), drop targets (id/label
+ * required, secondary optional, plus extra named fields), Merge/Append/Overwrite fill modes, Overwrite's two guards (G6b, greyed
+ * out and their values retained unless Overwrite is selected), two independent refresh toggles
+ * (G5a "when Atlas view loads", G5b "every X minutes"), and the optional click action (G9b).
  */
 export class ApiSourceModal extends Modal {
 	private url: string;
@@ -39,6 +40,9 @@ export class ApiSourceModal extends Modal {
 	private refreshEveryMinutesEnabled: boolean;
 	private refreshEveryMinutesRaw: string;
 	private mapping: ApiFieldMapping;
+	private extraFields: { name: string; field: string }[] = [];
+	private action: ApiClickAction;
+	private command: string;
 	private sampleFields: string[] = [];
 	private arrayFieldCandidates: string[] = [];
 	private lastResponse: unknown = null;
@@ -72,6 +76,12 @@ export class ApiSourceModal extends Modal {
 		this.mapping = initial?.mapping ? { ...initial.mapping } : { idField: "", labelField: "", secondaryField: undefined };
 		this.mappingMode = initial?.mappingMode === "js" ? "js" : "drag";
 		this.jsSource = initial?.jsSource ?? "";
+		this.action = initial?.action ?? initial?.clickAction ?? "open-attachment";
+		this.command = initial?.command ?? "";
+		const rawExtras = initial?.mapping?.extraFields;
+		if (rawExtras && typeof rawExtras === "object") {
+			this.extraFields = Object.entries(rawExtras).map(([name, field]) => ({ name, field }));
+		}
 	}
 
 	onOpen(): void {
@@ -154,7 +164,7 @@ export class ApiSourceModal extends Modal {
 					}
 					this.mappingMode = next;
 					this.testResult = null;
-					if (next === "js") this.jsSource = generateJsFromMapping(this.mapping);
+					if (next === "js") this.jsSource = generateJsFromMapping({ ...this.mapping, extraFields: this.buildExtraFieldsRecord() });
 					this.render();
 				});
 			});
@@ -233,6 +243,67 @@ export class ApiSourceModal extends Modal {
 					);
 				}
 			}
+
+			for (let i = 0; i < this.extraFields.length; i++) {
+				const extra = this.extraFields[i];
+				const targetRow = new Setting(contentEl);
+				targetRow.addText((text) =>
+					text
+						.setPlaceholder("field_name")
+						.setValue(extra.name)
+						.onChange((value) => {
+							extra.name = value.trim();
+							this.updateSaveButton();
+						})
+				);
+				const dropZone = targetRow.controlEl.createDiv({ cls: "atlas-api-drop-zone", text: extra.field || "Drop field here" });
+				dropZone.addEventListener("dragover", (evt) => evt.preventDefault());
+				dropZone.addEventListener("drop", (evt) => {
+					evt.preventDefault();
+					const field = evt.dataTransfer?.getData("text/plain");
+					if (!field) return;
+					extra.field = field;
+					this.render();
+				});
+				targetRow.addExtraButton((btn) =>
+					btn
+						.setIcon("x")
+						.setTooltip("Remove extra field")
+						.onClick(() => {
+							this.extraFields.splice(i, 1);
+							this.render();
+						})
+				);
+			}
+
+			const addExtraRow = new Setting(contentEl).setName("Extra field");
+			const addDropZone = addExtraRow.controlEl.createDiv({
+				cls: "atlas-api-drop-zone atlas-api-add-drop-zone",
+				text: "Drop field here to add extra field",
+			});
+			addDropZone.addEventListener("dragover", (evt) => evt.preventDefault());
+			addDropZone.addEventListener("drop", (evt) => {
+				evt.preventDefault();
+				const field = evt.dataTransfer?.getData("text/plain");
+				if (!field) return;
+				let name = field.replace(/[^a-zA-Z0-9_]/g, "_") || "extra";
+				if (this.extraFields.some((e) => e.name === name)) {
+					let n = 1;
+					while (this.extraFields.some((e) => e.name === `${name}_${n}`)) n++;
+					name = `${name}_${n}`;
+				}
+				this.extraFields.push({ name, field });
+				this.render();
+			});
+			addExtraRow.addButton((btn) =>
+				btn.setButtonText("Add extra field").onClick(() => {
+					let name = "extra";
+					let n = 1;
+					while (this.extraFields.some((e) => e.name === `${name}_${n}`)) n++;
+					this.extraFields.push({ name: `${name}_${n}`, field: "" });
+					this.render();
+				})
+			);
 		}
 
 		new Setting(contentEl)
@@ -305,6 +376,55 @@ export class ApiSourceModal extends Modal {
 		refreshErrorEl = contentEl.createEl("p", { cls: "atlas-api-field-error" });
 		updateRefreshMinutesValidity();
 
+		new Setting(contentEl).setName("Click action").setHeading();
+		new Setting(contentEl)
+			.setName("Action on click")
+			.setDesc("What happens when an API row is clicked.")
+			.addDropdown((dropdown) => {
+				dropdown.addOption("open-attachment", "Open attachment (default)");
+				dropdown.addOption("none", "None");
+				if (Platform.isMobile) {
+					// G13: Click-action commands are not available on mobile
+				} else {
+					dropdown.addOption("run-command", "Run terminal command in background");
+				}
+				dropdown.setValue(this.action);
+				dropdown.onChange((value) => {
+					this.action = value as ApiClickAction;
+					this.render();
+				});
+			});
+
+		if (this.action === "run-command" && !Platform.isMobile) {
+			contentEl.createEl("p", {
+				cls: "atlas-api-command-warning",
+				text: "Commands run with the user's trust. Shell features (pipes, redirects, &&, globbing, ~, env vars) are unsupported in v1.",
+			});
+
+			let commandErrorEl: HTMLElement | null = null;
+			const updateCommandValidity = () => {
+				const availableExtras = this.extraFields.map((e) => e.name);
+				const validation = validateCommand(this.command, availableExtras);
+				commandErrorEl?.setText(validation.ok ? "" : validation.error);
+				this.updateSaveButton();
+			};
+
+			new Setting(contentEl)
+				.setName("Command")
+				.setDesc("Command to execute in the background. Use {field} for extra mapped field values.")
+				.addText((text) =>
+					text
+						.setPlaceholder("open -a Docker")
+						.setValue(this.command)
+						.onChange((value) => {
+							this.command = value;
+							updateCommandValidity();
+						})
+				);
+			commandErrorEl = contentEl.createEl("p", { cls: "atlas-api-field-error" });
+			updateCommandValidity();
+		}
+
 		const footer = new Setting(contentEl);
 		footer.addButton((btn) => btn.setButtonText("Cancel").onClick(() => this.close()));
 		footer.addButton((btn) => {
@@ -318,6 +438,16 @@ export class ApiSourceModal extends Modal {
 		});
 	}
 
+	private buildExtraFieldsRecord(): Record<string, string> {
+		const out: Record<string, string> = {};
+		for (const e of this.extraFields) {
+			if (e.name && e.field && isValidExtraFieldName(e.name)) {
+				out[e.name] = e.field;
+			}
+		}
+		return out;
+	}
+
 	private canSave(): boolean {
 		if (this.mappingMode === "js") {
 			if (!this.url.trim()) return false;
@@ -326,6 +456,20 @@ export class ApiSourceModal extends Modal {
 			return false;
 		}
 		if (this.refreshEveryMinutesEnabled && !validateRefreshMinutes(this.refreshEveryMinutesRaw).ok) return false;
+
+		// Check extra fields validity: valid identifier, unique
+		for (let i = 0; i < this.extraFields.length; i++) {
+			const extra = this.extraFields[i];
+			if (!isValidExtraFieldName(extra.name)) return false;
+			if (this.extraFields.findIndex((other) => other.name === extra.name) !== i) return false;
+		}
+
+		// Check command validity if run-command is selected
+		if (this.action === "run-command" && !Platform.isMobile) {
+			const availableExtras = this.extraFields.map((e) => e.name);
+			if (!validateCommand(this.command, availableExtras).ok) return false;
+		}
+
 		return true;
 	}
 
@@ -374,13 +518,34 @@ export class ApiSourceModal extends Modal {
 			new Notice("Fetch a sample first.");
 			return;
 		}
-		const result = this.mappingMode === "js" ? await runJsMapping(this.jsSource, this.lastResponse) : mapResponseRows(this.lastResponse, this.mapping);
+		const mappingWithExtras: ApiFieldMapping = {
+			...this.mapping,
+			extraFields: this.buildExtraFieldsRecord(),
+		};
+		const result = this.mappingMode === "js" ? await runJsMapping(this.jsSource, this.lastResponse) : mapResponseRows(this.lastResponse, mappingWithExtras);
 		if (isMapError(result)) {
 			this.testResult = `Error: ${result.error}`;
 		} else {
 			const parts = [`${result.rows.length} row(s)`];
 			if (result.skippedCount > 0) parts.push(`${result.skippedCount} skipped`);
 			if (result.truncated) parts.push("truncated at 5,000");
+
+			if (this.action === "run-command" && this.command.trim()) {
+				const availableExtras = this.extraFields.map((e) => e.name);
+				const validation = validateCommand(this.command, availableExtras);
+				if (!validation.ok) {
+					parts.push(`Command error: ${validation.error}`);
+				} else if (result.rows.length > 0) {
+					const firstRow = result.rows[0];
+					const resolved = resolveArgv(validation.tokens, firstRow.extra);
+					if (resolved.ok) {
+						parts.push(`Argv preview: ${JSON.stringify(resolved.argv)}`);
+					} else {
+						parts.push(`Argv preview error: ${resolved.error}`);
+					}
+				}
+			}
+
 			this.testResult = parts.join(", ");
 		}
 		this.render();
@@ -389,10 +554,14 @@ export class ApiSourceModal extends Modal {
 	private save(): void {
 		if (!this.canSave()) return;
 		const refreshEveryMinutesValidation = this.refreshEveryMinutesEnabled ? validateRefreshMinutes(this.refreshEveryMinutesRaw) : null;
+		const extraFieldsRecord = this.buildExtraFieldsRecord();
 		const source: ApiSourceConfig = {
 			url: this.url.trim(),
 			method: "GET",
-			mapping: { ...this.mapping },
+			mapping: {
+				...this.mapping,
+				extraFields: Object.keys(extraFieldsRecord).length > 0 ? extraFieldsRecord : undefined,
+			},
 			mode: this.mode,
 			refreshOnViewLoad: this.refreshOnViewLoad,
 			refreshEveryMinutesEnabled: this.refreshEveryMinutesEnabled,
@@ -401,6 +570,9 @@ export class ApiSourceModal extends Modal {
 			confirmBeforeDelete: this.confirmBeforeDelete,
 			mappingMode: this.mappingMode === "js" ? "js" : undefined,
 			jsSource: this.mappingMode === "js" ? this.jsSource : undefined,
+			action: this.action,
+			clickAction: this.action,
+			command: this.action === "run-command" ? this.command.trim() : undefined,
 		};
 		this.close();
 		this.onSave({ source, headers: this.headers.filter((h) => h.key.trim().length > 0) });
