@@ -189,8 +189,10 @@ export interface ApiItemState {
 	noteRef?: UnitRef;
 	/** Merge mode only (G6): the row vanished from the API but is kept, marked "not found". */
 	notFound?: boolean;
-	/** Set the moment `notFound` first becomes true; cleared (along with `notFound`) the moment the
-	 * row reappears (G6c). */
+	/** R13: stamped to the refresh time every time the API actually reports this row present —
+	 * including the moment it reappears (G6c) — never to the time a later refresh notices it's
+	 * gone. So while `notFound` is true, this is the last time the row was truly seen, which is what
+	 * "not found, last seen <date>" reports. */
 	lastSeenAt?: string;
 }
 

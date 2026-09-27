@@ -513,7 +513,9 @@ export class AtlasExplorerView extends ItemView {
 		if (item.secondary) row.createSpan({ cls: "atlas-row-secondary", text: item.secondary });
 		if (item.notFound) {
 			// R4: previously rendered "not found" with no date — G6 requires the last-seen date too.
-			const text = item.lastSeenAt ? `not found, last seen ${new Date(item.lastSeenAt).toLocaleDateString()}` : "not found";
+			// R13: format as ISO-date (2026-09-25), matching the spec's example, rather than
+			// `toLocaleDateString`'s locale-dependent format (25/09/2026 in en-GB).
+			const text = item.lastSeenAt ? `not found, last seen ${item.lastSeenAt.slice(0, 10)}` : "not found";
 			row.createSpan({ cls: "atlas-row-secondary", text });
 		}
 

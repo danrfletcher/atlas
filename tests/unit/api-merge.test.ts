@@ -17,7 +17,7 @@ describe("mergeApiItems — G6: Append mode", () => {
 	it("adds new ids on first refresh", () => {
 		const result = mergeApiItems({}, [], [row("1"), row("2")], "append", opts);
 		expect(result.order).toEqual(["1", "2"]);
-		expect(result.itemState["1"]).toEqual({ id: "1", label: "1", secondary: undefined });
+		expect(result.itemState["1"]).toEqual({ id: "1", label: "1", secondary: undefined, lastSeenAt: NOW });
 	});
 
 	it("keeps a vanished item exactly as it was, never marks it not found", () => {
@@ -51,11 +51,16 @@ describe("mergeApiItems — G6: Append mode", () => {
 });
 
 describe("mergeApiItems — G6c: Merge mode", () => {
-	it("marks a vanished item not found with a timestamp, keeps its status/note", () => {
+	// R13: `lastSeenAt` must record the last time a row was actually reported present, not the time
+	// a later refresh noticed it gone — so these seed a "seen" refresh first, at its own timestamp,
+	// distinct from the "now" of the refresh that finds it missing.
+	it("marks a vanished item not found, keeping the time it was last actually seen present", () => {
+		const seenAt = "2020-06-01T00:00:00.000Z";
 		const prevState = { "1": state({ id: "1", explicitStatusId: "done" }) };
-		const result = mergeApiItems(prevState, ["1"], [], "merge", opts);
+		const seen = mergeApiItems(prevState, ["1"], [row("1")], "merge", { truncated: false, nowIso: seenAt });
+		const result = mergeApiItems(seen.itemState, seen.order, [], "merge", opts);
 		expect(result.itemState["1"].notFound).toBe(true);
-		expect(result.itemState["1"].lastSeenAt).toBe(NOW);
+		expect(result.itemState["1"].lastSeenAt).toBe(seenAt);
 		expect(result.itemState["1"].explicitStatusId).toBe("done");
 	});
 
@@ -65,11 +70,11 @@ describe("mergeApiItems — G6c: Merge mode", () => {
 		expect(result.itemState["1"].lastSeenAt).toBe("2020-01-01T00:00:00.000Z");
 	});
 
-	it("a reappearing item clears notFound/lastSeenAt and keeps its status/note", () => {
-		const prevState = { "1": state({ id: "1", notFound: true, lastSeenAt: NOW, explicitStatusId: "done" }) };
+	it("a reappearing item is marked seen again (as of now) and keeps its status/note", () => {
+		const prevState = { "1": state({ id: "1", notFound: true, lastSeenAt: "2020-01-01T00:00:00.000Z", explicitStatusId: "done" }) };
 		const result = mergeApiItems(prevState, ["1"], [row("1", "Back")], "merge", opts);
 		expect(result.itemState["1"].notFound).toBe(false);
-		expect(result.itemState["1"].lastSeenAt).toBeUndefined();
+		expect(result.itemState["1"].lastSeenAt).toBe(NOW);
 		expect(result.itemState["1"].label).toBe("Back");
 		expect(result.itemState["1"].explicitStatusId).toBe("done");
 	});
@@ -91,16 +96,19 @@ describe("mergeApiItems — E4: truncated refresh skips not-found marking", () =
 	});
 
 	it("a later, untruncated refresh where the item is still genuinely absent marks it not found normally", () => {
+		const seenAt = "2024-01-01T00:00:00.000Z";
 		const prevState = { "1": state({ id: "1", explicitStatusId: "done" }) };
+		const seen = mergeApiItems(prevState, ["1"], [row("1")], "merge", { truncated: false, nowIso: seenAt });
 		// First refresh (truncated) leaves it untouched, per the case above.
-		const afterTruncated = mergeApiItems(prevState, ["1"], [], "merge", { truncated: true, nowIso: "2025-01-01T00:00:00.000Z" });
-		expect(afterTruncated.itemState["1"].notFound).toBeUndefined();
+		const afterTruncated = mergeApiItems(seen.itemState, seen.order, [], "merge", { truncated: true, nowIso: "2025-01-01T00:00:00.000Z" });
+		expect(afterTruncated.itemState["1"].notFound).toBeFalsy();
 		// Truncation only suppresses marking for the refresh that was itself truncated — an ordinary
 		// (untruncated) refresh afterward where "1" is still absent must mark it, same as any other
-		// vanished item.
+		// vanished item, keeping the time it was last actually seen present (R13), not the time it
+		// was noticed missing.
 		const afterNormal = mergeApiItems(afterTruncated.itemState, afterTruncated.order, [], "merge", { truncated: false, nowIso: NOW });
 		expect(afterNormal.itemState["1"].notFound).toBe(true);
-		expect(afterNormal.itemState["1"].lastSeenAt).toBe(NOW);
+		expect(afterNormal.itemState["1"].lastSeenAt).toBe(seenAt);
 		expect(afterNormal.itemState["1"].explicitStatusId).toBe("done");
 	});
 });

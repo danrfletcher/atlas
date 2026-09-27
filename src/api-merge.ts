@@ -40,9 +40,13 @@ export function mergeApiItems(
 
 	for (const row of rows) {
 		const prev = prevState[row.id];
+		// R13: `lastSeenAt` is stamped here, on every refresh that actually reports the row present —
+		// not down in the "vanished" branch below, which used to stamp the time of the refresh that
+		// found the row *missing*. That made "not found, last seen <date>" report the wrong date
+		// (the day it was noticed gone, not the day it was last confirmed present).
 		nextState[row.id] = prev
-			? { ...prev, label: row.label, secondary: row.secondary, notFound: false, lastSeenAt: undefined }
-			: { id: row.id, label: row.label, secondary: row.secondary };
+			? { ...prev, label: row.label, secondary: row.secondary, notFound: false, lastSeenAt: options.nowIso }
+			: { id: row.id, label: row.label, secondary: row.secondary, lastSeenAt: options.nowIso };
 		nextOrder.push(row.id);
 	}
 
@@ -53,7 +57,9 @@ export function mergeApiItems(
 		if (mode === "append" || options.truncated) {
 			nextState[id] = prev;
 		} else {
-			nextState[id] = prev.notFound ? prev : { ...prev, notFound: true, lastSeenAt: options.nowIso };
+			// Carry the existing `lastSeenAt` (stamped the last time this row was actually reported)
+			// forward untouched — this refresh only learned the row is gone, not when it was last seen.
+			nextState[id] = prev.notFound ? prev : { ...prev, notFound: true };
 		}
 		nextOrder.push(id);
 	}

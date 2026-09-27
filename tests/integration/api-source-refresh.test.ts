@@ -49,6 +49,9 @@ describe("ApiSourceController — integration against a real HTTP server", () =>
 			} else if (url === "/badjson") {
 				res.writeHead(200, { "content-type": "application/json" });
 				res.end("{not json");
+			} else if (url === "/withstale") {
+				res.writeHead(200, { "content-type": "application/json" });
+				res.end(JSON.stringify([{ id: "stale", name: "Stale" }, { id: "1", name: "One" }]));
 			} else if (url === "/manyrows") {
 				const items = Array.from({ length: 5001 }, (_, i) => ({ id: String(i), name: `Item ${i}` }));
 				res.writeHead(200, { "content-type": "application/json" });
@@ -81,8 +84,8 @@ describe("ApiSourceController — integration against a real HTTP server", () =>
 		expect(node.apiCache?.lastSuccessAt).toBe(1000);
 		expect(dotStateFor(node.apiCache)).toBe("green");
 		expect(node.apiItemState).toEqual({
-			"1": { id: "1", label: "One", secondary: undefined },
-			"2": { id: "2", label: "Two", secondary: undefined },
+			"1": { id: "1", label: "One", secondary: undefined, lastSeenAt: new Date(1000).toISOString() },
+			"2": { id: "2", label: "Two", secondary: undefined, lastSeenAt: new Date(1000).toISOString() },
 		});
 	});
 
@@ -168,17 +171,22 @@ describe("ApiSourceController — integration against a real HTTP server", () =>
 
 	it("E4: a later, untruncated refresh marks a genuinely vanished row \"not found\" normally", async () => {
 		const node = makeNode("n7b");
-		node.apiItemState = { stale: { id: "stale", label: "Stale" } };
-		node.apiItemOrder = ["stale"];
 		const controller = new ApiSourceController();
-		// First refresh is truncated (5,001 rows) — must not mark "stale" not-found (already covered above).
+		// Seed "stale" as genuinely present first, so it gets a real lastSeenAt (R13) — not one
+		// fabricated later from the refresh that merely notices it's gone.
+		await controller.refresh(node, baseSource(`${base}/withstale`, { mode: "merge" }), [], () => {}, { requestImpl: nodeFetchRequestImpl, now: () => 5000 });
+		const seenAt = node.apiItemState?.stale?.lastSeenAt;
+		expect(seenAt).toBe(new Date(5000).toISOString());
+		// Next refresh is truncated (5,001 rows, no "stale") — must not mark "stale" not-found (already covered above).
 		await controller.refresh(node, baseSource(`${base}/manyrows`, { mode: "merge" }), [], () => {}, { requestImpl: nodeFetchRequestImpl });
 		expect(node.apiItemState?.stale.notFound).toBeUndefined();
 		// A later, ordinary (untruncated) refresh where "stale" is still genuinely absent must mark it
 		// normally — truncation only ever suppresses the marking for the refresh that was itself truncated.
-		await controller.refresh(node, baseSource(`${base}/ok`, { mode: "merge" }), [], () => {}, { requestImpl: nodeFetchRequestImpl });
+		await controller.refresh(node, baseSource(`${base}/ok`, { mode: "merge" }), [], () => {}, { requestImpl: nodeFetchRequestImpl, now: () => 99999 });
 		expect(node.apiItemState?.stale?.notFound).toBe(true);
-		expect(node.apiItemState?.stale?.lastSeenAt).toBeDefined();
+		// Keeps the time it was last actually seen present (from /withstale), not the time it was
+		// noticed missing (the /ok refresh's own "now").
+		expect(node.apiItemState?.stale?.lastSeenAt).toBe(seenAt);
 	});
 
 	it("G8: an item's explicit status and note survive a refresh where it's still reported", async () => {
@@ -213,6 +221,61 @@ describe("ApiSourceController — integration against a real HTTP server", () =>
 		resolveRequest?.({ status: 200, text: JSON.stringify([{ id: "1", name: "One" }]) });
 		await Promise.all([a, b]);
 		expect(callCount).toBe(1);
+	});
+
+	it("R15: a save that changes the source while a refresh is in flight queues one follow-up refresh with the new config, rather than dropping it or firing both at once", async () => {
+		const node = makeNode("n11");
+		const controller = new ApiSourceController();
+		let firstCalls = 0;
+		let secondCalls = 0;
+		let resolveFirst: ((result: { status: number; text: string }) => void) | null = null;
+		const firstRequest: RequestFn = () => {
+			firstCalls++;
+			return new Promise((resolve) => {
+				resolveFirst = resolve;
+			});
+		};
+		const secondRequest: RequestFn = async () => {
+			secondCalls++;
+			return { status: 200, text: JSON.stringify([{ id: "new", name: "New" }]) };
+		};
+		const oldSource = baseSource("http://example.invalid/old");
+		const newSource = baseSource("http://example.invalid/new");
+
+		const first = controller.refresh(node, oldSource, [], () => {}, { requestImpl: firstRequest });
+		// The user saves a changed config (different URL) before the first request resolves.
+		const second = controller.refresh(node, newSource, [], () => {}, { requestImpl: secondRequest });
+		expect(second).not.toBe(first);
+		expect(secondCalls).toBe(0); // queued behind the first, not fired concurrently with the stale config
+
+		resolveFirst?.({ status: 200, text: JSON.stringify([{ id: "old", name: "Old" }]) });
+		await Promise.all([first, second]);
+
+		expect(firstCalls).toBe(1);
+		expect(secondCalls).toBe(1);
+		// The final state reflects the *new* config's response — the old one's result was superseded,
+		// not merged into the node under the new config.
+		expect(node.apiCache?.rows).toEqual([{ id: "new", label: "New" }]);
+	});
+
+	it("R15: a repeated refresh with the *same* source while one is in flight still collapses into one request (E9 unaffected)", async () => {
+		const node = makeNode("n12");
+		const controller = new ApiSourceController();
+		let calls = 0;
+		let resolveRequest: ((result: { status: number; text: string }) => void) | null = null;
+		const deferredRequest: RequestFn = () => {
+			calls++;
+			return new Promise((resolve) => {
+				resolveRequest = resolve;
+			});
+		};
+		const source = baseSource("http://example.invalid/same");
+		const first = controller.refresh(node, source, [], () => {}, { requestImpl: deferredRequest });
+		const second = controller.refresh(node, source, [], () => {}, { requestImpl: deferredRequest });
+		expect(second).toBe(first);
+		resolveRequest?.({ status: 200, text: JSON.stringify([{ id: "1", name: "One" }]) });
+		await Promise.all([first, second]);
+		expect(calls).toBe(1);
 	});
 
 	it("F1: always issues GET, regardless of anything else — no write verb ever reaches the request layer", async () => {
