@@ -12,6 +12,11 @@
 	</array>
 	<key>WorkingDirectory</key>
 	<string>REPLACE_WITH_ABSOLUTE_PATH_TO_mac-inventory-service</string>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>PATH</key>
+		<string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+	</dict>
 	<key>RunAtLoad</key>
 	<true/>
 	<key>KeepAlive</key>
