@@ -368,14 +368,53 @@
 	border-radius: 3px;
 }
 
+/* T2: the label must never fully vanish under flex shrink pressure. `.atlas-row-secondary`
+ * (there can be two on an API "not found" row — the normal secondary-value span plus the
+ * not-found/last-seen span) has no `overflow` set, so its automatic min-width equals its
+ * content's min-content width. `.atlas-row-text` had none either, but `overflow: hidden` alone
+ * already zeroes its automatic min-width per the flexbox spec, so it was the only child squeezed
+ * to 0 when the row ran out of room. Give the label priority (`flex: 1 1 auto` plus a real
+ * `min-width` floor) and cap/shrink the secondary spans instead so both share the squeeze. */
 .atlas-row-text {
 	overflow: hidden;
 	text-overflow: ellipsis;
+	flex: 1 1 auto;
+	min-width: 3em;
 }
 
 .atlas-row-secondary {
 	color: var(--text-faint);
 	font-size: var(--font-ui-smaller);
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	flex: 0 1 auto;
+	min-width: 0;
+	max-width: 40%;
+}
+
+/* T1/T3 (G11): connection dot for an API-backed Folder — green ok / grey never-refreshed /
+ * red last-refresh-failed. Sized like the status dot's inner circle (`.atlas-status-dot-circle`)
+ * so the two read as the same visual language on the row. */
+.atlas-api-connection-dot {
+	display: inline-block;
+	flex-shrink: 0;
+	width: 8px;
+	height: 8px;
+	border-radius: 50%;
+	box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.15);
+}
+
+.atlas-api-dot-green {
+	background-color: var(--color-green, #4caf50);
+}
+
+.atlas-api-dot-grey {
+	background-color: var(--text-faint);
+}
+
+.atlas-api-dot-red {
+	background-color: var(--color-red, #e53935);
 }
 
 .atlas-badge {
