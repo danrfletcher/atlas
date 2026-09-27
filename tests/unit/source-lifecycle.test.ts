@@ -218,3 +218,20 @@ describe("T2 — a Folder's row-rendering gate must not go false the instant its
 		expect(nodeHasApiRows(vm.getNode(view.id, folder.id)!)).toBe(false);
 	});
 });
+
+describe("E7 — Folder converted by promotion: source, cache and mode carry over", () => {
+	// Deliberately skipped, not omitted: the meta-Folder-to-real-folder promotion mechanism (ticket
+	// 34n6ct71muguncxk) has no implementation anywhere in this repo to exercise — grepped `src/` again
+	// for this PR and found only `promoteAndPlace`/`promoteAndPlaceFlow` (explorer-view.ts), which
+	// places an already-classified disk unit into a view and never converts a `meta` node into one.
+	// Same call PR-2's tester made (PR-2 T5, commit b773e87) and PR-3's own tester (T6/T9) re-confirmed;
+	// recorded as a permanent, documented deviation in docs/decisions.md rather than re-raised each
+	// round. `ViewNode.apiSource`'s doc comment in src/types.ts is the forward-looking contract: once
+	// 34n6ct71muguncxk lands its conversion code, it must copy `apiSource` (incl. this PR's
+	// overwrite/guard/refresh-every fields), `apiCache`, `apiItemState` and `apiItemOrder` onto the
+	// resulting node unchanged, and leave already-pulled children untouched — at which point this test
+	// should be un-skipped and driven against that real conversion function.
+	it.skip("a Folder's source, cache and mode carry over when converted by promotion (ticket 34n6ct71muguncxk — not yet implemented anywhere in this repo)", () => {
+		expect.unreachable("no promotion-conversion code path exists to exercise yet");
+	});
+});

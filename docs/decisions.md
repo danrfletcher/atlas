@@ -2,6 +2,16 @@
 
 Judgement calls made during the build, the alternative considered, and why. Newest first.
 
+## PR-3 T9/E7: "Folder converted by promotion" cannot be built or tested in this ticket
+
+**Decision:** E7 ("Folder converted by promotion: source, cache and mode carry over") stays unimplemented and unverified in PR-3, same call PR-2 already made for the identical finding (PR-2 T5, commit `b773e87`). Closing this out as a documented, permanent deviation rather than leaving it to be re-raised every review/test round.
+
+**Why:** the "Folder converted by promotion" mechanism belongs to a separate ticket, 34n6ct71muguncxk (see `ticket-plan.md`'s "Rules" section: "Config stays on the Folder if the Folder is converted (promotion ticket 34n6ct71muguncxk): promotion affects only the parent, never the pulled children" — a cross-ticket contract, not this ticket's own scope). Re-grepped `src/` across the whole repo (again, third time across PR-2 and PR-3) for any Folder-conversion-by-promotion code path: none exists. The only "promotion" code in this repo, `promoteAndPlace`/`promoteAndPlaceFlow` (`explorer-view.ts`), places an already-classified disk unit into a view — it never converts a `meta` node into a disk-backed one, and is unrelated to E7 despite the shared word. Building the conversion mechanism here would be far outside PR-3's stated scope (this PR's own spec lists only Overwrite/G6b/timer/remove/duplicate) and would conflict with ticket 34n6ct71muguncxk's own implementation once it lands.
+
+**What's in place so the contract isn't lost:** `ViewNode.apiSource`'s doc comment in `src/types.ts` spells out exactly what fields (`apiSource` including this PR's overwrite/guard/refresh-every additions, `apiCache`, `apiItemState`, `apiItemOrder`, `apiAwaitingConfirmation`) whatever eventually implements 34n6ct71muguncxk must copy onto the converted node, and that the conversion must leave already-pulled children untouched. `tests/unit/source-lifecycle.test.ts` now has an explicit `describe("E7 ...")` block with a `.skip`'d test carrying the same reasoning, so the gap shows up as a visible, accounted-for skip in `vitest run` output instead of a silent absence — a tester scanning the suite for E7 coverage finds it declared and explained, not missing.
+
+**Not a regression:** matches PR-2 tester-1.json's identical E7 finding on PR-2's own base. Nothing in PR-3's diff removed or weakened any promotion-conversion capability, because none exists to weaken.
+
 ## Create from a meta folder (block, file or module): the menu, the body and the failure order
 
 **Decision:** "Create" sits in a meta folder's right-click menu after "Rename folder". Obsidian's public `Menu` has no submenu API (`minAppVersion` 1.5.0, public APIs only), so choosing it pops a second small menu (Block, File, Module) at the same spot. It is still two clicks. Nothing else was added: no command, palette entry or setting.
