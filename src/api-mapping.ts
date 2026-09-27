@@ -72,6 +72,25 @@ export function mapSampleRows(items: unknown[], mapping: ApiFieldMapping): MapRe
 	return { rows, skippedCount, truncated };
 }
 
+/** R2: derives the sample-field chip list from the chosen array (or the top-level list, when the
+ * response already is one) — the same derivation `ApiSourceModal.fetchSample`'s initial fetch already
+ * does (first object item's own keys), pulled out here so the array-field dropdown's `onChange` can
+ * reuse it instead of the old, wrong `Object.keys(topLevelResponse)`, and so it's unit-testable
+ * without the modal's own `obsidian` runtime dependency. */
+export function sampleFieldsForArrayField(response: unknown, arrayField?: string): string[] {
+	const items = extractArray(response, arrayField);
+	if (items === null) return [];
+	const first = items.find((item) => item && typeof item === "object") as Record<string, unknown> | undefined;
+	return first ? Object.keys(first) : [];
+}
+
+/** G1: whether a data-source config has everything required to save (a URL, and required id/label
+ * mapping targets) — the modal's Save-button enablement delegates here rather than duplicating the
+ * rule, so R10 can unit-test it without the modal's own `obsidian` runtime dependency. */
+export function canSaveApiSource(url: string, mapping: Pick<ApiFieldMapping, "idField" | "labelField">): boolean {
+	return url.trim().length > 0 && mapping.idField.trim().length > 0 && mapping.labelField.trim().length > 0;
+}
+
 export type MapResponseResult = MapResult | { error: string };
 
 export function isMapError(result: MapResponseResult): result is { error: string } {

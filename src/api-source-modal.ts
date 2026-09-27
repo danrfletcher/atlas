@@ -1,6 +1,7 @@
-import { App, Modal, Notice, Setting } from "obsidian";
-import { findArrayFields, isMapError, mapResponseRows } from "./api-mapping";
+import { App, Modal, Notice, Platform, Setting } from "obsidian";
+import { canSaveApiSource, findArrayFields, sampleFieldsForArrayField } from "./api-mapping";
 import { httpGetJson } from "./api-http";
+import { obsidianRequestImpl } from "./api-request-obsidian";
 import { ApiFieldMapping, ApiHeader, ApiSourceConfig } from "./types";
 
 export interface ApiSourceModalResult {
@@ -165,43 +166,38 @@ export class ApiSourceModal extends Modal {
 	}
 
 	private canSave(): boolean {
-		return this.url.trim().length > 0 && this.mapping.idField.trim().length > 0 && this.mapping.labelField.trim().length > 0;
+		return canSaveApiSource(this.url, this.mapping);
 	}
 
+	/** R2: was deriving `sampleFields` from the *top-level* response's own keys (`Object.keys`) no
+	 * matter which array field got picked — wrong for an object response, whose rows live one level
+	 * down inside that array. Now shares `sampleFieldsForArrayField` with the initial `fetchSample`
+	 * fetch, so both derive fields from the chosen array's first item, not the wrapper object. */
 	private applyMapping(): void {
 		if (!this.lastResponse) return;
-		const result = mapResponseRows(this.lastResponse, this.mapping);
-		if (!isMapError(result) && result.rows.length > 0) {
-			this.sampleFields = Object.keys(this.lastResponse as Record<string, unknown>);
-		}
+		this.sampleFields = sampleFieldsForArrayField(this.lastResponse, this.mapping.arrayField);
 	}
 
 	private async fetchSample(): Promise<void> {
+		// R8/G13: mobile shows cached rows only — Fetch sample would otherwise attempt a live request.
+		if (Platform.isMobile) {
+			new Notice("Fetching a sample isn't available on mobile.");
+			return;
+		}
 		const headerRecord: Record<string, string> = {};
 		for (const header of this.headers) if (header.key) headerRecord[header.key] = header.value;
 
-		const result = await httpGetJson(this.url, headerRecord);
+		const result = await httpGetJson(this.url, headerRecord, { requestImpl: obsidianRequestImpl });
 		if (!result.ok) {
 			new Notice(`Atlas: fetch failed — ${result.error.message}`);
 			return;
 		}
 		this.lastResponse = result.json;
 		this.arrayFieldCandidates = findArrayFields(result.json);
-
-		const items = Array.isArray(result.json)
-			? result.json
-			: this.mapping.arrayField && Array.isArray((result.json as Record<string, unknown>)[this.mapping.arrayField])
-				? ((result.json as Record<string, unknown>)[this.mapping.arrayField] as unknown[])
-				: null;
-
-		if (items === null) {
-			this.sampleFields = [];
-			if (this.arrayFieldCandidates.length === 0) new Notice("Atlas: response is not a JSON list and has no array field to pick.");
-			this.render();
-			return;
+		this.sampleFields = sampleFieldsForArrayField(result.json, this.mapping.arrayField);
+		if (this.sampleFields.length === 0 && this.arrayFieldCandidates.length === 0 && !Array.isArray(result.json)) {
+			new Notice("Atlas: response is not a JSON list and has no array field to pick.");
 		}
-		const first = items.find((item) => item && typeof item === "object") as Record<string, unknown> | undefined;
-		this.sampleFields = first ? Object.keys(first) : [];
 		this.render();
 	}
 
