@@ -91,6 +91,29 @@ export function canSaveApiSource(url: string, mapping: Pick<ApiFieldMapping, "id
 	return url.trim().length > 0 && mapping.idField.trim().length > 0 && mapping.labelField.trim().length > 0;
 }
 
+/** R18: does this API row match the explorer's free-text filter? Applied to `label` and, if present,
+ * `secondary` — the same fields a unit row's own resolved display text is filtered on — so a Folder's
+ * API rows behave "like any Folder with its own children" (G12) instead of always showing regardless
+ * of the filter. An empty filter matches everything, same as `matchesFilter` elsewhere. */
+export function apiItemMatchesFilter(filterText: string, label: string, secondary?: string): boolean {
+	const needle = filterText.trim().toLowerCase();
+	if (!needle) return true;
+	return label.toLowerCase().includes(needle) || (!!secondary && secondary.toLowerCase().includes(needle));
+}
+
+/** R19: `lastSeenAt` is a UTC ISO string (`api-source-controller.ts`'s `doRefresh`); naively slicing
+ * its first 10 characters shows the UTC calendar date, which can be a day off from the user's local
+ * calendar date near midnight (e.g. 00:30 local BST on the 25th is stored as 23:30 UTC on the 24th).
+ * Formats using the local Y/M/D fields instead, so "not found, last seen <date>" always matches what
+ * the user's own clock would call that day. */
+export function formatLocalDateFromIso(iso: string): string {
+	const d = new Date(iso);
+	const year = d.getFullYear();
+	const month = String(d.getMonth() + 1).padStart(2, "0");
+	const day = String(d.getDate()).padStart(2, "0");
+	return `${year}-${month}-${day}`;
+}
+
 export type MapResponseResult = MapResult | { error: string };
 
 export function isMapError(result: MapResponseResult): result is { error: string } {

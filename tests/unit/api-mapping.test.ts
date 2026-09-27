@@ -1,5 +1,15 @@
 import { describe, expect, it } from "vitest";
-import { API_ROW_CAP, canSaveApiSource, findArrayFields, isMapError, mapResponseRows, mapSampleRows, sampleFieldsForArrayField } from "../../src/api-mapping";
+import {
+	API_ROW_CAP,
+	apiItemMatchesFilter,
+	canSaveApiSource,
+	findArrayFields,
+	formatLocalDateFromIso,
+	isMapError,
+	mapResponseRows,
+	mapSampleRows,
+	sampleFieldsForArrayField,
+} from "../../src/api-mapping";
 import { ApiFieldMapping } from "../../src/types";
 
 const mapping: ApiFieldMapping = { idField: "id", labelField: "name" };
@@ -149,5 +159,51 @@ describe("sampleFieldsForArrayField — R2: fields come from the array's own ite
 		const response = { users: [{ id: "1", name: "One" }], groups: [{ gid: "g1", title: "Group" }] };
 		expect(sampleFieldsForArrayField(response, "users")).toEqual(["id", "name"]);
 		expect(sampleFieldsForArrayField(response, "groups")).toEqual(["gid", "title"]);
+	});
+});
+
+describe("apiItemMatchesFilter — R18: API rows respect the explorer filter like any other row", () => {
+	it("matches everything when the filter is empty or blank", () => {
+		expect(apiItemMatchesFilter("", "Docker", "4.34")).toBe(true);
+		expect(apiItemMatchesFilter("   ", "Docker", "4.34")).toBe(true);
+	});
+
+	it("matches case-insensitively against the label", () => {
+		expect(apiItemMatchesFilter("docker", "Docker", undefined)).toBe(true);
+		expect(apiItemMatchesFilter("DOCKER", "Docker", undefined)).toBe(true);
+	});
+
+	it("matches against the secondary text when the label doesn't match", () => {
+		expect(apiItemMatchesFilter("4.34", "Docker", "4.34")).toBe(true);
+	});
+
+	it("does not match when neither label nor secondary contain the filter", () => {
+		expect(apiItemMatchesFilter("brew", "Docker", "4.34")).toBe(false);
+	});
+
+	it("does not match on secondary when secondary is absent", () => {
+		expect(apiItemMatchesFilter("4.34", "Docker", undefined)).toBe(false);
+	});
+});
+
+describe("formatLocalDateFromIso — R19: local calendar date, not the UTC one", () => {
+	it("formats a UTC-midday timestamp the same in any timezone", () => {
+		expect(formatLocalDateFromIso("2026-09-25T12:00:00.000Z")).toBe("2026-09-25");
+	});
+
+	it("pads single-digit months and days", () => {
+		expect(formatLocalDateFromIso("2026-01-05T12:00:00.000Z")).toBe("2026-01-05");
+	});
+
+	it("R19: near a day boundary, reports the *local* calendar date, which the old `.slice(0, 10)` on the raw UTC string would have gotten wrong", () => {
+		const originalTz = process.env.TZ;
+		process.env.TZ = "Pacific/Kiritimati"; // UTC+14 — always a calendar day ahead of UTC
+		try {
+			// A row last seen at 2026-09-24T23:30Z is already 2026-09-25 local in this timezone —
+			// `"2026-09-24T23:30:00.000Z".slice(0, 10)` would wrongly report "2026-09-24".
+			expect(formatLocalDateFromIso("2026-09-24T23:30:00.000Z")).toBe("2026-09-25");
+		} finally {
+			process.env.TZ = originalTz;
+		}
 	});
 });

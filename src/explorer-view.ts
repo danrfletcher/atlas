@@ -15,6 +15,7 @@ import { generateBlockId } from "./display-text";
 import { ApiSourceModal } from "./api-source-modal";
 import { ViewLoadTrigger, dotStateFor, dotTooltip } from "./api-source-controller";
 import { obsidianRequestImpl } from "./api-request-obsidian";
+import { apiItemMatchesFilter, formatLocalDateFromIso } from "./api-mapping";
 
 export const ATLAS_VIEW_TYPE = "atlas-explorer";
 
@@ -531,7 +532,9 @@ export class AtlasExplorerView extends ItemView {
 			// R4: previously rendered "not found" with no date — G6 requires the last-seen date too.
 			// R13: format as ISO-date (2026-09-25), matching the spec's example, rather than
 			// `toLocaleDateString`'s locale-dependent format (25/09/2026 in en-GB).
-			const text = item.lastSeenAt ? `not found, last seen ${item.lastSeenAt.slice(0, 10)}` : "not found";
+			// R19: format the *local* calendar date — `lastSeenAt` is a UTC ISO string, and slicing it
+			// directly reports the UTC date, which can be a day behind the local one near midnight.
+			const text = item.lastSeenAt ? `not found, last seen ${formatLocalDateFromIso(item.lastSeenAt)}` : "not found";
 			row.createSpan({ cls: "atlas-row-secondary", text });
 		}
 
@@ -554,8 +557,24 @@ export class AtlasExplorerView extends ItemView {
 		if (!node.apiSource || !node.apiItemOrder) return;
 		for (const itemId of node.apiItemOrder) {
 			const item = node.apiItemState?.[itemId];
-			if (item) this.renderApiItemRow(item, container, view, node, depth, ancestors);
+			if (!item) continue;
+			// R18: API rows must respect the explorer filter, same as any unit row (G12 — a Folder with
+			// API rows behaves "like any Folder with its own children").
+			if (!apiItemMatchesFilter(this.filterText, item.label, item.secondary)) continue;
+			this.renderApiItemRow(item, container, view, node, depth, ancestors);
 		}
+	}
+
+	/** R18: does this Folder's own API rows (not its real `children`) contain a filter match? Used
+	 * alongside `subtreeHasMatch` everywhere a collapsed Folder needs to be force-revealed, or bypass
+	 * truncation grouping, for a matching descendant — API rows are a Folder's rows too, just not
+	 * `ViewNode`s (G10), so they need the same "never hide a match behind a stale fold" treatment. */
+	private apiItemsMatchFilter(node: ViewNode): boolean {
+		if (!node.apiSource || !node.apiItemOrder) return false;
+		return node.apiItemOrder.some((itemId) => {
+			const item = node.apiItemState?.[itemId];
+			return item ? apiItemMatchesFilter(this.filterText, item.label, item.secondary) : false;
+		});
 	}
 
 	// --- ref resolution (shared by bucket + inbox rendering) -------------------------------------
@@ -920,6 +939,7 @@ export class AtlasExplorerView extends ItemView {
 					const info = await this.resolveRef(node.ref);
 					if (this.matchesFilter(info.text)) bypass = true;
 				}
+				if (!bypass && node.type === "meta" && this.apiItemsMatchFilter(node)) bypass = true;
 				if (!bypass && node.children.length > 0 && (await this.subtreeHasMatch(node.children))) bypass = true;
 			}
 			resolved.push({ node, status, governor, bypass });
@@ -1157,6 +1177,9 @@ export class AtlasExplorerView extends ItemView {
 				const info = await this.resolveRef(n.ref);
 				if (this.matchesFilter(info.text)) return true;
 			}
+			// R18: a Folder's API rows are its rows too, just not `ViewNode` children (G10) — a filter
+			// match among them must force-reveal the Folder the same as a matching real descendant would.
+			if (n.type === "meta" && this.apiItemsMatchFilter(n)) return true;
 			if (n.children.length > 0 && (await this.subtreeHasMatch(n.children))) return true;
 		}
 		return false;
@@ -1192,7 +1215,7 @@ export class AtlasExplorerView extends ItemView {
 		if (filterActive) {
 			if (!this.preFilterCollapsedState) this.preFilterCollapsedState = new Map();
 			if (!this.preFilterCollapsedState.has(node.id)) this.preFilterCollapsedState.set(node.id, node.collapsed);
-			if (await this.subtreeHasMatch(node.children)) effectiveCollapsed = false;
+			if ((await this.subtreeHasMatch(node.children)) || this.apiItemsMatchFilter(node)) effectiveCollapsed = false;
 		}
 		setIcon(chevron, effectiveCollapsed ? "chevron-right" : "chevron-down");
 
