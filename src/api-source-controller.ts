@@ -1,11 +1,15 @@
 import { isMapError, mapResponseRows } from "./api-mapping";
 import { mergeApiItems } from "./api-merge";
-import { FetchFn, httpGetJson, HTTP_TIMEOUT_MS } from "./api-http";
+import { httpGetJson, HTTP_TIMEOUT_MS, RequestFn, ScheduleTimeout } from "./api-http";
 import { ApiCache, ApiHeader, ApiSourceConfig, ViewNode } from "./types";
 
 export interface RefreshDeps {
-	fetchImpl?: FetchFn;
+	/** R1: how to actually issue the request — production wiring supplies an adapter around
+	 * Obsidian's `requestUrl` (see `api-request-obsidian.ts`); tests supply their own stub. Required,
+	 * not defaulted to `fetch`, so nothing here can silently fall back to a CORS-subject request. */
+	requestImpl: RequestFn;
 	timeoutMs?: number;
+	scheduleTimeout?: ScheduleTimeout;
 	now?: () => number;
 }
 
@@ -33,7 +37,11 @@ export function dotTooltip(cache: ApiCache | undefined, nowMs: number): string {
 	if (cache.ok) {
 		parts.push(`Last refresh ok, ${relativeTime(cache.fetchedAt, nowMs)}`);
 	} else {
-		parts.push(`${cache.error ?? "unreachable"}, last updated ${relativeTime(cache.fetchedAt, nowMs)}`);
+		const lastSuccess =
+			cache.lastSuccessAt !== undefined
+				? `last updated ${relativeTime(cache.lastSuccessAt, nowMs)}`
+				: "never refreshed successfully";
+		parts.push(`${cache.error ?? "unreachable"}, ${lastSuccess}`);
 	}
 	if (cache.skippedCount > 0) parts.push(`${cache.skippedCount} item(s) skipped (missing/duplicate id)`);
 	if (cache.truncated) parts.push("Response truncated at 5,000 rows");
@@ -48,6 +56,9 @@ function emptyCache(prev: ApiCache | undefined, fetchedAt: number, error: string
 		rows: prev?.rows ?? [],
 		skippedCount: prev?.skippedCount ?? 0,
 		truncated: prev?.truncated ?? false,
+		// R3: a failed attempt's own time must never overwrite the time of the *last success* — that's
+		// what the dot's tooltip ("unreachable, last updated 3 h ago") actually reports.
+		lastSuccessAt: prev?.lastSuccessAt,
 	};
 }
 
@@ -60,7 +71,7 @@ function emptyCache(prev: ApiCache | undefined, fetchedAt: number, error: string
 export class ApiSourceController {
 	private inFlight = new Map<string, Promise<void>>();
 
-	refresh(node: ViewNode, source: ApiSourceConfig, headers: ApiHeader[], persist: () => void, deps: RefreshDeps = {}): Promise<void> {
+	refresh(node: ViewNode, source: ApiSourceConfig, headers: ApiHeader[], persist: () => void, deps: RefreshDeps): Promise<void> {
 		const existing = this.inFlight.get(node.id);
 		if (existing) return existing;
 
@@ -77,7 +88,11 @@ export class ApiSourceController {
 		const headerRecord: Record<string, string> = {};
 		for (const header of headers) if (header.key) headerRecord[header.key] = header.value;
 
-		const result = await httpGetJson(source.url, headerRecord, { fetchImpl: deps.fetchImpl, timeoutMs: deps.timeoutMs ?? HTTP_TIMEOUT_MS });
+		const result = await httpGetJson(source.url, headerRecord, {
+			requestImpl: deps.requestImpl,
+			timeoutMs: deps.timeoutMs ?? HTTP_TIMEOUT_MS,
+			scheduleTimeout: deps.scheduleTimeout,
+		});
 
 		if (!result.ok) {
 			node.apiCache = emptyCache(node.apiCache, now(), result.error.message);
@@ -107,6 +122,7 @@ export class ApiSourceController {
 			rows: mapped.rows,
 			skippedCount: mapped.skippedCount,
 			truncated: mapped.truncated,
+			lastSuccessAt: fetchedAt,
 		};
 		persist();
 	}
