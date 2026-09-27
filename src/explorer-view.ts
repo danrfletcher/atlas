@@ -2029,7 +2029,14 @@ export class AtlasExplorerView extends ItemView {
 							this.plugin.app,
 							`Remove the data source from "${node.label}"? Its current rows stay in place as plain rows — it just stops refreshing.`,
 							"Remove",
-							() => this.plugin.viewsManager.setApiSource(view.id, node.id, undefined)
+							() => {
+								this.plugin.viewsManager.setApiSource(view.id, node.id, undefined);
+								// R4/G4: the source config itself includes headers (device-local, in
+								// ApiHeadersStore) — Remove drops those too, same as Delete folder already
+								// does, so a bearer token doesn't linger on the device or silently reappear
+								// if a source is added back to this Folder later.
+								this.plugin.apiHeadersStore.delete(node.id);
+							}
 						).open();
 					})
 			);
