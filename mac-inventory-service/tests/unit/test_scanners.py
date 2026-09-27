@@ -1,5 +1,6 @@
 import os
 import stat
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -34,8 +35,9 @@ class StubToolsTestCase(unittest.TestCase):
             os.environ["MAC_INVENTORY_TEST_FIXTURES"] = self._old_fixtures
         self._tmp.cleanup()
 
-    def _make_app(self, apps_dir: Path, bundle_name: str) -> None:
-        info_path = apps_dir / f"{bundle_name}.app" / "Contents" / "Info.plist"
+    def _make_app(self, apps_dir: Path, bundle_name: str, subdir: str = "") -> None:
+        bundle_dir = apps_dir / subdir / f"{bundle_name}.app" if subdir else apps_dir / f"{bundle_name}.app"
+        info_path = bundle_dir / "Contents" / "Info.plist"
         info_path.parent.mkdir(parents=True, exist_ok=True)
         info_path.write_text("placeholder -- the stub plutil ignores real content and keys off the bundle name")
 
@@ -89,6 +91,53 @@ class ScanAppsTests(StubToolsTestCase):
         items = scan_apps(run=run_command, directories=[apps_dir])
         self.assertEqual([i["id"] for i in items], ["com.docker.docker"])
 
+    def test_finds_apps_nested_in_subfolders(self):
+        # R9: Utilities folders and vendor folders put .app bundles a level or more
+        # below /Applications; a direct-children-only scan misses them entirely.
+        apps_dir = self.tmp_path / "Applications"
+        self._make_app(apps_dir, "Docker")
+        self._make_app(apps_dir, "Foo", subdir="Vendor")
+
+        items = scan_apps(run=run_command, directories=[apps_dir])
+
+        ids = {i["id"] for i in items}
+        self.assertIn("com.docker.docker", ids)
+        nested = next(i for i in items if i["id"] == "com.vendor.foo")
+        self.assertTrue(nested["path"].endswith(str(Path("Vendor") / "Foo.app")))
+
+    def test_does_not_descend_into_app_bundle_contents(self):
+        apps_dir = self.tmp_path / "Applications"
+        self._make_app(apps_dir, "Docker")
+        # A file living inside the bundle's own Contents dir must never be treated
+        # as a nested app to scan into.
+        (apps_dir / "Docker.app" / "Contents" / "Resources" / "Nested.app").mkdir(parents=True)
+
+        items = scan_apps(run=run_command, directories=[apps_dir])
+        self.assertEqual([i["id"] for i in items], ["com.docker.docker"])
+
+    def test_runner_level_plutil_failure_raises_instead_of_emptying_apps(self):
+        # R10: a missing or hung plutil is a runner-level failure, not a bad file --
+        # it must raise so the cache keeps its last good snapshot rather than being
+        # silently emptied.
+        apps_dir = self.tmp_path / "Applications"
+        self._make_app(apps_dir, "Docker")
+
+        def missing_plutil(argv, timeout=None):
+            raise FileNotFoundError("plutil not found")
+
+        with self.assertRaises(Exception):
+            scan_apps(run=missing_plutil, directories=[apps_dir])
+
+    def test_hung_plutil_raises_instead_of_emptying_apps(self):
+        apps_dir = self.tmp_path / "Applications"
+        self._make_app(apps_dir, "Docker")
+
+        def hung_plutil(argv, timeout=None):
+            raise subprocess.TimeoutExpired(cmd=argv, timeout=timeout or 10)
+
+        with self.assertRaises(Exception):
+            scan_apps(run=hung_plutil, directories=[apps_dir])
+
 
 class ScanLaunchAgentsTests(StubToolsTestCase):
     def test_g16_merges_three_directories(self):
@@ -130,6 +179,18 @@ class ScanLaunchAgentsTests(StubToolsTestCase):
 
         items = scan_launch_agents(run=run_command, directories=[agents])
         self.assertEqual([i["id"] for i in items], ["com.apple.foo"])
+
+    def test_runner_level_plutil_failure_raises_instead_of_emptying_launch_agents(self):
+        # R10: same runner-level-vs-per-file distinction as scan_apps, for the
+        # launch-agents scan.
+        agents = self.tmp_path / "LaunchAgents"
+        self._make_launch_agent(agents, "com.apple.foo")
+
+        def missing_plutil(argv, timeout=None):
+            raise FileNotFoundError("plutil not found")
+
+        with self.assertRaises(Exception):
+            scan_launch_agents(run=missing_plutil, directories=[agents])
 
 
 class ScanCliTests(StubToolsTestCase):

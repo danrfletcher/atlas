@@ -3,10 +3,11 @@ by default), which is itself the allow-list gate -- see procrun.py.
 """
 
 import json
+import os
 import re
 import shutil
 from pathlib import Path
-from typing import Callable, Dict, List, Optional
+from typing import Callable, Dict, Iterator, List, Optional
 
 from . import config
 from .ids import dedup_items, derive_app_id, derive_cli_id, derive_launch_agent_id
@@ -20,11 +21,16 @@ def _manager_available(name: str) -> bool:
 
 
 def _read_plist_json(path: Path, run: RunFn) -> Optional[dict]:
-    """plutil -convert json -o - <path>; None on any failure (missing/malformed/non-plist)."""
-    try:
-        result = run(["plutil", "-convert", "json", "-o", "-", str(path)])
-    except Exception:
-        return None
+    """plutil -convert json -o - <path>.
+
+    A non-zero exit or unparsable stdout means this one file isn't a usable plist
+    (missing, malformed, non-plist) and is skipped -- callers treat None as "skip this
+    entry". A runner-level failure -- plutil missing or hung -- means plutil itself is
+    unusable right now, not that this one file is bad, so that exception is left to
+    propagate (R10): the whole scan aborts and the endpoint cache keeps its last good
+    snapshot instead of quietly emptying every app/launch-agent.
+    """
+    result = run(["plutil", "-convert", "json", "-o", "-", str(path)])
     if result.returncode != 0:
         return None
     try:
@@ -34,17 +40,27 @@ def _read_plist_json(path: Path, run: RunFn) -> Optional[dict]:
     return data if isinstance(data, dict) else None
 
 
+def _iter_app_bundles(root: Path) -> Iterator[Path]:
+    """Depth-first walk for `.app` bundles anywhere under `root` (R9): system and
+    vendor apps often sit one or more levels deep (e.g. /Applications/Utilities,
+    "/Applications/Adobe Photoshop 2026/Adobe Photoshop 2026.app"). Never descends
+    into a `.app` bundle's own contents -- it's a leaf, not a folder to search.
+    A missing or unreadable root simply yields nothing.
+    """
+    for dirpath, dirnames, _filenames in os.walk(root):
+        dirnames.sort()
+        current = Path(dirpath)
+        bundle_names = [name for name in dirnames if name.endswith(".app")]
+        dirnames[:] = [name for name in dirnames if not name.endswith(".app")]
+        for name in bundle_names:
+            yield current / name
+
+
 def scan_apps(run: RunFn = default_run_command, directories: Optional[List[Path]] = None) -> List[Dict]:
     directories = directories if directories is not None else config.APP_DIRECTORIES
     items: List[Dict] = []
     for directory in directories:
-        try:
-            entries = sorted(Path(directory).iterdir())
-        except OSError:
-            continue
-        for entry in entries:
-            if entry.suffix != ".app":
-                continue
+        for entry in _iter_app_bundles(Path(directory)):
             info = _read_plist_json(entry / "Contents" / "Info.plist", run)
             if info is None:
                 continue
