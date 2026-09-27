@@ -69,18 +69,39 @@ function emptyCache(prev: ApiCache | undefined, fetchedAt: number, error: string
  * in flight, so tests don't leak state between cases the way a module-level singleton would.
  */
 export class ApiSourceController {
-	private inFlight = new Map<string, Promise<void>>();
+	private inFlight = new Map<string, { promise: Promise<void>; sourceKey: string }>();
 
+	/**
+	 * R15: the in-flight guard used to be keyed only by node.id, so a save that changed the URL/
+	 * mapping/headers while a refresh for the *old* config was still in flight would collapse into
+	 * that stale request — the new config was never fetched. Now the guard also tracks which config
+	 * a request was built from: a matching config still collapses into the same request, but a
+	 * changed one queues exactly one follow-up refresh (with the new config) to run once the in-flight
+	 * one finishes, instead of firing concurrently or being dropped.
+	 */
 	refresh(node: ViewNode, source: ApiSourceConfig, headers: ApiHeader[], persist: () => void, deps: RefreshDeps): Promise<void> {
+		const sourceKey = ApiSourceController.sourceKeyFor(source, headers);
 		const existing = this.inFlight.get(node.id);
-		if (existing) return existing;
+		if (existing) {
+			if (existing.sourceKey === sourceKey) return existing.promise;
+			const queued = existing.promise.then(() => this.runRefresh(node, source, headers, persist, deps, sourceKey));
+			this.inFlight.set(node.id, { promise: queued, sourceKey });
+			return queued;
+		}
+		return this.runRefresh(node, source, headers, persist, deps, sourceKey);
+	}
 
+	private runRefresh(node: ViewNode, source: ApiSourceConfig, headers: ApiHeader[], persist: () => void, deps: RefreshDeps, sourceKey: string): Promise<void> {
 		const run = this.doRefresh(node, source, headers, persist, deps);
-		this.inFlight.set(node.id, run);
+		this.inFlight.set(node.id, { promise: run, sourceKey });
 		void run.finally(() => {
-			if (this.inFlight.get(node.id) === run) this.inFlight.delete(node.id);
+			if (this.inFlight.get(node.id)?.promise === run) this.inFlight.delete(node.id);
 		});
 		return run;
+	}
+
+	private static sourceKeyFor(source: ApiSourceConfig, headers: ApiHeader[]): string {
+		return JSON.stringify({ source, headers });
 	}
 
 	private async doRefresh(node: ViewNode, source: ApiSourceConfig, headers: ApiHeader[], persist: () => void, deps: RefreshDeps): Promise<void> {
