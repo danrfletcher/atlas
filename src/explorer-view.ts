@@ -3,7 +3,7 @@ import type AtlasPlugin from "./main";
 import { ApiItemState, StatusGovernance, TruncatedStatusConfig, Unit, UnitRef, View, ViewNode, unitRefKey, unitToRef } from "./types";
 import { MetaTarget, flattenMetaFolders } from "./views";
 import { resolveUnit } from "./unit-display";
-import { TextPromptModal, ConfirmModal, StatusesModal } from "./modals";
+import { TextPromptModal, ConfirmModal, ConfirmDeleteRowsModal, StatusesModal } from "./modals";
 import { StatusDefinition, pluralizeStatusLabel } from "./statuses";
 import { openStatusPickerPopup } from "./status-popup";
 import { createInterfaceNote, findInterfaceNote } from "./interface-notes";
@@ -16,6 +16,7 @@ import { ApiSourceModal } from "./api-source-modal";
 import { ViewLoadTrigger, dotStateFor, dotTooltip } from "./api-source-controller";
 import { obsidianRequestImpl } from "./api-request-obsidian";
 import { apiItemMatchesFilter, formatLocalDateFromIso } from "./api-mapping";
+import { MIN_REFRESH_MINUTES, RefreshEveryTimers } from "./api-refresh-timer";
 
 export const ATLAS_VIEW_TYPE = "atlas-explorer";
 
@@ -310,6 +311,12 @@ export class AtlasExplorerView extends ItemView {
 	/** G5a: fires refresh-on-view-load exactly once per open/return of this leaf, not on every
 	 * unrelated re-render. */
 	private viewLoadTrigger = new ViewLoadTrigger();
+	/** G5b/F3: one interval per API Folder with "Refresh every X minutes" on, scoped to the *active*
+	 * named View only — same scoping G5a's own view-load refresh already uses, so switching to a
+	 * different View stops timers for Folders that aren't currently showing, and returning to this one
+	 * schedules them fresh (with at most one immediate catch-up refresh if it's overdue, never a burst).
+	 * Alive only for as long as this Atlas leaf itself is open — `onClose()` stops every one of them. */
+	private refreshEveryTimers = new RefreshEveryTimers();
 	private unsubscribers: (() => void)[] = [];
 	private renderQueued = false;
 	/** F11: rebuilt once per render from the flat unit list, so resolving a ref is O(1) instead of
@@ -381,6 +388,7 @@ export class AtlasExplorerView extends ItemView {
 
 	async onClose(): Promise<void> {
 		for (const unsub of this.unsubscribers) unsub();
+		this.refreshEveryTimers.stopAll();
 	}
 
 	/** Collapses bursts of index/view change events (a drag can fire several) into one render. */
@@ -409,7 +417,7 @@ export class AtlasExplorerView extends ItemView {
 	private refreshApiSourcesOnViewLoad(): void {
 		const view = this.plugin.viewsManager.getActiveView();
 		for (const node of this.collectApiSourceNodes(view.root)) {
-			if (node.apiSource?.refreshOnViewLoad) this.refreshApiSource(view, node);
+			if (node.apiSource?.refreshOnViewLoad) this.refreshApiSource(view, node, "automatic");
 		}
 	}
 
@@ -424,13 +432,37 @@ export class AtlasExplorerView extends ItemView {
 		return out;
 	}
 
-	/** R8/G13: the one choke point every refresh trigger in this file goes through (view-load,
-	 * "Refresh now", post-save) — mobile shows cached rows only and can never trigger a live request. */
-	private refreshApiSource(view: View, node: ViewNode): void {
+	/** G5b/F3: (re)schedules this Atlas view's "Refresh every X minutes" timers against the active
+	 * View's current set of eligible Folders — called after every render, so a saved config change
+	 * (interval edited, toggle flipped, source removed) reschedules cleanly on the very next render
+	 * rather than needing a dedicated call site of its own for each way that can happen. */
+	private syncRefreshTimers(view: View): void {
+		const nodes = this.collectApiSourceNodes(view.root)
+			.filter((node) => node.apiSource?.refreshEveryMinutesEnabled)
+			.map((node) => ({
+				id: node.id,
+				enabled: true,
+				minutes: node.apiSource?.refreshEveryMinutes ?? MIN_REFRESH_MINUTES,
+				lastFetchedAt: node.apiCache?.fetchedAt ?? null,
+			}));
+		this.refreshEveryTimers.sync(nodes, (nodeId) => {
+			const activeView = this.plugin.viewsManager.getActiveView();
+			const target = this.collectApiSourceNodes(activeView.root).find((n) => n.id === nodeId);
+			if (target) this.refreshApiSource(activeView, target, "automatic");
+		});
+	}
+
+	/** R8/G13: the one choke point every refresh trigger in this file goes through (view-load, the
+	 * every-X-minutes timer, "Refresh now", post-save) — mobile shows cached rows only and can never
+	 * trigger a live request. `trigger` (G5/G6b) distinguishes "Refresh now" (always asks again when a
+	 * delete needs confirming) from the two automatic triggers (ask at most once per Folder). */
+	private refreshApiSource(view: View, node: ViewNode, trigger: "manual" | "automatic" = "manual"): void {
 		if (!node.apiSource || Platform.isMobile) return;
 		const headers = this.plugin.apiHeadersStore.get(node.id);
 		void this.plugin.apiSourceController.refresh(node, node.apiSource, headers, () => this.plugin.viewsManager.notifyExternalMutation(), {
 			requestImpl: obsidianRequestImpl,
+			trigger,
+			confirmDelete: (count) => new Promise((resolve) => new ConfirmDeleteRowsModal(this.plugin.app, count, resolve).open()),
 		});
 	}
 
@@ -439,7 +471,7 @@ export class AtlasExplorerView extends ItemView {
 		new ApiSourceModal(this.plugin.app, node.apiSource ?? null, headers, (result) => {
 			this.plugin.apiHeadersStore.set(node.id, result.headers);
 			this.plugin.viewsManager.setApiSource(view.id, node.id, result.source);
-			this.refreshApiSource(view, node);
+			this.refreshApiSource(view, node, "manual");
 		}).open();
 	}
 
@@ -554,7 +586,9 @@ export class AtlasExplorerView extends ItemView {
 	/** Renders a Folder's live API items, in `apiItemOrder`, right after its real children — separate
 	 * from `renderNodeList` since these have no `ViewNode` of their own to iterate (G10). */
 	private renderApiItems(node: ViewNode, container: HTMLElement, view: View, depth: number, ancestors: StatusGovernance[]): void {
-		if (!node.apiSource || !node.apiItemOrder) return;
+		// G4: a Folder can have rows with no live source at all (source removed, rows kept as static) —
+		// gated on the rows themselves, not on `apiSource` being present.
+		if (!node.apiItemOrder) return;
 		for (const itemId of node.apiItemOrder) {
 			const item = node.apiItemState?.[itemId];
 			if (!item) continue;
@@ -570,7 +604,7 @@ export class AtlasExplorerView extends ItemView {
 	 * truncation grouping, for a matching descendant — API rows are a Folder's rows too, just not
 	 * `ViewNode`s (G10), so they need the same "never hide a match behind a stale fold" treatment. */
 	private apiItemsMatchFilter(node: ViewNode): boolean {
-		if (!node.apiSource || !node.apiItemOrder) return false;
+		if (!node.apiItemOrder) return false;
 		return node.apiItemOrder.some((itemId) => {
 			const item = node.apiItemState?.[itemId];
 			return item ? apiItemMatchesFilter(this.filterText, item.label, item.secondary) : false;
@@ -679,6 +713,7 @@ export class AtlasExplorerView extends ItemView {
 
 		container.scrollTop = scrollTop;
 		this.updateActiveHighlight();
+		this.syncRefreshTimers(view);
 	}
 
 	// --- toolbar -------------------------------------------------------------------------------
@@ -1342,9 +1377,12 @@ export class AtlasExplorerView extends ItemView {
 			this.renderRowIcon(iconEl, view, node, ancestors, "layers");
 			row.createSpan({ cls: "atlas-row-text", text: node.label ?? "" });
 			if (node.apiSource) {
-				// G11: connection dot — green ok / grey never-refreshed / red last-refresh-failed.
-				const dot = row.createSpan({ cls: `atlas-api-connection-dot atlas-api-dot-${dotStateFor(node.apiCache)}` });
-				setTooltip(dot, dotTooltip(node.apiCache, Date.now()));
+				// G11: connection dot — green ok / grey never-refreshed / red last-refresh-failed / amber
+				// (PR-3) waiting on an unanswered automatic delete confirmation.
+				const dot = row.createSpan({
+					cls: `atlas-api-connection-dot atlas-api-dot-${dotStateFor(node.apiCache, node.apiAwaitingConfirmation)}`,
+				});
+				setTooltip(dot, dotTooltip(node.apiCache, Date.now(), node.apiAwaitingConfirmation));
 			}
 
 			// PR 20: a meta row's plain click never did anything before this (no open target) — safe
@@ -1924,8 +1962,10 @@ export class AtlasExplorerView extends ItemView {
 		// depth or fold state; ignores any multi-selection, so it only ever acts on this one row.
 		addCreateItem(menu, evt, (kind) => this.startCreateFromMeta(kind, view, node));
 		// R6: an API-only Folder has no real children yet still governs its API rows' statuses (G8) —
-		// without `node.apiSource` here, such a Folder could never configure a status set at all.
-		if (node.children.length > 0 || node.apiSource) {
+		// without `node.apiSource` here, such a Folder could never configure a status set at all. G4:
+		// a Folder whose source was removed can still be carrying static rows from before — same reason
+		// applies just as much to those.
+		if (node.children.length > 0 || node.apiSource || (node.apiItemOrder && node.apiItemOrder.length > 0)) {
 			menu.addItem((item) => item.setTitle("Statuses").setIcon("circle-dot").onClick(() => this.openStatusesModal(view, node.id)));
 		}
 		menu.addSeparator();
@@ -1946,7 +1986,20 @@ export class AtlasExplorerView extends ItemView {
 							new Notice("Refreshing isn't available on mobile — showing cached rows.");
 							return;
 						}
-						this.refreshApiSource(view, node);
+						this.refreshApiSource(view, node, "manual");
+					})
+			);
+			menu.addItem((item) =>
+				item
+					.setTitle("Remove data source")
+					.setIcon("unplug")
+					.onClick(() => {
+						new ConfirmModal(
+							this.plugin.app,
+							`Remove the data source from "${node.label}"? Its current rows stay in place as plain rows — it just stops refreshing.`,
+							"Remove",
+							() => this.plugin.viewsManager.setApiSource(view.id, node.id, undefined)
+						).open();
 					})
 			);
 		}

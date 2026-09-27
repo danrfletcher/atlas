@@ -2,6 +2,7 @@ import { App, Modal, Notice, Platform, Setting } from "obsidian";
 import { canSaveApiSource, findArrayFields, sampleFieldsForArrayField } from "./api-mapping";
 import { httpGetJson } from "./api-http";
 import { obsidianRequestImpl } from "./api-request-obsidian";
+import { validateRefreshMinutes } from "./api-refresh-timer";
 import { ApiFieldMapping, ApiHeader, ApiSourceConfig } from "./types";
 
 export interface ApiSourceModalResult {
@@ -16,17 +17,25 @@ const MAPPING_TARGETS: { key: keyof ApiFieldMapping; label: string; required: bo
 ];
 
 /**
- * G1: "Data source…" modal on a Folder. URL + device-local headers + GET-only fetch, a sample fetch
- * that lists the response's fields as draggable chips (G2), three drop targets (id/label required,
- * secondary optional), Append/Merge only (Overwrite is out of scope per the fence — simply never
- * offered), and "Refresh when Atlas view loads" (G5a) — "Refresh every X minutes" is likewise never
- * offered (also fenced out).
+ * G1/PR-3: "Data source…" modal on a Folder. URL + device-local headers + GET-only fetch, a sample
+ * fetch that lists the response's fields as draggable chips (G2), three drop targets (id/label
+ * required, secondary optional), Merge/Append/Overwrite fill modes, Overwrite's two guards (G6b, greyed
+ * out and their values retained unless Overwrite is selected), and the two independent refresh toggles
+ * (G5a "when Atlas view loads", G5b "every X minutes").
  */
 export class ApiSourceModal extends Modal {
 	private url: string;
 	private headers: ApiHeader[];
-	private mode: "append" | "merge";
+	private mode: "append" | "merge" | "overwrite";
 	private refreshOnViewLoad: boolean;
+	/** G6b(i)/(ii): retained regardless of `mode` — only Overwrite's UI exposes them for editing, but
+	 * switching away and back must not lose whatever was set. */
+	private keepOnEmpty: boolean;
+	private confirmBeforeDelete: boolean;
+	/** G5b: off by default, no fixed value — the raw text field's own value, validated on every change
+	 * rather than coerced, so a mid-edit invalid value doesn't silently become someone else's number. */
+	private refreshEveryMinutesEnabled: boolean;
+	private refreshEveryMinutesRaw: string;
 	private mapping: ApiFieldMapping;
 	private sampleFields: string[] = [];
 	private arrayFieldCandidates: string[] = [];
@@ -39,6 +48,10 @@ export class ApiSourceModal extends Modal {
 		this.headers = initialHeaders.map((h) => ({ ...h }));
 		this.mode = initial?.mode ?? "merge";
 		this.refreshOnViewLoad = initial?.refreshOnViewLoad ?? false;
+		this.keepOnEmpty = initial?.keepOnEmpty ?? true;
+		this.confirmBeforeDelete = initial?.confirmBeforeDelete ?? true;
+		this.refreshEveryMinutesEnabled = initial?.refreshEveryMinutesEnabled ?? false;
+		this.refreshEveryMinutesRaw = initial?.refreshEveryMinutes !== undefined ? String(initial.refreshEveryMinutes) : "";
 		this.mapping = initial?.mapping ? { ...initial.mapping } : { idField: "", labelField: "", secondaryField: undefined };
 	}
 
@@ -142,18 +155,73 @@ export class ApiSourceModal extends Modal {
 
 		new Setting(contentEl)
 			.setName("Fill mode")
-			.setDesc("Merge keeps items by id across refreshes; Append only ever adds new ones.")
+			.setDesc("Merge keeps items by id across refreshes; Append only ever adds new ones; Overwrite replaces every row each refresh.")
 			.addDropdown((dropdown) =>
 				dropdown
 					.addOption("merge", "Merge")
 					.addOption("append", "Append")
+					.addOption("overwrite", "Overwrite")
 					.setValue(this.mode)
-					.onChange((value) => (this.mode = value as "append" | "merge"))
+					.onChange((value) => {
+						this.mode = value as "append" | "merge" | "overwrite";
+						// Guard toggles' disabled state depends on `mode` — re-render so it updates live.
+						this.render();
+					})
+			);
+
+		const overwriteGuardsDisabled = this.mode !== "overwrite";
+		new Setting(contentEl)
+			.setName("Keep current rows if the response is empty")
+			.setDesc("Overwrite only. On: an empty response leaves every row untouched. Off: an empty response deletes all rows (subject to the confirm guard below).")
+			.addToggle((toggle) =>
+				toggle
+					.setValue(this.keepOnEmpty)
+					.setDisabled(overwriteGuardsDisabled)
+					.onChange((value) => (this.keepOnEmpty = value))
+			);
+		new Setting(contentEl)
+			.setName("Confirm before deleting rows")
+			.setDesc("Overwrite only. Asks for confirmation whenever a refresh would delete one or more rows.")
+			.addToggle((toggle) =>
+				toggle
+					.setValue(this.confirmBeforeDelete)
+					.setDisabled(overwriteGuardsDisabled)
+					.onChange((value) => (this.confirmBeforeDelete = value))
 			);
 
 		new Setting(contentEl)
 			.setName("Refresh when Atlas view loads")
 			.addToggle((toggle) => toggle.setValue(this.refreshOnViewLoad).onChange((value) => (this.refreshOnViewLoad = value)));
+
+		let refreshErrorEl: HTMLElement | null = null;
+		const updateRefreshMinutesValidity = () => {
+			const validation = this.refreshEveryMinutesEnabled ? validateRefreshMinutes(this.refreshEveryMinutesRaw) : null;
+			refreshErrorEl?.setText(validation && !validation.ok ? validation.error : "");
+			this.updateSaveButton();
+		};
+		new Setting(contentEl)
+			.setName("Refresh every")
+			.setDesc("Minutes between automatic refreshes while this Atlas view is open. Minimum 5 — off by default.")
+			.addToggle((toggle) =>
+				toggle.setValue(this.refreshEveryMinutesEnabled).onChange((value) => {
+					this.refreshEveryMinutesEnabled = value;
+					// Enabling/disabling the field's own editability — a discrete click, not a keystroke,
+					// so a full re-render here doesn't cost focus the way it would mid-typing.
+					this.render();
+				})
+			)
+			.addText((text) =>
+				text
+					.setPlaceholder("minutes")
+					.setValue(this.refreshEveryMinutesRaw)
+					.setDisabled(!this.refreshEveryMinutesEnabled)
+					.onChange((value) => {
+						this.refreshEveryMinutesRaw = value;
+						updateRefreshMinutesValidity();
+					})
+			);
+		refreshErrorEl = contentEl.createEl("p", { cls: "atlas-api-field-error" });
+		updateRefreshMinutesValidity();
 
 		const footer = new Setting(contentEl);
 		footer.addButton((btn) => btn.setButtonText("Cancel").onClick(() => this.close()));
@@ -169,7 +237,13 @@ export class ApiSourceModal extends Modal {
 	}
 
 	private canSave(): boolean {
-		return canSaveApiSource(this.url, this.mapping);
+		if (!canSaveApiSource(this.url, this.mapping)) return false;
+		if (this.refreshEveryMinutesEnabled && !validateRefreshMinutes(this.refreshEveryMinutesRaw).ok) return false;
+		return true;
+	}
+
+	private updateSaveButton(): void {
+		if (this.saveButton) this.saveButton.disabled = !this.canSave();
 	}
 
 	/** R2: was deriving `sampleFields` from the *top-level* response's own keys (`Object.keys`) no
@@ -206,12 +280,17 @@ export class ApiSourceModal extends Modal {
 
 	private save(): void {
 		if (!this.canSave()) return;
+		const refreshEveryMinutesValidation = this.refreshEveryMinutesEnabled ? validateRefreshMinutes(this.refreshEveryMinutesRaw) : null;
 		const source: ApiSourceConfig = {
 			url: this.url.trim(),
 			method: "GET",
 			mapping: { ...this.mapping },
 			mode: this.mode,
 			refreshOnViewLoad: this.refreshOnViewLoad,
+			refreshEveryMinutesEnabled: this.refreshEveryMinutesEnabled,
+			refreshEveryMinutes: refreshEveryMinutesValidation?.ok ? refreshEveryMinutesValidation.minutes : undefined,
+			keepOnEmpty: this.keepOnEmpty,
+			confirmBeforeDelete: this.confirmBeforeDelete,
 		};
 		this.close();
 		this.onSave({ source, headers: this.headers.filter((h) => h.key.trim().length > 0) });
