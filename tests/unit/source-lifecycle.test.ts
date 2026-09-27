@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { App } from "obsidian";
-import { ViewsManager } from "../../src/views";
+import { ViewsManager, nodeHasApiRows } from "../../src/views";
 import { ApiSourceConfig } from "../../src/types";
 
 /** G4/G7/E6/E7: exercises `ViewsManager`'s source-lifecycle operations — "Remove data source" (G4),
@@ -183,5 +183,38 @@ describe("E6 — deleting a Folder removes its itemState along with source/cache
 		vm.deleteMetaFolder(view.id, folder.id);
 
 		expect(vm.getNode(view.id, child.id)).not.toBeNull();
+	});
+});
+
+describe("T2 — a Folder's row-rendering gate must not go false the instant its source is removed", () => {
+	it("a live source with no rows yet still counts as having rows to show", () => {
+		expect(nodeHasApiRows({ apiSource: undefined, apiItemOrder: undefined })).toBe(false);
+	});
+
+	it("a removed source's leftover static rows still count, exactly the G4 regression explorer-view.ts hit", () => {
+		const vm = makeManager();
+		const view = vm.getViews()[0];
+		const folder = vm.addMetaFolder(view.id, null, "API folder")!;
+		vm.setApiSource(view.id, folder.id, makeSource());
+		const before = vm.getNode(view.id, folder.id)!;
+		before.apiItemState = { "1": { id: "1", label: "One" } };
+		before.apiItemOrder = ["1"];
+		expect(nodeHasApiRows(before)).toBe(true);
+
+		vm.setApiSource(view.id, folder.id, undefined);
+		const after = vm.getNode(view.id, folder.id)!;
+
+		// This is the exact condition explorer-view.ts gates rendering on (T2): before the fix it used
+		// `node.apiSource` alone, which goes false here even though the static rows survive.
+		expect(after.apiSource).toBeUndefined();
+		expect(after.apiItemOrder).toEqual(["1"]);
+		expect(nodeHasApiRows(after)).toBe(true);
+	});
+
+	it("a Folder with neither a source nor any rows has nothing to show", () => {
+		const vm = makeManager();
+		const view = vm.getViews()[0];
+		const folder = vm.addMetaFolder(view.id, null, "Plain folder")!;
+		expect(nodeHasApiRows(vm.getNode(view.id, folder.id)!)).toBe(false);
 	});
 });

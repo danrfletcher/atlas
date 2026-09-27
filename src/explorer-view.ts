@@ -1,7 +1,7 @@
 import { App, FuzzySuggestModal, ItemView, MarkdownView, Menu, Modal, Notice, Platform, TFile, TFolder, WorkspaceLeaf, setIcon, setTooltip } from "obsidian";
 import type AtlasPlugin from "./main";
 import { ApiItemState, StatusGovernance, TruncatedStatusConfig, Unit, UnitRef, View, ViewNode, unitRefKey, unitToRef } from "./types";
-import { ApiSourceIdPair, MetaTarget, collectApiSourceNodeIdPairs, flattenMetaFolders } from "./views";
+import { ApiSourceIdPair, MetaTarget, collectApiSourceNodeIdPairs, flattenMetaFolders, nodeHasApiRows } from "./views";
 import { resolveUnit } from "./unit-display";
 import { TextPromptModal, ConfirmModal, ConfirmDeleteRowsModal, StatusesModal } from "./modals";
 import { StatusDefinition, pluralizeStatusLabel } from "./statuses";
@@ -1299,7 +1299,11 @@ export class AtlasExplorerView extends ItemView {
 		// the chain, so a grandparent's `inheritToSubfolders` can still reach past `node` if `node`
 		// itself isn't a governor (or is, but doesn't itself reach — same walk either way).
 		await this.renderNodeList(node.children, childrenInner, view, depth + 1, [node, ...ancestors]);
-		if (node.type === "meta" && node.apiSource) this.renderApiItems(node, childrenInner, view, depth + 1, [node, ...ancestors]);
+		// T2: was gated on `node.apiSource` alone, so "Remove data source" (which clears `apiSource`
+		// but deliberately keeps `apiItemState`/`apiItemOrder`, per G4) made this permanently false and
+		// hid the surviving static rows from the tree entirely, even though `renderApiItems` itself is
+		// already correctly gated on the rows, not the source (see its own comment above).
+		if (node.type === "meta" && nodeHasApiRows(node)) this.renderApiItems(node, childrenInner, view, depth + 1, [node, ...ancestors]);
 
 		// Local optimistic state, not `node.collapsed` — real bug caught in review: `node.collapsed`
 		// only updates once the delayed `setNodeCollapsed` below actually runs, so a second click
@@ -1996,7 +2000,7 @@ export class AtlasExplorerView extends ItemView {
 		// without `node.apiSource` here, such a Folder could never configure a status set at all. G4:
 		// a Folder whose source was removed can still be carrying static rows from before — same reason
 		// applies just as much to those.
-		if (node.children.length > 0 || node.apiSource || (node.apiItemOrder && node.apiItemOrder.length > 0)) {
+		if (node.children.length > 0 || nodeHasApiRows(node)) {
 			menu.addItem((item) => item.setTitle("Statuses").setIcon("circle-dot").onClick(() => this.openStatusesModal(view, node.id)));
 		}
 		menu.addSeparator();

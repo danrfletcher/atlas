@@ -174,6 +174,13 @@ function cloneApiItemState(state: Record<string, ApiItemState>): Record<string, 
 	return out;
 }
 
+/** G4/T2: a Folder has API rows to show — either a live source (even before its first refresh
+ * fills any rows) or static rows left behind by "Remove data source" — gated on this, never on
+ * `apiSource` alone, so removing the source doesn't also hide the rows it leaves behind. */
+export function nodeHasApiRows(node: Pick<ViewNode, "apiSource" | "apiItemOrder">): boolean {
+	return Boolean(node.apiSource) || Boolean(node.apiItemOrder && node.apiItemOrder.length > 0);
+}
+
 export interface MetaTarget {
 	id: string | null;
 	label: string;
