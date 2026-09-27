@@ -368,17 +368,22 @@
 	border-radius: 3px;
 }
 
-/* T2: the label must never fully vanish under flex shrink pressure. `.atlas-row-secondary`
+/* T2/R21: the label must never fully vanish under flex shrink pressure, but it also must not
+ * grow to fill the row — this class is shared by every row kind (bucket, inbox, Folder, API,
+ * truncation, Module Contents), and a positive flex-grow here pushes every trailing badge/suffix
+ * (promoted badge, "in <file>", "(missing)", API secondary/last-seen text, the Folder's own
+ * connection dot) to the row's right edge instead of sitting just after the label. `.atlas-row-secondary`
  * (there can be two on an API "not found" row — the normal secondary-value span plus the
  * not-found/last-seen span) has no `overflow` set, so its automatic min-width equals its
  * content's min-content width. `.atlas-row-text` had none either, but `overflow: hidden` alone
  * already zeroes its automatic min-width per the flexbox spec, so it was the only child squeezed
- * to 0 when the row ran out of room. Give the label priority (`flex: 1 1 auto` plus a real
- * `min-width` floor) and cap/shrink the secondary spans instead so both share the squeeze. */
+ * to 0 when the row ran out of room. Give the label a shrink floor (`flex: 0 1 auto` plus a real
+ * `min-width`) without letting it grow, and cap/shrink the secondary spans instead so both share
+ * the squeeze. */
 .atlas-row-text {
 	overflow: hidden;
 	text-overflow: ellipsis;
-	flex: 1 1 auto;
+	flex: 0 1 auto;
 	min-width: 3em;
 }
 

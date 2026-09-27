@@ -30,6 +30,19 @@ describe("styles.css — API row rendering (T1/T2/T3)", () => {
 		expect(text).toMatch(/min-width\s*:\s*(?!0\b)/);
 	});
 
+	it("R21: does not give the row label a positive flex-grow, so it can't expand and push trailing badges/text to the row's edge", () => {
+		const text = ruleBody(".atlas-row-text");
+		const shorthand = text.match(/flex\s*:\s*([^;]+);/);
+		if (shorthand) {
+			const grow = shorthand[1].trim().split(/\s+/)[0];
+			expect(Number(grow)).toBe(0);
+		}
+		const longhand = text.match(/flex-grow\s*:\s*([^;]+);/);
+		if (longhand) {
+			expect(Number(longhand[1].trim())).toBe(0);
+		}
+	});
+
 	it("T2: constrains the secondary span(s) so they share the shrink instead of hogging space", () => {
 		const secondary = ruleBody(".atlas-row-secondary");
 		expect(secondary).toMatch(/min-width\s*:/);
