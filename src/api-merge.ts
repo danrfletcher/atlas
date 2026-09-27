@@ -23,15 +23,21 @@ export interface MergeOptions {
  * - Append: adds new ids only; a row no longer reported is kept exactly as it was, never marked.
  * - Merge: matches by id; a row no longer reported is kept and marked "not found, last seen …"
  *   (skipped this refresh if `options.truncated`); a row that reappears becomes normal again.
- * - Either mode: label/secondary text always follow the latest API values for a row that IS
- *   currently reported; status (`explicitStatusId`) and the attached note (`noteRef`) are carried
- *   over untouched in every branch — refresh never assigns or changes either (G8, F5).
+ * - Overwrite (PR-3): a row no longer reported is deleted outright — its `itemState` entry is dropped
+ *   from the result entirely, not just marked, so a later reappearance is a fresh, untriaged row
+ *   (G6c) — same truncation exception as Merge (E4: skipped this refresh if `options.truncated`, so a
+ *   row merely pushed past the row cap isn't mistaken for genuinely vanished). Callers decide
+ *   *whether* an Overwrite reconciliation should run at all this refresh (G6b's guards — confirmation,
+ *   keep-on-empty) before calling this; this function only computes what the outcome would be.
+ * - Every mode: label/secondary text always follow the latest API values for a row that IS currently
+ *   reported; status (`explicitStatusId`) and the attached note (`noteRef`) are carried over untouched
+ *   in every branch — refresh never assigns or changes either (G8, F5).
  */
 export function mergeApiItems(
 	prevState: Record<string, ApiItemState>,
 	prevOrder: string[],
 	rows: ApiMappedRow[],
-	mode: "append" | "merge",
+	mode: "append" | "merge" | "overwrite",
 	options: MergeOptions
 ): MergeResult {
 	const nextState: Record<string, ApiItemState> = {};
@@ -56,10 +62,15 @@ export function mergeApiItems(
 		if (!prev) continue;
 		if (mode === "append" || options.truncated) {
 			nextState[id] = prev;
-		} else {
+		} else if (mode === "merge") {
 			// Carry the existing `lastSeenAt` (stamped the last time this row was actually reported)
 			// forward untouched — this refresh only learned the row is gone, not when it was last seen.
 			nextState[id] = prev.notFound ? prev : { ...prev, notFound: true };
+		} else {
+			// Overwrite: genuinely vanished (not merely truncated) — drop it, deliberately, itemState
+			// and all (G6, E2's "not silently deleted twice" holds since `rows` was already deduped by
+			// id before this ever runs).
+			continue;
 		}
 		nextOrder.push(id);
 	}

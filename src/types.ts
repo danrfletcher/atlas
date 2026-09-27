@@ -118,10 +118,11 @@ export interface ViewNode extends StatusGovernance {
 	 * a `type: "meta"` node. Headers (including any bearer token) are deliberately absent from this
 	 * shape — see `ApiHeadersStore` — so this object is safe to persist in synced `data.json` (G13).
 	 *
-	 * E7 (ticket 34n6ct71muguncxk, not yet built anywhere in this repo as of PR-2): whatever code
-	 * converts a meta Folder into a real disk-backed folder must copy this field, `apiCache`,
-	 * `apiItemState` and `apiItemOrder` onto the resulting node unchanged, and must leave any
-	 * already-placed/pulled children alone — the conversion affects only the Folder node itself. */
+	 * E7 (ticket 34n6ct71muguncxk, not yet built anywhere in this repo as of PR-3 either): whatever code
+	 * converts a meta Folder into a real disk-backed folder must copy this field (including PR-3's
+	 * `overwrite`/guard/refresh-every additions), `apiCache`, `apiItemState`, `apiItemOrder` and
+	 * `apiAwaitingConfirmation` onto the resulting node unchanged, and must leave any already-placed/
+	 * pulled children alone — the conversion affects only the Folder node itself. */
 	apiSource?: ApiSourceConfig;
 	/** Last-refresh outcome. Holds mapped rows only, never the raw response (G13/E9: cache contents
 	 * assertion). */
@@ -132,6 +133,13 @@ export interface ViewNode extends StatusGovernance {
 	/** Display order of `apiItemState`'s keys — a plain `Record` has no reliable iteration order
 	 * across a JSON round-trip, so order is tracked explicitly alongside it. */
 	apiItemOrder?: string[];
+	/** PR-3 (G6b): true only while an automatic refresh (timer or view-load) found rows it would need
+	 * to delete under Overwrite, asked for confirmation, and got no answer (dismissed via Escape/view
+	 * close). Drives the amber "waiting for confirmation" dot and suppresses re-asking on further
+	 * automatic refreshes for this Folder — cleared the moment any refresh is actually answered
+	 * (confirmed or cancelled), including a later manual "Refresh now", which always asks again
+	 * regardless of this flag. Meaningless (and always cleared) once `apiSource` itself is absent. */
+	apiAwaitingConfirmation?: boolean;
 }
 
 /** A single request header, e.g. `Authorization: Bearer …`. Never persisted in `data.json` — see
@@ -152,13 +160,28 @@ export interface ApiFieldMapping {
 
 export interface ApiSourceConfig {
 	url: string;
-	/** GET only in this PR (G1) — the type exists so a later PR's Overwrite/JS/other-method work has
-	 * somewhere to grow into, without this PR's own code ever producing or accepting anything else. */
+	/** GET only in this PR (G1) — the type exists so a later PR's JS/other-method work has somewhere to
+	 * grow into, without this PR's own code ever producing or accepting anything else. */
 	method: "GET";
 	mapping: ApiFieldMapping;
-	mode: "append" | "merge";
-	/** G5a. "Refresh every X minutes" (G5b) is a later PR — no field for it here. */
+	mode: "append" | "merge" | "overwrite";
+	/** G5a. */
 	refreshOnViewLoad: boolean;
+	/** G5b: "Refresh every [X] minutes", off by default with no fixed value — independent of
+	 * `refreshOnViewLoad`/"Refresh now" (G5). `refreshEveryMinutes` is only meaningful while this is
+	 * on; below-minimum/blank/non-numeric values are rejected by the modal before they ever reach this
+	 * field (`validateRefreshMinutes`), and a value that reaches here some other way (hand-edited
+	 * `data.json`) is clamped up to `MIN_REFRESH_MINUTES` on load, never rejected outright. */
+	refreshEveryMinutesEnabled?: boolean;
+	refreshEveryMinutes?: number;
+	/** G6b(i): Overwrite-only, default on (absent/`undefined` means on — only an explicit `false`
+	 * turns it off). With this on, a refresh whose response is an empty list leaves every row as-is
+	 * instead of following Overwrite's normal "replace everything" rule. */
+	keepOnEmpty?: boolean;
+	/** G6b(ii): Overwrite-only, default on. With this on, a refresh that would delete one or more rows
+	 * asks for confirmation first (`ApiSourceController`'s confirm-delete flow) instead of deleting
+	 * outright. */
+	confirmBeforeDelete?: boolean;
 }
 
 /** A row exactly as mapped from a response — this is all the cache ever holds, never the raw
