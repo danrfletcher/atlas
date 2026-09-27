@@ -23,6 +23,12 @@ export function generateJsFromMapping(mapping: ApiFieldMapping): string {
 				"    if (secondaryValue !== undefined && secondaryValue !== null) row.secondary = String(secondaryValue);",
 			].join("\n")
 		: "";
+	const extraEntries = mapping.extraFields
+		? Object.entries(mapping.extraFields)
+				.map(([name, field]) => `${JSON.stringify(name)}: src[${JSON.stringify(field)}]`)
+				.join(", ")
+		: "";
+	const extraExpr = extraEntries ? `{ ${extraEntries} }` : "{}";
 	return [
 		"(response) => {",
 		`  const items = ${arrayExpr};`,
@@ -32,7 +38,7 @@ export function generateJsFromMapping(mapping: ApiFieldMapping): string {
 		"    const row = {",
 		`      id: src[${idKey}] === undefined || src[${idKey}] === null ? "" : String(src[${idKey}]),`,
 		`      label: src[${labelKey}] === undefined || src[${labelKey}] === null ? "" : String(src[${labelKey}]),`,
-		"      extra: {},",
+		`      extra: ${extraExpr},`,
 		"    };" + secondaryBlock,
 		"    return row;",
 		"  });",

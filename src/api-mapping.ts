@@ -66,10 +66,51 @@ export function mapSampleRows(items: unknown[], mapping: ApiFieldMapping): MapRe
 			const secondaryValue = obj[mapping.secondaryField];
 			if (secondaryValue !== undefined && secondaryValue !== null) row.secondary = String(secondaryValue);
 		}
+		if (mapping.extraFields && Object.keys(mapping.extraFields).length > 0) {
+			const extra: Record<string, unknown> = {};
+			for (const [name, sourceField] of Object.entries(mapping.extraFields)) {
+				if (sourceField && obj[sourceField] !== undefined && obj[sourceField] !== null) {
+					extra[name] = obj[sourceField];
+				}
+			}
+			row.extra = extra;
+		}
 		rows.push(row);
 	}
 
 	return { rows, skippedCount, truncated };
+}
+
+/** G2: an extra field name must be non-empty and consist only of letters, digits, and underscores. */
+export function isValidExtraFieldName(name: string): boolean {
+	return /^[a-zA-Z0-9_]+$/.test(name);
+}
+
+/** G2: adds or updates an extra field mapping with validation and uniqueness. */
+export function addExtraField(mapping: ApiFieldMapping, name: string, field: string): boolean {
+	if (!isValidExtraFieldName(name)) return false;
+	if (!mapping.extraFields) mapping.extraFields = {};
+	mapping.extraFields[name] = field;
+	return true;
+}
+
+/** G2: renames an extra field mapping, preserving its mapped source field. */
+export function renameExtraField(mapping: ApiFieldMapping, oldName: string, newName: string): boolean {
+	if (!mapping.extraFields || !Object.prototype.hasOwnProperty.call(mapping.extraFields, oldName)) return false;
+	if (!isValidExtraFieldName(newName)) return false;
+	if (oldName === newName) return true;
+	if (Object.prototype.hasOwnProperty.call(mapping.extraFields, newName)) return false;
+	const field = mapping.extraFields[oldName];
+	delete mapping.extraFields[oldName];
+	mapping.extraFields[newName] = field;
+	return true;
+}
+
+/** G2: removes an extra field mapping by name. */
+export function removeExtraField(mapping: ApiFieldMapping, name: string): boolean {
+	if (!mapping.extraFields || !Object.prototype.hasOwnProperty.call(mapping.extraFields, name)) return false;
+	delete mapping.extraFields[name];
+	return true;
 }
 
 /** R2: derives the sample-field chip list from the chosen array (or the top-level list, when the

@@ -149,6 +149,9 @@ export interface ApiHeader {
 	value: string;
 }
 
+/** PR-5 (G9b): which action to perform when an API row is clicked. */
+export type ApiClickAction = "none" | "open-attachment" | "run-command";
+
 /** Which sample field maps to which target (G2). `arrayField` is set only when the raw response is
  * a plain object rather than a list — the top-level key whose value is the array to read rows from. */
 export interface ApiFieldMapping {
@@ -156,6 +159,9 @@ export interface ApiFieldMapping {
 	labelField: string;
 	secondaryField?: string;
 	arrayField?: string;
+	/** PR-5 (G2): extra named fields mapped beyond id/label/secondary. Key is the extra field name
+	 * (letters, digits, underscore, e.g. "path"), value is the sample item's field name. */
+	extraFields?: Record<string, string>;
 }
 
 export interface ApiSourceConfig {
@@ -190,6 +196,13 @@ export interface ApiSourceConfig {
 	 * meaningful while `mappingMode` is "js". Not a secret (covered by the modal's own warning instead);
 	 * stored in synced `data.json` like the rest of `source`, unlike headers (`ApiHeadersStore`). */
 	jsSource?: string;
+	/** PR-5 (G9b): click action on an API row — "none", "open-attachment" (default), or "run-command"
+	 * (desktop only). */
+	action?: ApiClickAction;
+	/** PR-5 (G9b): alias for `action`, matching PR-5 spec/brief phrases interchangeably. */
+	clickAction?: ApiClickAction;
+	/** PR-5 (G9b): command string executed in the background when action is "run-command". */
+	command?: string;
 }
 
 /** A row exactly as mapped from a response — this is all the cache ever holds, never the raw
