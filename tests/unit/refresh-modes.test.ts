@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { mergeApiItems } from "../../src/api-merge";
 import { planApiRefresh, RefreshPlanInput } from "../../src/api-refresh-plan";
-import { ApiItemState, ApiMappedRow } from "../../src/types";
+import { ApiSourceController, ConfirmDeleteAnswer, dotStateFor } from "../../src/api-source-controller";
+import { RequestFn } from "../../src/api-http";
+import { ApiItemState, ApiMappedRow, ApiSourceConfig, ViewNode } from "../../src/types";
 
 const NOW = "2026-01-01T00:00:00.000Z";
 
@@ -162,5 +164,75 @@ describe("planApiRefresh — G6b guards decide whether a plan needs confirmation
 		const result = plan({ prevState: {}, prevOrder: [], rows: [row("1")], confirmBeforeDelete: true, keepOnEmpty: false });
 		expect(result.needsConfirmation).toBe(false);
 		expect(result.deletedCount).toBe(0);
+	});
+});
+
+/** R7(a): the unit-level tests above cover `mergeApiItems`/`planApiRefresh` directly with an already-
+ * deduped `rows` array — they trust E2's "not silently deleted twice" guarantee rather than proving it.
+ * This drives a real duplicate-id API response through the *whole* refresh pipeline
+ * (`ApiSourceController.refresh` → `mapResponseRows` → plan → merge → persisted cache), per mode, and
+ * asserts the resulting dot state (G11) and `skippedCount` (E2) too — not just `itemState`/`order`. */
+describe("ApiSourceController — R7(a): a duplicate-id response through the full refresh pipeline, per mode", () => {
+	function node(id: string): ViewNode {
+		return {
+			id,
+			type: "meta",
+			label: "API folder",
+			children: [],
+			apiItemState: { "1": state("1"), "2": state("2") },
+			apiItemOrder: ["1", "2"],
+		};
+	}
+
+	function source(mode: "append" | "merge" | "overwrite", overrides: Partial<ApiSourceConfig> = {}): ApiSourceConfig {
+		return {
+			url: "http://example.invalid/dup",
+			method: "GET",
+			mapping: { idField: "id", labelField: "name" },
+			mode,
+			refreshOnViewLoad: false,
+			...overrides,
+		};
+	}
+
+	// The response reports "1" twice (first wins, per E2) with a fresh label, a brand-new "3", and
+	// drops "2" entirely — so every mode's handling of a genuinely-missing row is exercised too.
+	const duplicateResponse: RequestFn = async () => ({
+		status: 200,
+		text: JSON.stringify([
+			{ id: "1", name: "One (fresh)" },
+			{ id: "1", name: "One (duplicate, must be skipped)" },
+			{ id: "3", name: "Three" },
+		]),
+	});
+
+	it.each([
+		{
+			mode: "append" as const,
+			expectRow2: state("2"),
+		},
+		{
+			mode: "merge" as const,
+			expectRow2: { ...state("2"), notFound: true },
+		},
+		{
+			mode: "overwrite" as const,
+			expectRow2: undefined,
+		},
+	])("$mode: the duplicate is skipped (E2) and row 2 is handled per-mode, with a green dot after", async ({ mode, expectRow2 }) => {
+		const n = node(`n-${mode}`);
+		const confirmDelete = async (): Promise<ConfirmDeleteAnswer> => "confirmed";
+		const controller = new ApiSourceController();
+
+		await controller.refresh(n, source(mode, { confirmBeforeDelete: false }), [], () => {}, {
+			requestImpl: duplicateResponse,
+			confirmDelete,
+		});
+
+		expect(n.apiCache?.skippedCount).toBe(1);
+		expect(n.apiItemState?.["1"]).toEqual(expect.objectContaining({ id: "1", label: "One (fresh)" }));
+		expect(n.apiItemState?.["3"]).toEqual(expect.objectContaining({ id: "3", label: "Three" }));
+		expect(n.apiItemState?.["2"]).toEqual(expectRow2);
+		expect(dotStateFor(n.apiCache, n.apiAwaitingConfirmation)).toBe("green");
 	});
 });
