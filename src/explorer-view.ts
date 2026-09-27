@@ -43,6 +43,13 @@ const MODULE_HOVER_DWELL_MS = 650;
  * second, parallel "batch" code path next to the original single-item one. */
 type DragPayload = { kind: "node"; nodeIds: string[]; viewId: string } | { kind: "inbox"; refs: UnitRef[] };
 
+/** R14: an API item's label is arbitrary upstream data, not a filename Atlas chose — strip path
+ * separators and other characters the vault/filesystem reject or reinterpret before using it as
+ * one, so attaching a note/block/module to an item never throws or nests into an unrelated path. */
+function sanitizeFileName(name: string): string {
+	return name.replace(/[/\\:*?"<>|]/g, "-").trim();
+}
+
 interface RowInfo {
 	text: string;
 	secondary?: string;
@@ -449,7 +456,11 @@ export class AtlasExplorerView extends ItemView {
 	 * `addFolder`) rather than inventing a fourth. */
 	private async attachApiItem(view: View, folderNode: ViewNode, item: ApiItemState, kind: "file" | "block" | "folder"): Promise<void> {
 		const { vault } = this.plugin.app;
-		const label = item.label.trim() || "Untitled";
+		// R14: the API label is arbitrary upstream data — '/' or '\\' would otherwise be read as
+		// path separators (nesting into/creating folders vault.create/createFolder don't expect)
+		// and ':' throws on some platforms; sanitising keeps the created file/folder name a sibling
+		// in the current location, matching every other "Add …" action in this file.
+		const label = sanitizeFileName(item.label.trim()) || "Untitled";
 		let ref: UnitRef;
 		let openable: TFile | null = null;
 		if (kind === "file") {
@@ -459,6 +470,11 @@ export class AtlasExplorerView extends ItemView {
 		} else if (kind === "folder") {
 			const folder = await vault.createFolder(await this.uniquePath(label, null));
 			ref = { kind: "folder", path: folder.path };
+			// R14: "Add module" created a plain folder with nothing else linked to it, so openRef's
+			// folder branch (which only ever opens a *found* interface note) had nothing to open —
+			// a click on the row silently did nothing. Give it the same interface note the existing
+			// module flow creates (`createInterfaceNote`, used from the bucket unit's own menu).
+			openable = await createInterfaceNote(this.plugin.app, folder);
 		} else {
 			const poolFolder = this.plugin.settings.poolFolder;
 			if (!(vault.getAbstractFileByPath(poolFolder) instanceof TFolder)) await vault.createFolder(poolFolder);
