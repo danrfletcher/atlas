@@ -1,4 +1,4 @@
-import { App, FuzzySuggestModal, ItemView, MarkdownView, Menu, Modal, Notice, TFile, TFolder, WorkspaceLeaf, setIcon, setTooltip } from "obsidian";
+import { App, FuzzySuggestModal, ItemView, MarkdownView, Menu, Modal, Notice, Platform, TFile, TFolder, WorkspaceLeaf, setIcon, setTooltip } from "obsidian";
 import type AtlasPlugin from "./main";
 import { ApiItemState, StatusGovernance, TruncatedStatusConfig, Unit, UnitRef, View, ViewNode, unitRefKey, unitToRef } from "./types";
 import { MetaTarget, flattenMetaFolders } from "./views";
@@ -14,6 +14,7 @@ import { noticeIfLinksNotUpdated } from "./links-notice";
 import { generateBlockId } from "./display-text";
 import { ApiSourceModal } from "./api-source-modal";
 import { ViewLoadTrigger, dotStateFor, dotTooltip } from "./api-source-controller";
+import { obsidianRequestImpl } from "./api-request-obsidian";
 
 export const ATLAS_VIEW_TYPE = "atlas-explorer";
 
@@ -415,10 +416,14 @@ export class AtlasExplorerView extends ItemView {
 		return out;
 	}
 
+	/** R8/G13: the one choke point every refresh trigger in this file goes through (view-load,
+	 * "Refresh now", post-save) — mobile shows cached rows only and can never trigger a live request. */
 	private refreshApiSource(view: View, node: ViewNode): void {
-		if (!node.apiSource) return;
+		if (!node.apiSource || Platform.isMobile) return;
 		const headers = this.plugin.apiHeadersStore.get(node.id);
-		void this.plugin.apiSourceController.refresh(node, node.apiSource, headers, () => this.plugin.viewsManager.notifyExternalMutation());
+		void this.plugin.apiSourceController.refresh(node, node.apiSource, headers, () => this.plugin.viewsManager.notifyExternalMutation(), {
+			requestImpl: obsidianRequestImpl,
+		});
 	}
 
 	private openApiSourceModal(view: View, node: ViewNode): void {
@@ -430,29 +435,58 @@ export class AtlasExplorerView extends ItemView {
 		}).open();
 	}
 
-	/** G9: opens an API item's attached note, creating a free block for it on first click. */
-	private async openOrCreateApiItemNote(view: View, node: ViewNode, itemId: string): Promise<void> {
-		const item = node.apiItemState?.[itemId];
-		if (!item) return;
-		if (item.noteRef) {
-			const file = this.plugin.app.vault.getAbstractFileByPath(item.noteRef.path);
-			if (file instanceof TFile) {
-				await this.plugin.app.workspace.getLeaf(false).openFile(file);
-				return;
-			}
-		}
+	/** G9: opens an API item's already-attached note/block/module. Only ever called once `item.noteRef`
+	 * is set (R7: a click on an unattached item is a no-op — attaching is a deliberate, menu-driven
+	 * action, not an accidental side effect of the default click). */
+	private async openApiItemAttachment(item: ApiItemState): Promise<void> {
+		if (!item.noteRef) return;
+		await this.openRef(item.noteRef);
+	}
+
+	/** G9: creates a new note (file), block, or module (folder) and attaches it to this API item as
+	 * its one attachment, replacing whatever was attached before. Mirrors the existing "Add
+	 * note"/"Add block"/"Add module" creation shapes elsewhere in this file (`addFile`, `addBlock`,
+	 * `addFolder`) rather than inventing a fourth. */
+	private async attachApiItem(view: View, folderNode: ViewNode, item: ApiItemState, kind: "file" | "block" | "folder"): Promise<void> {
 		const { vault } = this.plugin.app;
-		const poolFolder = this.plugin.settings.poolFolder;
-		if (!(vault.getAbstractFileByPath(poolFolder) instanceof TFolder)) await vault.createFolder(poolFolder);
-		let path: string;
-		do {
-			path = `${poolFolder}/${generateBlockId(new Date())}.md`;
-		} while (vault.getAbstractFileByPath(path));
-		const file = await vault.create(path, `# ${item.label}\n`);
-		this.plugin.viewsManager.setApiItemNoteRef(view.id, node.id, itemId, { kind: "block", path: file.path, subpath: file.basename });
-		const leaf = this.plugin.app.workspace.getLeaf(false);
-		await leaf.openFile(file);
-		this.plugin.app.workspace.getActiveViewOfType(MarkdownView)?.editor.setCursor({ line: 1, ch: 0 });
+		const label = item.label.trim() || "Untitled";
+		let ref: UnitRef;
+		let openable: TFile | null = null;
+		if (kind === "file") {
+			const file = await vault.create(await this.uniquePath(label, "md"), "");
+			ref = { kind: "file", path: file.path };
+			openable = file;
+		} else if (kind === "folder") {
+			const folder = await vault.createFolder(await this.uniquePath(label, null));
+			ref = { kind: "folder", path: folder.path };
+		} else {
+			const poolFolder = this.plugin.settings.poolFolder;
+			if (!(vault.getAbstractFileByPath(poolFolder) instanceof TFolder)) await vault.createFolder(poolFolder);
+			let path: string;
+			do {
+				path = `${poolFolder}/${generateBlockId(new Date())}.md`;
+			} while (vault.getAbstractFileByPath(path));
+			const file = await vault.create(path, `# ${item.label}\n`);
+			ref = { kind: "block", path: file.path, subpath: file.basename };
+			openable = file;
+		}
+		this.plugin.viewsManager.setApiItemNoteRef(view.id, folderNode.id, item.id, ref);
+		if (openable) {
+			const leaf = this.plugin.app.workspace.getLeaf(false);
+			await leaf.openFile(openable);
+			if (kind === "block") this.plugin.app.workspace.getActiveViewOfType(MarkdownView)?.editor.setCursor({ line: 1, ch: 0 });
+		}
+	}
+
+	/** G9: "Add note / block / module" — the only context-menu action for an API item besides status
+	 * (G10: no drag, nest, reorder, remove, rename, or duplicate, all of which require a real
+	 * `ViewNode`, which items never get). Status itself is set via the dot click (R5), not this menu. */
+	private showApiItemMenu(evt: MouseEvent, view: View, folderNode: ViewNode, item: ApiItemState): void {
+		const menu = new Menu();
+		menu.addItem((mi) => mi.setTitle("Add note").setIcon("file-plus").onClick(() => void this.attachApiItem(view, folderNode, item, "file")));
+		menu.addItem((mi) => mi.setTitle("Add block").setIcon("square-plus").onClick(() => void this.attachApiItem(view, folderNode, item, "block")));
+		menu.addItem((mi) => mi.setTitle("Add module").setIcon("folder-plus").onClick(() => void this.attachApiItem(view, folderNode, item, "folder")));
+		menu.showAtMouseEvent(evt);
 	}
 
 	/** G8: a throwaway pseudo-`ViewNode` so an API item can go through the same status-resolution
@@ -470,28 +504,29 @@ export class AtlasExplorerView extends ItemView {
 		row.toggleClass("atlas-not-found", !!item.notFound);
 		row.createDiv({ cls: "atlas-chevron" }); // empty spacer — keeps icons aligned at this depth, same as any childless row
 		const iconEl = row.createDiv({ cls: "atlas-icon" });
-		this.renderRowIcon(iconEl, view, pseudo, ancestors, "circle");
+		// R5: routes the dot click to the API item's own status setter — `pseudo` has no real `ViewNode`
+		// counterpart `setExplicitStatus` (the default) could resolve.
+		this.renderRowIcon(iconEl, view, pseudo, ancestors, "circle", (statusId) =>
+			this.plugin.viewsManager.setApiItemStatus(view.id, folderNode.id, item.id, statusId)
+		);
 		row.createSpan({ cls: "atlas-row-text", text: item.label });
 		if (item.secondary) row.createSpan({ cls: "atlas-row-secondary", text: item.secondary });
-		if (item.notFound) row.createSpan({ cls: "atlas-row-secondary", text: "not found" });
+		if (item.notFound) {
+			// R4: previously rendered "not found" with no date — G6 requires the last-seen date too.
+			const text = item.lastSeenAt ? `not found, last seen ${new Date(item.lastSeenAt).toLocaleDateString()}` : "not found";
+			row.createSpan({ cls: "atlas-row-secondary", text });
+		}
 
-		// G9: default click opens the attached note (creating one on first click).
-		row.addEventListener("click", () => void this.openOrCreateApiItemNote(view, folderNode, item.id));
+		// G9/R7: default click opens the attached note — a no-op until one is actually attached, never
+		// a silent create-and-link.
+		row.addEventListener("click", () => {
+			if (item.noteRef) void this.openApiItemAttachment(item);
+		});
 
-		// G10: status is the only context-menu action for an API item — no drag, nest, reorder,
-		// remove, rename, or duplicate (those all require a real ViewNode, which items never get).
+		// G9/R7: "Add note / block / module" — status is set via the dot click instead (R5).
 		row.addEventListener("contextmenu", (evt) => {
 			evt.preventDefault();
-			const governor = this.plugin.statusesManager.findGoverningAncestor(ancestors, pseudo);
-			if (!governor?.statusSetId) return;
-			const set = this.plugin.statusesManager.getStatusSet(governor.statusSetId);
-			if (!set) return;
-			openStatusPickerPopup({
-				anchor: row,
-				statusSet: set,
-				currentStatusId: this.plugin.statusesManager.resolveNodeStatus(ancestors, pseudo)?.id ?? null,
-				onSelect: (picked) => this.plugin.viewsManager.setApiItemStatus(view.id, folderNode.id, item.id, picked.id),
-			});
+			this.showApiItemMenu(evt, view, folderNode, item);
 		});
 	}
 
@@ -569,6 +604,12 @@ export class AtlasExplorerView extends ItemView {
 		// collision aside) just be a stale, meaningless-looking highlight on whatever nodes happen to
 		// render next. Inbox selection is unaffected — a ref key means the same thing across views.
 		if (view.id !== this.lastRenderedViewId) {
+			// R9: G5a is "opening or returning to an Atlas view", not just "Obsidian leaf activation" —
+			// switching the *internal* Atlas view (the view switcher, `setActiveViewId`) is exactly that,
+			// and previously fired no refresh at all since it never touches `active-leaf-change`. Guarded
+			// on `lastRenderedViewId !== null` so this is a genuine switch, not the view's very first
+			// render (which `onOpen`'s own `activate()` call already covers).
+			if (this.lastRenderedViewId !== null) this.refreshApiSourcesOnViewLoad();
 			this.lastRenderedViewId = view.id;
 			this.selectedBucketNodeIds.clear();
 			if (this.selectionAnchorScope === "bucket") {
@@ -1196,7 +1237,19 @@ export class AtlasExplorerView extends ItemView {
 	 * color or its background color, Dan's choice, not a fixed black/white contrast heuristic.
 	 * Shared by meta and unit rows so the two can't drift out of sync with each other, the same
 	 * reasoning `renderFoldableChildren`'s own extraction already used. */
-	private renderRowIcon(iconEl: HTMLElement, view: View, node: ViewNode, ancestors: StatusGovernance[], fallbackIconName: string): void {
+	/** R5: `onSetStatus`, when given, replaces the default "resolve `node` as a real `ViewNode` via
+	 * `setExplicitStatus`" behavior — a pseudo-`ViewNode` built for an API item (see
+	 * `pseudoNodeForApiItem`) has no real counterpart `setExplicitStatus` could ever find by id, so
+	 * without this the dot click was either a silent no-op or, worse, could collide with and corrupt
+	 * an unrelated real node that happened to share the pseudo node's id. */
+	private renderRowIcon(
+		iconEl: HTMLElement,
+		view: View,
+		node: ViewNode,
+		ancestors: StatusGovernance[],
+		fallbackIconName: string,
+		onSetStatus?: (statusId: string) => void
+	): void {
 		const status = this.plugin.statusesManager.resolveNodeStatus(ancestors, node);
 		if (!status) {
 			setIcon(iconEl, fallbackIconName);
@@ -1231,7 +1284,7 @@ export class AtlasExplorerView extends ItemView {
 				anchor: circle,
 				statusSet: set,
 				currentStatusId: status.id,
-				onSelect: (picked) => this.plugin.viewsManager.setExplicitStatus(view.id, node.id, picked.id),
+				onSelect: (picked) => (onSetStatus ? onSetStatus(picked.id) : this.plugin.viewsManager.setExplicitStatus(view.id, node.id, picked.id)),
 			});
 		});
 	}
@@ -1829,7 +1882,9 @@ export class AtlasExplorerView extends ItemView {
 		// keeps its place, settings and children). Offered on every meta folder, whatever its children,
 		// depth or fold state; ignores any multi-selection, so it only ever acts on this one row.
 		addCreateItem(menu, evt, (kind) => this.startCreateFromMeta(kind, view, node));
-		if (node.children.length > 0) {
+		// R6: an API-only Folder has no real children yet still governs its API rows' statuses (G8) —
+		// without `node.apiSource` here, such a Folder could never configure a status set at all.
+		if (node.children.length > 0 || node.apiSource) {
 			menu.addItem((item) => item.setTitle("Statuses").setIcon("circle-dot").onClick(() => this.openStatusesModal(view, node.id)));
 		}
 		menu.addSeparator();
@@ -1840,7 +1895,19 @@ export class AtlasExplorerView extends ItemView {
 				.onClick(() => this.openApiSourceModal(view, node))
 		);
 		if (node.apiSource) {
-			menu.addItem((item) => item.setTitle("Refresh now").setIcon("refresh-cw").onClick(() => this.refreshApiSource(view, node)));
+			menu.addItem((item) =>
+				item
+					.setTitle("Refresh now")
+					.setIcon("refresh-cw")
+					.onClick(() => {
+						// R8/G13: mobile shows cached rows only — say so rather than silently doing nothing.
+						if (Platform.isMobile) {
+							new Notice("Refreshing isn't available on mobile — showing cached rows.");
+							return;
+						}
+						this.refreshApiSource(view, node);
+					})
+			);
 		}
 		menu.addSeparator();
 		menu.addItem((item) =>
