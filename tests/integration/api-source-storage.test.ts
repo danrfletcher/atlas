@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { ApiHeadersStore } from "../../src/api-headers-store";
 import { ViewsManager } from "../../src/views";
-import { ApiSourceConfig, View } from "../../src/types";
+import { ApiSourceConfig, View, ViewNode } from "../../src/types";
 import type { App } from "obsidian";
 
 /** In-memory stand-in for Obsidian's real per-device `loadLocalStorage`/`saveLocalStorage` — good
@@ -191,5 +191,111 @@ describe("E6 — deleting a Folder removes its source/cache and (via the caller)
 
 		expect(headersStore.get(folder.id)).toEqual([]);
 		expect(vm.getNode(view.id, folder.id)).toBeNull();
+	});
+});
+
+describe("R17/E9 — corrupt or missing apiSource/apiCache/apiItemState/apiItemOrder in data.json never crash on load", () => {
+	function nodeWithApiSource(overrides: Partial<ViewNode> = {}): ViewNode {
+		return {
+			id: "n1",
+			type: "meta",
+			label: "API folder",
+			children: [],
+			apiSource: makeSource(),
+			...overrides,
+		};
+	}
+
+	function loadedNode(node: ViewNode): ViewNode {
+		const views: View[] = [{ id: "v1", name: "V", root: [node], inboxMode: "view" }];
+		const vm = new ViewsManager({} as App, views, "v1", () => {});
+		return vm.getNode("v1", "n1")!;
+	}
+
+	it("apiItemOrder as a plain object (not an array) is replaced with a real array, not left un-iterable", () => {
+		const node = nodeWithApiSource({
+			apiItemState: { "1": { id: "1", label: "One" } },
+			apiItemOrder: {} as unknown as string[],
+		});
+		const sanitized = loadedNode(node);
+		expect(Array.isArray(sanitized.apiItemOrder)).toBe(true);
+		expect(sanitized.apiItemOrder).toEqual(["1"]);
+	});
+
+	it("apiItemOrder as a bare number is replaced with a real array", () => {
+		const node = nodeWithApiSource({ apiItemOrder: 5 as unknown as string[] });
+		const sanitized = loadedNode(node);
+		expect(Array.isArray(sanitized.apiItemOrder)).toBe(true);
+	});
+
+	it("apiItemOrder entries with no matching apiItemState are dropped", () => {
+		const node = nodeWithApiSource({
+			apiItemState: { "1": { id: "1", label: "One" } },
+			apiItemOrder: ["1", "stale-id-not-in-state"],
+		});
+		const sanitized = loadedNode(node);
+		expect(sanitized.apiItemOrder).toEqual(["1"]);
+	});
+
+	it("apiItemState missing while apiSource is valid becomes an empty object, not left undefined", () => {
+		const node = nodeWithApiSource({ apiItemState: undefined, apiItemOrder: undefined });
+		const sanitized = loadedNode(node);
+		expect(sanitized.apiItemState).toEqual({});
+		expect(sanitized.apiItemOrder).toEqual([]);
+	});
+
+	it("an apiSource with no mapping is dropped entirely, along with its cache/state, rather than crashing mapResponseRows later", () => {
+		const node = nodeWithApiSource({
+			apiSource: { url: "https://api.example.com" } as unknown as ApiSourceConfig,
+			apiCache: { fetchedAt: 1, ok: true, error: null, rows: [], skippedCount: 0, truncated: false },
+			apiItemState: { "1": { id: "1", label: "One" } },
+			apiItemOrder: ["1"],
+		});
+		const sanitized = loadedNode(node);
+		expect(sanitized.apiSource).toBeUndefined();
+		expect(sanitized.apiCache).toBeUndefined();
+		expect(sanitized.apiItemState).toBeUndefined();
+		expect(sanitized.apiItemOrder).toBeUndefined();
+	});
+
+	it("an apiSource that isn't even an object is dropped, not thrown on", () => {
+		const node = nodeWithApiSource({ apiSource: "not an object" as unknown as ApiSourceConfig });
+		const sanitized = loadedNode(node);
+		expect(sanitized.apiSource).toBeUndefined();
+	});
+
+	it("a node with no apiSource at all has its stray apiCache/apiItemState/apiItemOrder cleared too", () => {
+		const node: ViewNode = {
+			id: "n1",
+			type: "meta",
+			label: "Plain folder",
+			children: [],
+			apiItemState: { "1": { id: "1", label: "One" } },
+			apiItemOrder: ["1"],
+		};
+		const sanitized = loadedNode(node);
+		expect(sanitized.apiCache).toBeUndefined();
+		expect(sanitized.apiItemState).toBeUndefined();
+		expect(sanitized.apiItemOrder).toBeUndefined();
+	});
+
+	it("sanitizing recurses into nested meta-folder children", () => {
+		const child = nodeWithApiSource({ id: "child", apiItemOrder: {} as unknown as string[], apiItemState: {} });
+		const parent: ViewNode = { id: "parent", type: "meta", label: "Parent", children: [child] };
+		const views: View[] = [{ id: "v1", name: "V", root: [parent], inboxMode: "view" }];
+		const vm = new ViewsManager({} as App, views, "v1", () => {});
+		expect(Array.isArray(vm.getNode("v1", "child")!.apiItemOrder)).toBe(true);
+	});
+
+	it("a well-formed apiSource/cache/state round-trips unchanged", () => {
+		const node = nodeWithApiSource({
+			apiCache: { fetchedAt: 1, ok: true, error: null, rows: [], skippedCount: 0, truncated: false },
+			apiItemState: { "1": { id: "1", label: "One" } },
+			apiItemOrder: ["1"],
+		});
+		const sanitized = loadedNode(node);
+		expect(sanitized.apiSource).toEqual(makeSource());
+		expect(sanitized.apiItemOrder).toEqual(["1"]);
+		expect(sanitized.apiItemState).toEqual({ "1": { id: "1", label: "One" } });
 	});
 });

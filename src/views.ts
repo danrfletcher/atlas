@@ -1,9 +1,66 @@
 import { App } from "obsidian";
 import type { UnitIndex } from "./unit-index";
-import { ApiSourceConfig, DEFAULT_VIEW_NAME, StatusGovernance, Unit, UnitRef, View, ViewNode, createEmptyView, rewriteRefPath, unitRefsEqual, unitToRef } from "./types";
+import { ApiFieldMapping, ApiSourceConfig, DEFAULT_VIEW_NAME, StatusGovernance, Unit, UnitRef, View, ViewNode, createEmptyView, rewriteRefPath, unitRefsEqual, unitToRef } from "./types";
 
 function generateNodeId(): string {
 	return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+/** R17/E9: `data.json` is free-form JSON — hand-edited or corrupted, `apiSource` can be missing its
+ * `mapping`, and `apiItemOrder`/`apiItemState` can be any shape at all (an object instead of an array,
+ * a number, absent). Left unchecked, that crashes `renderApiItems`'s `for...of` over `apiItemOrder`,
+ * `mergeApiItems`'s own iteration over the same, and `mapResponseRows` reading `mapping.arrayField` off
+ * `undefined`. Called once, here, on load — so every other API-source code path can assume these
+ * fields are always well-shaped afterwards instead of re-guarding at every use site. An `apiSource`
+ * missing a usable `mapping` is dropped entirely (along with its cache/state, same as `setApiSource`
+ * clearing a source does) rather than guessed at — there's no safe default id/label field to invent. */
+function sanitizeApiFields(node: ViewNode): void {
+	if (node.apiSource) {
+		const raw = node.apiSource as Partial<ApiSourceConfig> & { mapping?: Partial<ApiFieldMapping> };
+		const mapping = raw.mapping;
+		const validMapping = !!mapping && typeof mapping.idField === "string" && typeof mapping.labelField === "string";
+		if (typeof raw.url !== "string" || !validMapping) {
+			node.apiSource = undefined;
+		} else {
+			node.apiSource = {
+				url: raw.url,
+				method: "GET",
+				mapping: {
+					idField: mapping.idField as string,
+					labelField: mapping.labelField as string,
+					secondaryField: typeof mapping.secondaryField === "string" ? mapping.secondaryField : undefined,
+					arrayField: typeof mapping.arrayField === "string" ? mapping.arrayField : undefined,
+				},
+				mode: raw.mode === "append" ? "append" : "merge",
+				refreshOnViewLoad: !!raw.refreshOnViewLoad,
+			};
+		}
+	}
+
+	if (node.apiSource) {
+		if (!node.apiItemState || typeof node.apiItemState !== "object" || Array.isArray(node.apiItemState)) {
+			node.apiItemState = {};
+		}
+		if (!Array.isArray(node.apiItemOrder)) {
+			node.apiItemOrder = Object.keys(node.apiItemState);
+		} else {
+			node.apiItemOrder = node.apiItemOrder.filter((id) => typeof id === "string" && Object.prototype.hasOwnProperty.call(node.apiItemState, id));
+		}
+		if (!node.apiCache || typeof node.apiCache !== "object") node.apiCache = undefined;
+	} else {
+		node.apiCache = undefined;
+		node.apiItemState = undefined;
+		node.apiItemOrder = undefined;
+	}
+
+	for (const child of node.children) sanitizeApiFields(child);
+}
+
+/** R17/E9: sanitizes every view's tree in place before anything else touches it. */
+function sanitizeViewsApiFields(views: View[]): void {
+	for (const view of views) {
+		for (const node of view.root) sanitizeApiFields(node);
+	}
 }
 
 export interface MetaTarget {
@@ -41,6 +98,7 @@ export class ViewsManager {
 	private changeListeners = new Set<() => void>();
 
 	constructor(private app: App, initialViews: View[], initialActiveViewId: string, private persist: () => void) {
+		sanitizeViewsApiFields(initialViews);
 		this.views = initialViews.length > 0 ? initialViews : [createEmptyView(generateNodeId(), DEFAULT_VIEW_NAME)];
 		this.activeViewId = this.views.some((v) => v.id === initialActiveViewId) ? initialActiveViewId : this.views[0].id;
 	}
