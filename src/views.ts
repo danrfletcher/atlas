@@ -1,6 +1,6 @@
 import { App } from "obsidian";
 import type { UnitIndex } from "./unit-index";
-import { DEFAULT_VIEW_NAME, StatusGovernance, Unit, UnitRef, View, ViewNode, createEmptyView, rewriteRefPath, unitRefsEqual, unitToRef } from "./types";
+import { ApiSourceConfig, DEFAULT_VIEW_NAME, StatusGovernance, Unit, UnitRef, View, ViewNode, createEmptyView, rewriteRefPath, unitRefsEqual, unitToRef } from "./types";
 
 function generateNodeId(): string {
 	return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
@@ -456,6 +456,50 @@ export class ViewsManager {
 		delete found.node.label;
 		this.save();
 		return true;
+
+	/** G1/E6: sets (or clears, passing `undefined`) a Folder's API data source. Clearing also drops
+	 * its cache/item state — those have no meaning detached from a configured source. The device-local
+	 * headers entry is a separate store the caller owns (see `ApiHeadersStore`); this method only ever
+	 * touches the synced view data. */
+	setApiSource(viewId: string, nodeId: string, source: ApiSourceConfig | undefined): void {
+		const view = this.getView(viewId);
+		const found = view && this.findNode(view.root, nodeId);
+		if (!found || found.node.type !== "meta") return;
+		found.node.apiSource = source;
+		if (!source) {
+			found.node.apiCache = undefined;
+			found.node.apiItemState = undefined;
+			found.node.apiItemOrder = undefined;
+		}
+		this.save();
+	}
+
+	/** G8: sets one API item's own explicit status — the item has no real `ViewNode`, so
+	 * `setExplicitStatus` (which addresses a node by id) can't be reused directly. */
+	setApiItemStatus(viewId: string, nodeId: string, itemId: string, statusId: string): void {
+		const view = this.getView(viewId);
+		const found = view && this.findNode(view.root, nodeId);
+		const item = found?.node.apiItemState?.[itemId];
+		if (!item) return;
+		item.explicitStatusId = statusId;
+		this.save();
+	}
+
+	/** G9: attaches (or replaces) the one note a given API item opens by default. */
+	setApiItemNoteRef(viewId: string, nodeId: string, itemId: string, noteRef: UnitRef): void {
+		const view = this.getView(viewId);
+		const found = view && this.findNode(view.root, nodeId);
+		const item = found?.node.apiItemState?.[itemId];
+		if (!item) return;
+		item.noteRef = noteRef;
+		this.save();
+	}
+
+	/** G1/G6/G11: for callers (`ApiSourceController`) that mutate a node's `apiCache`/`apiItemState`
+	 * fields directly rather than through a dedicated setter — persists and notifies the same as any
+	 * other change here. */
+	notifyExternalMutation(): void {
+		this.save();
 	}
 
 	/** F9 rename integrity: rewrite every matching ref (exact + prefix) across every view. */

@@ -113,6 +113,81 @@ export interface ViewNode extends StatusGovernance {
 	 * `StatusGovernance`, above). Absent means "show the governing set's own default status," the
 	 * same as before this PR existed. */
 	explicitStatusId?: string;
+	/** PR-2 (API-backed Atlas Folders): request/mapping config for a "Folder" (meta node) whose rows
+	 * are pulled from a JSON API instead of (or alongside) manually placed children. Only ever set on
+	 * a `type: "meta"` node. Headers (including any bearer token) are deliberately absent from this
+	 * shape — see `ApiHeadersStore` — so this object is safe to persist in synced `data.json` (G13). */
+	apiSource?: ApiSourceConfig;
+	/** Last-refresh outcome. Holds mapped rows only, never the raw response (G13/E9: cache contents
+	 * assertion). */
+	apiCache?: ApiCache;
+	/** Per-API-row durable state (status, note, "not found" flag), keyed by the API's own row id —
+	 * survives refreshes independently of whatever the API currently reports. */
+	apiItemState?: Record<string, ApiItemState>;
+	/** Display order of `apiItemState`'s keys — a plain `Record` has no reliable iteration order
+	 * across a JSON round-trip, so order is tracked explicitly alongside it. */
+	apiItemOrder?: string[];
+}
+
+/** A single request header, e.g. `Authorization: Bearer …`. Never persisted in `data.json` — see
+ * `ApiHeadersStore` (G13: device-local only). */
+export interface ApiHeader {
+	key: string;
+	value: string;
+}
+
+/** Which sample field maps to which target (G2). `arrayField` is set only when the raw response is
+ * a plain object rather than a list — the top-level key whose value is the array to read rows from. */
+export interface ApiFieldMapping {
+	idField: string;
+	labelField: string;
+	secondaryField?: string;
+	arrayField?: string;
+}
+
+export interface ApiSourceConfig {
+	url: string;
+	/** GET only in this PR (G1) — the type exists so a later PR's Overwrite/JS/other-method work has
+	 * somewhere to grow into, without this PR's own code ever producing or accepting anything else. */
+	method: "GET";
+	mapping: ApiFieldMapping;
+	mode: "append" | "merge";
+	/** G5a. "Refresh every X minutes" (G5b) is a later PR — no field for it here. */
+	refreshOnViewLoad: boolean;
+}
+
+/** A row exactly as mapped from a response — this is all the cache ever holds, never the raw
+ * response (G13, E9). */
+export interface ApiMappedRow {
+	id: string;
+	label: string;
+	secondary?: string;
+}
+
+export interface ApiCache {
+	fetchedAt: number | null;
+	ok: boolean;
+	error: string | null;
+	rows: ApiMappedRow[];
+	/** E2: items skipped for a missing/duplicate id, this refresh. */
+	skippedCount: number;
+	/** E4: true when the response had more than 5,000 valid rows. */
+	truncated: boolean;
+}
+
+/** One API row's durable, per-id state (G6c: status and note never change on refresh; label and
+ * secondary text always follow the API). */
+export interface ApiItemState {
+	id: string;
+	label: string;
+	secondary?: string;
+	explicitStatusId?: string;
+	noteRef?: UnitRef;
+	/** Merge mode only (G6): the row vanished from the API but is kept, marked "not found". */
+	notFound?: boolean;
+	/** Set the moment `notFound` first becomes true; cleared (along with `notFound`) the moment the
+	 * row reappears (G6c). */
+	lastSeenAt?: string;
 }
 
 /** PR 17: extends `StatusGovernance` so the view root itself can be a governor — "Statuses" on the
