@@ -7,13 +7,20 @@ input reach a shelled-out command -- because requests only ever read the Cache, 
 never trigger a scan at all.
 """
 
+import os
+import tempfile
 import threading
 import unittest
 from http.client import HTTPConnection
+from pathlib import Path
 
+from mac_inventory import config
+from mac_inventory.bind_address import get_bind_address
 from mac_inventory.cache import Cache
-from mac_inventory.procrun import ALLOWED_COMMANDS, DisallowedCommandError, validate_command
+from mac_inventory.procrun import ALLOWED_COMMANDS, FORBIDDEN_TOKENS, DisallowedCommandError, run_command, validate_command
+from mac_inventory.scanners import scan_apps, scan_cli, scan_launch_agents
 from mac_inventory.server import create_server
+from tests.fixtures.stubs import FIXTURES_DIR, install_stub_tools
 
 
 class ProcessRunnerAllowListTests(unittest.TestCase):
@@ -60,6 +67,100 @@ class ProcessRunnerAllowListTests(unittest.TestCase):
         self.assertEqual(ALLOWED_COMMANDS, {"brew", "mas", "plutil", "ifconfig"})
 
 
+class SpyRunner:
+    """Wraps the real run_command, recording every argv actually spawned -- so the
+    assertion below is against what the real scanners do, not a hand-written list.
+    """
+
+    def __init__(self):
+        self.calls = []
+
+    def __call__(self, argv, timeout=config.COMMAND_TIMEOUT_SECONDS):
+        self.calls.append(list(argv))
+        return run_command(argv, timeout=timeout)
+
+
+class RealScannersOnlySpawnAllowListedCommandsTests(unittest.TestCase):
+    """R3: run the real G14/G16 scanners (not hand-written argv lists) through a
+    recording spy runner, and check every command they actually spawn against the
+    allow list and the forbidden-token denylist. Also checks that a real scan writes
+    no files.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp_path = Path(self._tmp.name)
+        bin_dir = self.tmp_path / "bin"
+        install_stub_tools(bin_dir)
+
+        self._old_path = os.environ.get("PATH", "")
+        self._old_fixtures = os.environ.get("MAC_INVENTORY_TEST_FIXTURES")
+        os.environ["PATH"] = f"{bin_dir}{os.pathsep}{self._old_path}"
+        os.environ["MAC_INVENTORY_TEST_FIXTURES"] = str(FIXTURES_DIR)
+        self.addCleanup(self._restore_env)
+        self.addCleanup(self._tmp.cleanup)
+
+        self.apps_dir = self.tmp_path / "Applications"
+        self._make_app(self.apps_dir, "Docker")
+        self.agents_dir = self.tmp_path / "LaunchAgents"
+        self._make_launch_agent(self.agents_dir, "com.apple.foo")
+
+    def _restore_env(self):
+        os.environ["PATH"] = self._old_path
+        if self._old_fixtures is None:
+            os.environ.pop("MAC_INVENTORY_TEST_FIXTURES", None)
+        else:
+            os.environ["MAC_INVENTORY_TEST_FIXTURES"] = self._old_fixtures
+
+    def _make_app(self, apps_dir: Path, bundle_name: str) -> None:
+        info_path = apps_dir / f"{bundle_name}.app" / "Contents" / "Info.plist"
+        info_path.parent.mkdir(parents=True, exist_ok=True)
+        info_path.write_text("placeholder -- the stub plutil ignores real content")
+
+    def _make_launch_agent(self, directory: Path, plist_name: str) -> None:
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / f"{plist_name}.plist").write_text("placeholder -- the stub plutil keys off the filename")
+
+    def test_real_scans_only_ever_spawn_allow_listed_read_commands(self):
+        spy = SpyRunner()
+
+        scan_apps(run=spy, directories=[self.apps_dir])
+        scan_cli(run=spy)
+        scan_launch_agents(run=spy, directories=[self.agents_dir])
+        try:
+            get_bind_address(run=spy)
+        except RuntimeError:
+            pass  # no Tailscale address in this environment -- we only care what it spawned
+
+        self.assertTrue(spy.calls, "expected the real scanners to spawn at least one command")
+        for argv in spy.calls:
+            with self.subTest(argv=argv):
+                self.assertIn(argv[0], ALLOWED_COMMANDS)
+                self.assertFalse(any(token in FORBIDDEN_TOKENS for token in argv[1:]))
+
+    def test_real_scans_write_no_files(self):
+        write_attempts = []
+        real_open = open
+
+        def guarded_open(path, mode="r", *args, **kwargs):
+            if any(flag in mode for flag in ("w", "a", "x")):
+                write_attempts.append((path, mode))
+            return real_open(path, mode, *args, **kwargs)
+
+        import builtins
+
+        original = builtins.open
+        builtins.open = guarded_open
+        try:
+            scan_apps(run=run_command, directories=[self.apps_dir])
+            scan_cli(run=run_command)
+            scan_launch_agents(run=run_command, directories=[self.agents_dir])
+        finally:
+            builtins.open = original
+
+        self.assertEqual(write_attempts, [])
+
+
 SAMPLE_ITEMS = [{"id": "a", "label": "A", "version": "1", "path": "/Applications/A.app"}]
 
 
@@ -104,7 +205,7 @@ class RequestsNeverReachACommandTests(unittest.TestCase):
 
     def test_write_methods_are_405_and_trigger_no_scan(self):
         baseline = self.scan_calls["apps"]
-        for method in ("POST", "PUT", "DELETE", "PATCH"):
+        for method in ("POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"):
             status, _ = self._request(method, "/apps", body=b'{"inject": "; rm -rf /"}')
             self.assertEqual(status, 405)
         self.assertEqual(self.scan_calls["apps"], baseline)
