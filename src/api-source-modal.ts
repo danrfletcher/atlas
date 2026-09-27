@@ -39,7 +39,7 @@ export class ApiSourceModal extends Modal {
 		this.headers = initialHeaders.map((h) => ({ ...h }));
 		this.mode = initial?.mode ?? "merge";
 		this.refreshOnViewLoad = initial?.refreshOnViewLoad ?? false;
-		this.mapping = initial?.mapping ?? { idField: "", labelField: "", secondaryField: undefined };
+		this.mapping = initial?.mapping ? { ...initial.mapping } : { idField: "", labelField: "", secondaryField: undefined };
 	}
 
 	onOpen(): void {
@@ -66,7 +66,10 @@ export class ApiSourceModal extends Modal {
 
 		new Setting(contentEl).setName("Method").addText((text) => text.setValue("GET").setDisabled(true));
 
-		new Setting(contentEl).setName("Headers").setDesc("Stored on this device only — never synced.").setHeading();
+		new Setting(contentEl)
+			.setName("Headers")
+			.setDesc("Stored on this device only — never synced, and kept as plain text, unencrypted.")
+			.setHeading();
 		for (let i = 0; i < this.headers.length; i++) {
 			const header = this.headers[i];
 			const row = new Setting(contentEl);
