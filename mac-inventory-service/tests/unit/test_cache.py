@@ -39,6 +39,19 @@ class EndpointCacheTests(unittest.TestCase):
         self.assertIn("scan exploded", snapshot.error)
         self.assertEqual(snapshot.fetched_at, first_fetched_at)
 
+    def test_failed_refresh_logs_the_endpoint_name_and_error(self):
+        # R11: the last-good snapshot survives in memory, but that's invisible
+        # unless it also lands somewhere a human can see it running headless.
+        cache = EndpointCache(name="cli")
+
+        def boom():
+            raise RuntimeError("brew info exited 1")
+
+        with self.assertLogs("mac_inventory.cache", level="WARNING") as captured:
+            cache.refresh(boom)
+
+        self.assertTrue(any("cli" in line and "brew info exited 1" in line for line in captured.output))
+
     def test_failed_refresh_before_any_success_keeps_cold_start_shape(self):
         cache = EndpointCache()
 

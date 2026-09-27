@@ -5,10 +5,13 @@ fully-old or fully-new snapshot, never a partial one. A failed scan keeps the la
 good items and marks the snapshot stale; it never empties the list.
 """
 
+import logging
 import threading
 import time
 from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -25,7 +28,8 @@ def _cold_start_snapshot() -> Snapshot:
 
 
 class EndpointCache:
-    def __init__(self):
+    def __init__(self, name: str = "endpoint"):
+        self._name = name
         self._lock = threading.Lock()
         self._snapshot = _cold_start_snapshot()
 
@@ -37,6 +41,10 @@ class EndpointCache:
         try:
             items = scan_fn()
         except Exception as exc:
+            # R11: the last-good snapshot survives in memory, but that's invisible
+            # unless it's logged too -- the token never reaches here, so the
+            # no-token-in-logs rule still holds.
+            logger.warning("refresh failed for endpoint %s: %s", self._name, exc)
             with self._lock:
                 previous = self._snapshot
                 self._snapshot = Snapshot(
@@ -63,7 +71,7 @@ class Cache:
     def __init__(self, scanners: Dict[str, Callable[[], List[dict]]], interval: float):
         self._scanners = scanners
         self._interval = interval
-        self._endpoints = {name: EndpointCache() for name in scanners}
+        self._endpoints = {name: EndpointCache(name) for name in scanners}
         self._stop = threading.Event()
         self._threads: List[threading.Thread] = []
 
