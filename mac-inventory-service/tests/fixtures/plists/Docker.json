@@ -1,0 +1,5 @@
+{
+  "CFBundleIdentifier": "com.docker.docker",
+  "CFBundleDisplayName": "Docker",
+  "CFBundleShortVersionString": "4.34.0"
+}
