@@ -67,48 +67,86 @@ def scan_apps(run: RunFn = default_run_command, directories: Optional[List[Path]
 _MAS_VERSION_RE = re.compile(r"^(.*)\s+\(([^)]+)\)\s*$")
 
 
-def _scan_brew(run: RunFn, kind: str) -> List[Dict]:
-    """kind is "formula" or "cask"; a manager that isn't installed contributes nothing."""
+def _brew_root(run: RunFn, root_flag: str) -> str:
+    """Best-effort lookup of the Cellar/Caskroom root, purely for the `path` field.
+    Not critical to the listing itself, so a failure here just leaves path empty.
+    """
+    try:
+        result = run(["brew", root_flag])
+    except Exception:
+        return ""
+    return result.stdout.strip() if result.returncode == 0 else ""
+
+
+def _brew_info_installed(run: RunFn) -> Optional[dict]:
+    """`brew info --json=v2 --installed` -- Homebrew's own machine-readable listing
+    (R5), covering both formulae and casks in one call.
+
+    A manager that isn't installed contributes nothing (returns None). Once brew is
+    known to be installed, any failure (non-zero exit, timeout, OSError, bad JSON)
+    raises so the caller's cache keeps its last good snapshot instead of being
+    emptied (R1) -- only a missing binary is "not installed".
+    """
     if not _manager_available("brew"):
-        return []
+        return None
+    result = run(["brew", "info", "--json=v2", "--installed"])
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"brew info --json=v2 --installed exited {result.returncode}: {result.stderr.strip()}"
+        )
     try:
-        listing = run(["brew", "list", f"--{kind}", "--versions"])
-    except Exception:
-        return []
-    if listing.returncode != 0:
-        return []
+        data = json.loads(result.stdout)
+    except (ValueError, TypeError) as exc:
+        raise RuntimeError("brew info --json=v2 --installed returned invalid JSON") from exc
+    if not isinstance(data, dict):
+        raise RuntimeError("brew info --json=v2 --installed returned an unexpected shape")
+    return data
 
-    root_flag = "--cellar" if kind == "formula" else "--caskroom"
-    try:
-        root_result = run(["brew", root_flag])
-        root = root_result.stdout.strip() if root_result.returncode == 0 else ""
-    except Exception:
-        root = ""
 
+def _scan_brew_formulae(run: RunFn, data: dict) -> List[Dict]:
+    root = _brew_root(run, "--cellar")
     items: List[Dict] = []
-    for line in listing.stdout.splitlines():
-        parts = line.split()
-        if not parts:
-            continue
-        name = parts[0]
-        version = parts[-1] if len(parts) > 1 else ""
-        cli_id = derive_cli_id("brew", name)
+    for entry in data.get("formulae", []):
+        name = entry.get("name")
+        cli_id = derive_cli_id("brew", name) if name else None
         if not cli_id:
             continue
+        installed = entry.get("installed") or []
+        version = installed[-1].get("version", "") if installed else ""
         path = f"{root}/{name}/{version}" if root and version else ""
-        items.append({"id": cli_id, "label": name, "version": version, "path": path})
+        items.append({"id": cli_id, "label": str(name), "version": str(version), "path": path})
+    return items
+
+
+def _scan_brew_casks(run: RunFn, data: dict) -> List[Dict]:
+    """Casks get their own `brew-cask:` prefix (R6): a formula and a cask can share a
+    name (e.g. the `docker` formula and the `docker` cask), and both must survive
+    dedup rather than one silently overwriting the other under a shared `brew:` id.
+    """
+    root = _brew_root(run, "--caskroom")
+    items: List[Dict] = []
+    for entry in data.get("casks", []):
+        token = entry.get("token")
+        cli_id = derive_cli_id("brew-cask", token) if token else None
+        if not cli_id:
+            continue
+        names = entry.get("name") or []
+        label = names[0] if names else token
+        version = entry.get("installed") or ""
+        path = f"{root}/{token}/{version}" if root and version else ""
+        items.append({"id": cli_id, "label": str(label), "version": str(version), "path": path})
     return items
 
 
 def _scan_mas(run: RunFn) -> List[Dict]:
+    """A manager that isn't installed contributes nothing; an installed manager's
+    failure raises (see _brew_info_installed's docstring -- same rule applies here).
+    """
     if not _manager_available("mas"):
         return []
-    try:
-        result = run(["mas", "list"])
-    except Exception:
-        return []
+    result = run(["mas", "list"])
     if result.returncode != 0:
-        return []
+        raise RuntimeError(f"mas list exited {result.returncode}: {result.stderr.strip()}")
 
     items: List[Dict] = []
     for line in result.stdout.splitlines():
@@ -130,8 +168,10 @@ def _scan_mas(run: RunFn) -> List[Dict]:
 
 def scan_cli(run: RunFn = default_run_command) -> List[Dict]:
     items: List[Dict] = []
-    items.extend(_scan_brew(run, "formula"))
-    items.extend(_scan_brew(run, "cask"))
+    brew_data = _brew_info_installed(run)
+    if brew_data is not None:
+        items.extend(_scan_brew_formulae(run, brew_data))
+        items.extend(_scan_brew_casks(run, brew_data))
     items.extend(_scan_mas(run))
     return dedup_items(items)
 

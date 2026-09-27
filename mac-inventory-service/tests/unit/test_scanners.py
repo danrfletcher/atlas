@@ -1,4 +1,5 @@
 import os
+import stat
 import tempfile
 import unittest
 from pathlib import Path
@@ -136,10 +137,21 @@ class ScanCliTests(StubToolsTestCase):
         items = scan_cli(run=run_command)
         ids = {i["id"] for i in items}
         self.assertIn("brew:git", ids)
-        self.assertIn("brew:docker", ids)
+        self.assertIn("brew:docker", ids)  # docker the formula
+        self.assertIn("brew-cask:docker", ids)  # docker the cask -- distinct id (R6)
         self.assertIn("mas:Keynote", ids)
         for item in items:
             self.assertEqual(set(item.keys()), {"id", "label", "version", "path"})
+
+    def test_formula_and_cask_sharing_a_name_both_survive(self):
+        # R6: brew:docker (the CLI formula) and brew-cask:docker (Docker Desktop)
+        # must not collide on the same id, and neither should silently drop.
+        items = scan_cli(run=run_command)
+        formula = next(i for i in items if i["id"] == "brew:docker")
+        cask = next(i for i in items if i["id"] == "brew-cask:docker")
+        self.assertEqual(formula["version"], "24.0.0")
+        self.assertEqual(cask["label"], "Docker")
+        self.assertEqual(cask["version"], "4.34.0")
 
     def test_uninstalled_manager_contributes_nothing_and_does_not_fail(self):
         # Remove the mas stub from PATH; brew items should still come back.
@@ -150,6 +162,17 @@ class ScanCliTests(StubToolsTestCase):
         ids = {i["id"] for i in items}
         self.assertIn("brew:git", ids)
         self.assertFalse(any(i.startswith("mas:") for i in ids))
+
+    def test_installed_managers_failure_raises_instead_of_emptying_the_list(self):
+        # R1: an installed brew that fails or times out must raise, not return [],
+        # so the cache keeps its last good snapshot rather than being emptied.
+        bin_dir = self.tmp_path / "bin"
+        failing_brew = bin_dir / "brew"
+        failing_brew.write_text("#!/bin/sh\nexit 1\n")
+        failing_brew.chmod(failing_brew.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+
+        with self.assertRaises(Exception):
+            scan_cli(run=run_command)
 
 
 if __name__ == "__main__":

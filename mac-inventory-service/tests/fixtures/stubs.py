@@ -32,11 +32,12 @@ exit 1
 _BREW_STUB = """#!/bin/sh
 args="$*"
 case "$args" in
-  "list --formula --versions")
-    printf 'git 2.43.0\\njq 1.7.1\\n'
-    ;;
-  "list --cask --versions")
-    printf 'docker 4.34.0\\n'
+  "info --json=v2 --installed")
+    # A formula and a cask both named "docker" (R6 regression fixture): the CLI
+    # (brew:docker) and the cask (brew-cask:docker) must both survive.
+    cat <<'JSON'
+{"formulae": [{"name": "git", "installed": [{"version": "2.43.0"}]}, {"name": "jq", "installed": [{"version": "1.7.1"}]}, {"name": "docker", "installed": [{"version": "24.0.0"}]}], "casks": [{"token": "docker", "name": ["Docker"], "installed": "4.34.0"}]}
+JSON
     ;;
   "--cellar")
     printf '/opt/homebrew/Cellar\\n'
