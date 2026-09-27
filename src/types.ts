@@ -116,7 +116,12 @@ export interface ViewNode extends StatusGovernance {
 	/** PR-2 (API-backed Atlas Folders): request/mapping config for a "Folder" (meta node) whose rows
 	 * are pulled from a JSON API instead of (or alongside) manually placed children. Only ever set on
 	 * a `type: "meta"` node. Headers (including any bearer token) are deliberately absent from this
-	 * shape — see `ApiHeadersStore` — so this object is safe to persist in synced `data.json` (G13). */
+	 * shape — see `ApiHeadersStore` — so this object is safe to persist in synced `data.json` (G13).
+	 *
+	 * E7 (ticket 34n6ct71muguncxk, not yet built anywhere in this repo as of PR-2): whatever code
+	 * converts a meta Folder into a real disk-backed folder must copy this field, `apiCache`,
+	 * `apiItemState` and `apiItemOrder` onto the resulting node unchanged, and must leave any
+	 * already-placed/pulled children alone — the conversion affects only the Folder node itself. */
 	apiSource?: ApiSourceConfig;
 	/** Last-refresh outcome. Holds mapped rows only, never the raw response (G13/E9: cache contents
 	 * assertion). */
