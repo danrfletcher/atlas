@@ -70,17 +70,17 @@ def make_handler(cache: Cache, token: str):
         def do_GET(self):
             self._dispatch("GET")
 
-        def do_POST(self):
-            self._dispatch("POST")
-
-        def do_PUT(self):
-            self._dispatch("PUT")
-
-        def do_DELETE(self):
-            self._dispatch("DELETE")
-
-        def do_PATCH(self):
-            self._dispatch("PATCH")
+        def __getattr__(self, name):
+            # BaseHTTPRequestHandler dispatches any verb via getattr(self, "do_" +
+            # command); without this, HEAD/OPTIONS/anything else we don't define
+            # falls through to its default 501 (before auth even runs). Route every
+            # other verb through the same 401-then-405 path as POST/PUT/etc, so "any
+            # non-GET method is rejected with 405" holds for the whole verb space,
+            # not just the ones we happened to spell out.
+            if name.startswith("do_"):
+                method = name[len("do_"):]
+                return lambda: self._dispatch(method)
+            raise AttributeError(name)
 
     return Handler
 
