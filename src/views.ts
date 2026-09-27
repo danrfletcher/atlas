@@ -143,6 +143,26 @@ function cloneApiSource(source: ApiSourceConfig): ApiSourceConfig {
 	return { ...source, mapping: { ...source.mapping } };
 }
 
+export interface ApiSourceIdPair {
+	originalId: string;
+	cloneId: string;
+}
+
+/** G7/R3: `cloneNode` deep-copies `apiSource` itself, but the device-local request headers for it live
+ * outside this tree entirely, in `ApiHeadersStore` (keyed by node id) — a duplicate's headers have no
+ * home in `duplicateNode`'s return value, so the caller (`explorer-view.ts`) walks the original and its
+ * clone side by side (identical shape/order — both built by the same `cloneNode` recursion) and copies
+ * each sourced node's headers entry across using these pairs. Covers nested sourced Folders in the
+ * duplicated subtree too, not just the duplicated node itself. */
+export function collectApiSourceNodeIdPairs(original: ViewNode, clone: ViewNode): ApiSourceIdPair[] {
+	const pairs: ApiSourceIdPair[] = [];
+	if (original.apiSource) pairs.push({ originalId: original.id, cloneId: clone.id });
+	for (let i = 0; i < original.children.length; i++) {
+		pairs.push(...collectApiSourceNodeIdPairs(original.children[i], clone.children[i]));
+	}
+	return pairs;
+}
+
 /** G7 (extended to G4's static rows): a deep copy of a Folder's per-id row state — `noteRef` is itself
  * an object, so a shallow copy of the map would still leave both copies' rows pointing at (and able to
  * mutate) the very same `UnitRef`. */
@@ -422,13 +442,14 @@ export class ViewsManager {
 	 * scheme — there's no non-fake way to give two siblings that reference the same disk path
 	 * different display names, so duplicate labels are allowed outright rather than inventing a
 	 * "meta name" override field just for this. */
-	duplicateNode(viewId: string, nodeId: string): void {
+	duplicateNode(viewId: string, nodeId: string): ViewNode | null {
 		const view = this.getView(viewId);
 		const found = view && this.findNode(view.root, nodeId);
-		if (!found) return;
+		if (!found) return null;
 		const clone = this.cloneNode(found.node);
 		found.siblings.splice(found.index + 1, 0, clone);
 		this.save();
+		return clone;
 	}
 
 	/** PR 18: a duplicate keeps the same status assignment its original had at the moment of

@@ -1,7 +1,7 @@
 import { App, FuzzySuggestModal, ItemView, MarkdownView, Menu, Modal, Notice, Platform, TFile, TFolder, WorkspaceLeaf, setIcon, setTooltip } from "obsidian";
 import type AtlasPlugin from "./main";
 import { ApiItemState, StatusGovernance, TruncatedStatusConfig, Unit, UnitRef, View, ViewNode, unitRefKey, unitToRef } from "./types";
-import { MetaTarget, flattenMetaFolders } from "./views";
+import { ApiSourceIdPair, MetaTarget, collectApiSourceNodeIdPairs, flattenMetaFolders } from "./views";
 import { resolveUnit } from "./unit-display";
 import { TextPromptModal, ConfirmModal, ConfirmDeleteRowsModal, StatusesModal } from "./modals";
 import { StatusDefinition, pluralizeStatusLabel } from "./statuses";
@@ -490,6 +490,20 @@ export class AtlasExplorerView extends ItemView {
 			this.plugin.viewsManager.setApiSource(view.id, node.id, result.source);
 			this.refreshApiSource(view, node, "manual");
 		}).open();
+	}
+
+	/** R3/G7: `duplicateNode` deep-copies `apiSource` itself, but the device-local headers for it (and
+	 * for any nested sourced Folder in the duplicated subtree) live outside the synced view tree in
+	 * `ApiHeadersStore` — copied across separately here using the original/clone id pairs, or the copy's
+	 * first refresh of a token-authed API would fail 401 despite its modal showing the same settings. */
+	private duplicateFolder(view: View, node: ViewNode): void {
+		const clone = this.plugin.viewsManager.duplicateNode(view.id, node.id);
+		if (!clone) return;
+		const pairs: ApiSourceIdPair[] = collectApiSourceNodeIdPairs(node, clone);
+		for (const pair of pairs) {
+			const headers = this.plugin.apiHeadersStore.get(pair.originalId);
+			if (headers.length > 0) this.plugin.apiHeadersStore.set(pair.cloneId, headers);
+		}
 	}
 
 	/** G9: opens an API item's already-attached note/block/module. Only ever called once `item.noteRef`
@@ -1869,7 +1883,7 @@ export class AtlasExplorerView extends ItemView {
 		// PR 13: clones this row (and its whole meta-nested subtree, if it has one) as a new sibling
 		// right after it — same underlying unit, no disk duplicate, no naming scheme (two rows with
 		// the same label is expected — see duplicateNode's own doc comment for why).
-		menu.addItem((item) => item.setTitle("Duplicate (Meta)").setIcon("copy-plus").onClick(() => this.plugin.viewsManager.duplicateNode(view.id, node.id)));
+		menu.addItem((item) => item.setTitle("Duplicate (Meta)").setIcon("copy-plus").onClick(() => this.duplicateFolder(view, node)));
 		menu.addItem((item) =>
 			item
 				.setTitle("Remove from view")
@@ -1963,7 +1977,7 @@ export class AtlasExplorerView extends ItemView {
 		// PR 13: same clone-as-sibling action as a unit row's context menu — a meta folder has no
 		// disk identity to begin with, so "duplicating" it just clones the organizational label and
 		// its whole subtree, same mechanics either way (`duplicateNode` doesn't distinguish types).
-		menu.addItem((item) => item.setTitle("Duplicate (Meta)").setIcon("copy-plus").onClick(() => this.plugin.viewsManager.duplicateNode(view.id, node.id)));
+		menu.addItem((item) => item.setTitle("Duplicate (Meta)").setIcon("copy-plus").onClick(() => this.duplicateFolder(view, node)));
 		menu.addItem((item) =>
 			item
 				.setTitle("Rename folder")
