@@ -117,7 +117,7 @@ class MethodMatrixTests(HttpServerTestCase):
         self.port = self._start_server(cache)
 
     def test_non_get_methods_are_405_and_change_nothing(self):
-        for method in ("POST", "PUT", "DELETE", "PATCH"):
+        for method in ("POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS", "TRACE"):
             with self.subTest(method=method):
                 status, _ = self._request(self.port, "/apps", method=method)
                 self.assertEqual(status, 405)
@@ -142,6 +142,22 @@ class ColdStartTests(HttpServerTestCase):
             self.assertIn("warming", body.get("error", "").lower())
         else:
             self.assertEqual(body["items"], [])
+
+
+class LargeCacheTests(HttpServerTestCase):
+    def test_more_than_5000_items_does_not_crash_the_service(self):
+        many_items = [
+            {"id": f"brew:pkg-{i}", "label": f"pkg-{i}", "version": "1.0", "path": ""} for i in range(6000)
+        ]
+        cache = Cache({"apps": lambda: many_items}, interval=100)
+        cache.refresh_now()
+        port = self._start_server(cache)
+
+        status, payload = self._request(port, "/apps")
+
+        self.assertEqual(status, 200)
+        body = json.loads(payload)
+        self.assertEqual(len(body["items"]), 6000)
 
 
 class SlowScanLatencyGuardTests(HttpServerTestCase):
