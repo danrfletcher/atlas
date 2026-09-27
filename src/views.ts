@@ -521,6 +521,19 @@ export class ViewsManager {
 					changed = true;
 				}
 			}
+			// R12: an API item's attached note/block/module (`setApiItemNoteRef`) is a `UnitRef` just
+			// like a unit node's own `ref` — it goes stale on the same renames and needs the same
+			// rewrite, or the default click (G9) silently does nothing once the target moves.
+			if (node.apiItemState) {
+				for (const item of Object.values(node.apiItemState)) {
+					if (!item.noteRef) continue;
+					const rewritten = rewriteRefPath(item.noteRef, oldPath, newPath);
+					if (rewritten !== item.noteRef) {
+						item.noteRef = rewritten;
+						changed = true;
+					}
+				}
+			}
 			if (this.rewriteTree(node.children, oldPath, newPath)) changed = true;
 		}
 		return changed;

@@ -119,6 +119,51 @@ describe("E7 — rename/move leave a Folder's API source untouched", () => {
 	});
 });
 
+describe("R12 — renaming a file/folder rewrites an API item's attached note (rename integrity)", () => {
+	function makeViewsManager() {
+		return new ViewsManager({} as App, [], "", () => {});
+	}
+
+	it("onVaultRename rewrites apiItemState[*].noteRef the same way it rewrites a unit's own ref", () => {
+		const vm = makeViewsManager();
+		const view = vm.getViews()[0];
+		const folder = vm.addMetaFolder(view.id, null, "API folder")!;
+		const node = vm.getNode(view.id, folder.id)!;
+		node.apiItemState = { "1": { id: "1", label: "One", noteRef: { kind: "file", path: "Old.md" } } };
+		node.apiItemOrder = ["1"];
+
+		vm.onVaultRename("Old.md", "New.md");
+
+		expect(vm.getNode(view.id, folder.id)!.apiItemState!["1"].noteRef).toEqual({ kind: "file", path: "New.md" });
+	});
+
+	it("onVaultRename rewrites a noteRef nested under a renamed containing folder (prefix match)", () => {
+		const vm = makeViewsManager();
+		const view = vm.getViews()[0];
+		const folder = vm.addMetaFolder(view.id, null, "API folder")!;
+		const node = vm.getNode(view.id, folder.id)!;
+		node.apiItemState = { "1": { id: "1", label: "One", noteRef: { kind: "file", path: "Pool/Old.md" } } };
+		node.apiItemOrder = ["1"];
+
+		vm.onVaultRename("Pool", "Renamed pool");
+
+		expect(vm.getNode(view.id, folder.id)!.apiItemState!["1"].noteRef).toEqual({ kind: "file", path: "Renamed pool/Old.md" });
+	});
+
+	it("an item with no attachment yet is untouched", () => {
+		const vm = makeViewsManager();
+		const view = vm.getViews()[0];
+		const folder = vm.addMetaFolder(view.id, null, "API folder")!;
+		const node = vm.getNode(view.id, folder.id)!;
+		node.apiItemState = { "1": { id: "1", label: "One" } };
+		node.apiItemOrder = ["1"];
+
+		vm.onVaultRename("Old.md", "New.md");
+
+		expect(vm.getNode(view.id, folder.id)!.apiItemState!["1"].noteRef).toBeUndefined();
+	});
+});
+
 describe("E6 — deleting a Folder removes its source/cache and (via the caller) its headers", () => {
 	it("deleteMetaFolder discards the node's own apiSource/cache/itemState", () => {
 		const vm = new ViewsManager({} as App, [], "", () => {});
