@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { API_ROW_CAP, findArrayFields, isMapError, mapResponseRows, mapSampleRows } from "../../src/api-mapping";
+import { API_ROW_CAP, canSaveApiSource, findArrayFields, isMapError, mapResponseRows, mapSampleRows, sampleFieldsForArrayField } from "../../src/api-mapping";
 import { ApiFieldMapping } from "../../src/types";
 
 const mapping: ApiFieldMapping = { idField: "id", labelField: "name" };
@@ -103,5 +103,51 @@ describe("mapSampleRows — E4: 5,000-row cap", () => {
 		const result = mapSampleRows(items, mapping);
 		expect(result.rows).toHaveLength(API_ROW_CAP);
 		expect(result.truncated).toBe(false);
+	});
+});
+
+describe("canSaveApiSource — G1: required targets before Save is enabled", () => {
+	it("requires a non-blank URL", () => {
+		expect(canSaveApiSource("", mapping)).toBe(false);
+		expect(canSaveApiSource("   ", mapping)).toBe(false);
+		expect(canSaveApiSource("https://api.example.com", mapping)).toBe(true);
+	});
+
+	it("requires both id and label mapped, but not secondary", () => {
+		expect(canSaveApiSource("https://x", { idField: "", labelField: "name" })).toBe(false);
+		expect(canSaveApiSource("https://x", { idField: "id", labelField: "" })).toBe(false);
+		expect(canSaveApiSource("https://x", { idField: "id", labelField: "name" })).toBe(true);
+		expect(canSaveApiSource("https://x", { idField: "id", labelField: "name", secondaryField: undefined })).toBe(true);
+	});
+
+	it("treats a whitespace-only id or label as not mapped", () => {
+		expect(canSaveApiSource("https://x", { idField: "  ", labelField: "name" })).toBe(false);
+	});
+});
+
+describe("sampleFieldsForArrayField — R2: fields come from the array's own items, not the wrapper object", () => {
+	it("derives fields from the first item of a bare JSON list", () => {
+		expect(sampleFieldsForArrayField([{ id: "1", name: "One" }, { id: "2", name: "Two" }])).toEqual(["id", "name"]);
+	});
+
+	it("derives fields from the chosen array field's first item, not the top-level object's own keys", () => {
+		const response = { total: 2, items: [{ id: "1", name: "One" }] };
+		// Previously this bug returned Object.keys(response) — ["total", "items"] — instead of the
+		// array's own item shape.
+		expect(sampleFieldsForArrayField(response, "items")).toEqual(["id", "name"]);
+	});
+
+	it("returns nothing when no array field is picked yet for an object response", () => {
+		expect(sampleFieldsForArrayField({ total: 2, items: [{ id: "1" }] })).toEqual([]);
+	});
+
+	it("returns nothing when the chosen array field's list is empty", () => {
+		expect(sampleFieldsForArrayField({ items: [] }, "items")).toEqual([]);
+	});
+
+	it("re-derives fields correctly after switching which array field is chosen", () => {
+		const response = { users: [{ id: "1", name: "One" }], groups: [{ gid: "g1", title: "Group" }] };
+		expect(sampleFieldsForArrayField(response, "users")).toEqual(["id", "name"]);
+		expect(sampleFieldsForArrayField(response, "groups")).toEqual(["gid", "title"]);
 	});
 });

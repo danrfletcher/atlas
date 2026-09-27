@@ -1,7 +1,8 @@
 import * as http from "node:http";
 import type { AddressInfo } from "node:net";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { ApiSourceController, ViewLoadTrigger, dotStateFor } from "../../src/api-source-controller";
+import { ApiSourceController, ViewLoadTrigger, dotStateFor, dotTooltip } from "../../src/api-source-controller";
+import { RequestFn, ScheduleTimeout } from "../../src/api-http";
 import { ApiSourceConfig, ViewNode } from "../../src/types";
 
 function makeNode(id: string): ViewNode {
@@ -19,10 +20,19 @@ function baseSource(url: string, overrides: Partial<ApiSourceConfig> = {}): ApiS
 	};
 }
 
+/** R1: a `RequestFn` backed by Node's own `fetch` — a stand-in for production's `obsidianRequestImpl`
+ * (which can't be used under plain Node/vitest, since `obsidian` is types-only). Exercises the real
+ * `httpGetJson` request/response handling end-to-end against `server` below, same as before this PR's
+ * fix, just via the now-required injected `requestImpl` instead of a global default. */
+const nodeFetchRequestImpl: RequestFn = async ({ url, method, headers }) => {
+	const response = await fetch(url, { method, headers });
+	const text = await response.text();
+	return { status: response.status, text };
+};
+
 describe("ApiSourceController — integration against a real HTTP server", () => {
 	let server: http.Server;
 	let base: string;
-	let slowRequestCount = 0;
 
 	beforeAll(async () => {
 		server = http.createServer((req, res) => {
@@ -39,12 +49,6 @@ describe("ApiSourceController — integration against a real HTTP server", () =>
 			} else if (url === "/badjson") {
 				res.writeHead(200, { "content-type": "application/json" });
 				res.end("{not json");
-			} else if (url === "/slow") {
-				slowRequestCount++;
-				setTimeout(() => {
-					res.writeHead(200, { "content-type": "application/json" });
-					res.end(JSON.stringify([{ id: "1", name: "One" }]));
-				}, 500);
 			} else if (url === "/manyrows") {
 				const items = Array.from({ length: 5001 }, (_, i) => ({ id: String(i), name: `Item ${i}` }));
 				res.writeHead(200, { "content-type": "application/json" });
@@ -68,12 +72,13 @@ describe("ApiSourceController — integration against a real HTTP server", () =>
 		expect(dotStateFor(node.apiCache)).toBe("grey");
 		const controller = new ApiSourceController();
 		let persisted = 0;
-		await controller.refresh(node, baseSource(`${base}/ok`), [], () => persisted++, { now: () => 1000 });
+		await controller.refresh(node, baseSource(`${base}/ok`), [], () => persisted++, { requestImpl: nodeFetchRequestImpl, now: () => 1000 });
 
 		expect(persisted).toBe(1);
 		expect(node.apiCache?.ok).toBe(true);
 		expect(node.apiCache?.rows).toEqual([{ id: "1", label: "One" }, { id: "2", label: "Two" }]);
 		expect(node.apiCache).not.toHaveProperty("raw");
+		expect(node.apiCache?.lastSuccessAt).toBe(1000);
 		expect(dotStateFor(node.apiCache)).toBe("green");
 		expect(node.apiItemState).toEqual({
 			"1": { id: "1", label: "One", secondary: undefined },
@@ -84,7 +89,7 @@ describe("ApiSourceController — integration against a real HTTP server", () =>
 	it("E8: 401 surfaces as auth failed and turns the dot red", async () => {
 		const node = makeNode("n2");
 		const controller = new ApiSourceController();
-		await controller.refresh(node, baseSource(`${base}/auth401`), [], () => {}, {});
+		await controller.refresh(node, baseSource(`${base}/auth401`), [], () => {}, { requestImpl: nodeFetchRequestImpl });
 		expect(node.apiCache?.ok).toBe(false);
 		expect(node.apiCache?.error).toBe("auth failed");
 		expect(dotStateFor(node.apiCache)).toBe("red");
@@ -93,25 +98,42 @@ describe("ApiSourceController — integration against a real HTTP server", () =>
 	it("E8: 403 also surfaces as auth failed", async () => {
 		const node = makeNode("n3");
 		const controller = new ApiSourceController();
-		await controller.refresh(node, baseSource(`${base}/auth403`), [], () => {}, {});
+		await controller.refresh(node, baseSource(`${base}/auth403`), [], () => {}, { requestImpl: nodeFetchRequestImpl });
 		expect(node.apiCache?.error).toBe("auth failed");
 	});
 
 	it("E1: a non-JSON body fails without touching itemState", async () => {
 		const node = makeNode("n4");
 		const controller = new ApiSourceController();
-		await controller.refresh(node, baseSource(`${base}/badjson`), [], () => {}, {});
+		await controller.refresh(node, baseSource(`${base}/badjson`), [], () => {}, { requestImpl: nodeFetchRequestImpl });
 		expect(node.apiCache?.ok).toBe(false);
 		expect(node.apiCache?.error).toMatch(/not valid JSON/i);
 		expect(node.apiItemState).toBeUndefined();
 	});
 
-	it("E3: a slow response times out and is reported unreachable, without a real 15s wait", async () => {
+	it("E3: a request that never resolves times out and is reported unreachable, with no real wait", async () => {
 		const node = makeNode("n5");
 		const controller = new ApiSourceController();
-		const start = Date.now();
-		await controller.refresh(node, baseSource(`${base}/slow`), [], () => {}, { timeoutMs: 50 });
-		expect(Date.now() - start).toBeLessThan(2000);
+		// R1/R10: the timeout races `requestImpl` via `Promise.race` against an injectable
+		// `scheduleTimeout` — firing that callback synchronously here proves the timeout path with zero
+		// real elapsed time, rather than a real (even short) `setTimeout` wait.
+		const neverResolves: RequestFn = () => new Promise(() => {});
+		let firedTimeout: (() => void) | null = null;
+		const fakeScheduleTimeout: ScheduleTimeout = (ms, onTimeout) => {
+			expect(ms).toBe(50);
+			firedTimeout = onTimeout;
+			return () => {
+				firedTimeout = null;
+			};
+		};
+		const run = controller.refresh(node, baseSource("http://example.invalid/never"), [], () => {}, {
+			requestImpl: neverResolves,
+			timeoutMs: 50,
+			scheduleTimeout: fakeScheduleTimeout,
+		});
+		expect(firedTimeout).not.toBeNull();
+		firedTimeout?.();
+		await run;
 		expect(node.apiCache?.ok).toBe(false);
 		expect(node.apiCache?.error).toBe("unreachable");
 	});
@@ -124,7 +146,10 @@ describe("ApiSourceController — integration against a real HTTP server", () =>
 		const deadPort = (unreachableServer.address() as AddressInfo).port;
 		await new Promise<void>((resolve) => unreachableServer.close(() => resolve()));
 
-		await controller.refresh(node, baseSource(`http://127.0.0.1:${deadPort}/ok`), [], () => {}, { timeoutMs: 500 });
+		await controller.refresh(node, baseSource(`http://127.0.0.1:${deadPort}/ok`), [], () => {}, {
+			requestImpl: nodeFetchRequestImpl,
+			timeoutMs: 500,
+		});
 		expect(node.apiCache?.ok).toBe(false);
 		expect(node.apiCache?.error).toBe("unreachable");
 	});
@@ -134,11 +159,26 @@ describe("ApiSourceController — integration against a real HTTP server", () =>
 		node.apiItemState = { stale: { id: "stale", label: "Stale" } };
 		node.apiItemOrder = ["stale"];
 		const controller = new ApiSourceController();
-		await controller.refresh(node, baseSource(`${base}/manyrows`, { mode: "merge" }), [], () => {}, {});
+		await controller.refresh(node, baseSource(`${base}/manyrows`, { mode: "merge" }), [], () => {}, { requestImpl: nodeFetchRequestImpl });
 		expect(node.apiCache?.rows).toHaveLength(5000);
 		expect(node.apiCache?.truncated).toBe(true);
 		// truncated refresh must not falsely mark "stale" not found (E4)
 		expect(node.apiItemState?.stale.notFound).toBeUndefined();
+	});
+
+	it("E4: a later, untruncated refresh marks a genuinely vanished row \"not found\" normally", async () => {
+		const node = makeNode("n7b");
+		node.apiItemState = { stale: { id: "stale", label: "Stale" } };
+		node.apiItemOrder = ["stale"];
+		const controller = new ApiSourceController();
+		// First refresh is truncated (5,001 rows) — must not mark "stale" not-found (already covered above).
+		await controller.refresh(node, baseSource(`${base}/manyrows`, { mode: "merge" }), [], () => {}, { requestImpl: nodeFetchRequestImpl });
+		expect(node.apiItemState?.stale.notFound).toBeUndefined();
+		// A later, ordinary (untruncated) refresh where "stale" is still genuinely absent must mark it
+		// normally — truncation only ever suppresses the marking for the refresh that was itself truncated.
+		await controller.refresh(node, baseSource(`${base}/ok`, { mode: "merge" }), [], () => {}, { requestImpl: nodeFetchRequestImpl });
+		expect(node.apiItemState?.stale?.notFound).toBe(true);
+		expect(node.apiItemState?.stale?.lastSeenAt).toBeDefined();
 	});
 
 	it("G8: an item's explicit status and note survive a refresh where it's still reported", async () => {
@@ -146,19 +186,83 @@ describe("ApiSourceController — integration against a real HTTP server", () =>
 		node.apiItemState = { "1": { id: "1", label: "One", explicitStatusId: "in-progress", noteRef: { kind: "block", path: "pool/x.md", subpath: "x" } } };
 		node.apiItemOrder = ["1"];
 		const controller = new ApiSourceController();
-		await controller.refresh(node, baseSource(`${base}/ok`), [], () => {}, {});
+		await controller.refresh(node, baseSource(`${base}/ok`), [], () => {}, { requestImpl: nodeFetchRequestImpl });
 		expect(node.apiItemState?.["1"].explicitStatusId).toBe("in-progress");
 		expect(node.apiItemState?.["1"].noteRef).toEqual({ kind: "block", path: "pool/x.md", subpath: "x" });
 	});
 
-	it("rapid double refresh-now collapses to a single in-flight request", async () => {
-		slowRequestCount = 0;
+	it("rapid double refresh-now collapses to a single in-flight request, with no real wait", async () => {
 		const node = makeNode("n9");
 		const controller = new ApiSourceController();
-		const source = baseSource(`${base}/slow`, { mapping: { idField: "id", labelField: "name" } });
-		const [a, b] = [controller.refresh(node, source, [], () => {}, {}), controller.refresh(node, source, [], () => {}, {})];
+		let callCount = 0;
+		let resolveRequest: ((result: { status: number; text: string }) => void) | null = null;
+		// R10: a deferred promise the test resolves itself, instead of a real slow HTTP response —
+		// proves the in-flight dedupe with zero real elapsed time.
+		const deferredRequest: RequestFn = () => {
+			callCount++;
+			return new Promise((resolve) => {
+				resolveRequest = resolve;
+			});
+		};
+		const source = baseSource("http://example.invalid/deferred");
+		const [a, b] = [
+			controller.refresh(node, source, [], () => {}, { requestImpl: deferredRequest }),
+			controller.refresh(node, source, [], () => {}, { requestImpl: deferredRequest }),
+		];
+		expect(resolveRequest).not.toBeNull();
+		resolveRequest?.({ status: 200, text: JSON.stringify([{ id: "1", name: "One" }]) });
 		await Promise.all([a, b]);
-		expect(slowRequestCount).toBe(1);
+		expect(callCount).toBe(1);
+	});
+
+	it("F1: always issues GET, regardless of anything else — no write verb ever reaches the request layer", async () => {
+		const node = makeNode("n10");
+		const controller = new ApiSourceController();
+		let observedMethod: string | null = null;
+		const spyRequest: RequestFn = async ({ method }) => {
+			observedMethod = method;
+			return { status: 200, text: JSON.stringify([{ id: "1", name: "One" }]) };
+		};
+		await controller.refresh(node, baseSource("http://example.invalid/spy"), [], () => {}, { requestImpl: spyRequest });
+		expect(observedMethod).toBe("GET");
+	});
+
+	it("R3: lastSuccessAt survives a later failed refresh, and the tooltip keeps reporting it, not the failed attempt's own time", async () => {
+		const node = makeNode("n11");
+		const controller = new ApiSourceController();
+		let now = 1_000_000;
+		await controller.refresh(node, baseSource(`${base}/ok`), [], () => {}, { requestImpl: nodeFetchRequestImpl, now: () => now });
+		expect(node.apiCache?.lastSuccessAt).toBe(1_000_000);
+
+		now = 1_000_000 + 3 * 60 * 60 * 1000; // 3 hours later
+		await controller.refresh(node, baseSource(`${base}/auth401`), [], () => {}, { requestImpl: nodeFetchRequestImpl, now: () => now });
+		expect(node.apiCache?.ok).toBe(false);
+		expect(node.apiCache?.lastSuccessAt).toBe(1_000_000);
+		expect(dotTooltip(node.apiCache, now)).toBe("auth failed, last updated 3 h ago");
+	});
+
+	it("R3: a failed refresh keeps the previous cache's rows visible, not an empty list", async () => {
+		const node = makeNode("n12");
+		const controller = new ApiSourceController();
+		await controller.refresh(node, baseSource(`${base}/ok`), [], () => {}, { requestImpl: nodeFetchRequestImpl });
+		const rowsBefore = node.apiCache?.rows;
+		expect(rowsBefore).toHaveLength(2);
+
+		await controller.refresh(node, baseSource(`${base}/auth401`), [], () => {}, { requestImpl: nodeFetchRequestImpl });
+		expect(node.apiCache?.ok).toBe(false);
+		expect(node.apiCache?.rows).toEqual(rowsBefore);
+	});
+
+	it("R10/G13: the header (token) value never leaks into a cached error message, even on the auth failure it caused", async () => {
+		const node = makeNode("n13");
+		const controller = new ApiSourceController();
+		const secretToken = "Bearer super-secret-token-xyz";
+		await controller.refresh(node, baseSource(`${base}/auth401`), [{ key: "Authorization", value: secretToken }], () => {}, {
+			requestImpl: nodeFetchRequestImpl,
+		});
+		expect(node.apiCache?.ok).toBe(false);
+		expect(node.apiCache?.error).not.toContain(secretToken);
+		expect(JSON.stringify(node.apiCache)).not.toContain(secretToken);
 	});
 });
 

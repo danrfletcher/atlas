@@ -102,7 +102,10 @@ describe("E7 — rename/move leave a Folder's API source untouched", () => {
 		expect(node.apiSource).toEqual(makeSource());
 	});
 
-	it("moving (promoting) a Folder elsewhere in the tree keeps its apiSource intact", () => {
+	// R10: this only exercises `moveNode` — plain re-nesting of a meta Folder within the bucket tree.
+	// It is not a test of the separate (and, in this codebase, not-yet-implemented) 34n6ct71muguncxk
+	// meta-Folder-to-real-folder "promotion" ticket, which this PR coordinates with but does not build.
+	it("moveNode (re-nesting a Folder elsewhere in the tree) keeps its apiSource intact", () => {
 		const vm = makeViewsManager();
 		const view = vm.getViews()[0];
 		const target = vm.addMetaFolder(view.id, null, "Target")!;

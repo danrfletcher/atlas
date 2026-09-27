@@ -35,6 +35,19 @@ describe("mergeApiItems — G6: Append mode", () => {
 		expect(result.itemState["1"].explicitStatusId).toBe("done");
 		expect(result.itemState["1"].noteRef).toEqual({ kind: "block", path: "p", subpath: "s" });
 	});
+
+	it("an empty response list is valid input — keeps every existing item untouched, adds nothing", () => {
+		const prevState = { "1": state({ id: "1", explicitStatusId: "done" }) };
+		const result = mergeApiItems(prevState, ["1"], [], "append", opts);
+		expect(result.itemState).toEqual(prevState);
+		expect(result.order).toEqual(["1"]);
+	});
+
+	it("an empty response list on a Folder with no prior items produces empty state, not an error", () => {
+		const result = mergeApiItems({}, [], [], "append", opts);
+		expect(result.itemState).toEqual({});
+		expect(result.order).toEqual([]);
+	});
 });
 
 describe("mergeApiItems — G6c: Merge mode", () => {
@@ -75,6 +88,20 @@ describe("mergeApiItems — E4: truncated refresh skips not-found marking", () =
 		const result = mergeApiItems(prevState, ["1"], [], "merge", { truncated: true, nowIso: NOW });
 		expect(result.itemState["1"]).toEqual(prevState["1"]);
 		expect(result.itemState["1"].notFound).toBeUndefined();
+	});
+
+	it("a later, untruncated refresh where the item is still genuinely absent marks it not found normally", () => {
+		const prevState = { "1": state({ id: "1", explicitStatusId: "done" }) };
+		// First refresh (truncated) leaves it untouched, per the case above.
+		const afterTruncated = mergeApiItems(prevState, ["1"], [], "merge", { truncated: true, nowIso: "2025-01-01T00:00:00.000Z" });
+		expect(afterTruncated.itemState["1"].notFound).toBeUndefined();
+		// Truncation only suppresses marking for the refresh that was itself truncated — an ordinary
+		// (untruncated) refresh afterward where "1" is still absent must mark it, same as any other
+		// vanished item.
+		const afterNormal = mergeApiItems(afterTruncated.itemState, afterTruncated.order, [], "merge", { truncated: false, nowIso: NOW });
+		expect(afterNormal.itemState["1"].notFound).toBe(true);
+		expect(afterNormal.itemState["1"].lastSeenAt).toBe(NOW);
+		expect(afterNormal.itemState["1"].explicitStatusId).toBe("done");
 	});
 });
 
