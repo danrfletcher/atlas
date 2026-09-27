@@ -299,3 +299,140 @@ describe("R17/E9 — corrupt or missing apiSource/apiCache/apiItemState/apiItemO
 		expect(sanitized.apiItemState).toEqual({ "1": { id: "1", label: "One" } });
 	});
 });
+
+describe("R20/E9 — corrupt individual apiItemState entries never crash on load", () => {
+	function nodeWithApiSource(overrides: Partial<ViewNode> = {}): ViewNode {
+		return {
+			id: "n1",
+			type: "meta",
+			label: "API folder",
+			children: [],
+			apiSource: makeSource(),
+			...overrides,
+		};
+	}
+
+	function loadedNode(node: ViewNode): ViewNode {
+		const views: View[] = [{ id: "v1", name: "V", root: [node], inboxMode: "view" }];
+		const vm = new ViewsManager({} as App, views, "v1", () => {});
+		return vm.getNode("v1", "n1")!;
+	}
+
+	it("an entry with no label is dropped, not left to crash label.trim()/toLowerCase() later", () => {
+		const node = nodeWithApiSource({
+			apiItemState: { "1": { id: "1" } } as unknown as Record<string, unknown>,
+			apiItemOrder: ["1"],
+		});
+		const sanitized = loadedNode(node);
+		expect(sanitized.apiItemState).toEqual({});
+		expect(sanitized.apiItemOrder).toEqual([]);
+	});
+
+	it("an entry that isn't even an object (a bare number) is dropped", () => {
+		const node = nodeWithApiSource({
+			apiItemState: { "1": 5 } as unknown as Record<string, unknown>,
+			apiItemOrder: ["1"],
+		});
+		const sanitized = loadedNode(node);
+		expect(sanitized.apiItemState).toEqual({});
+		expect(sanitized.apiItemOrder).toEqual([]);
+	});
+
+	it("a label that is not a string is dropped", () => {
+		const node = nodeWithApiSource({
+			apiItemState: { "1": { id: "1", label: 42 } } as unknown as Record<string, unknown>,
+			apiItemOrder: ["1"],
+		});
+		const sanitized = loadedNode(node);
+		expect(sanitized.apiItemState).toEqual({});
+	});
+
+	it("an entry's id is always retaken from the state map's own key, even if the stored id disagrees", () => {
+		const node = nodeWithApiSource({
+			apiItemState: { "1": { id: "different-id", label: "One" } },
+			apiItemOrder: ["1"],
+		});
+		const sanitized = loadedNode(node);
+		expect(sanitized.apiItemState).toEqual({ "1": { id: "1", label: "One" } });
+	});
+
+	it("a lastSeenAt that isn't a string is dropped rather than rendering 'NaN-NaN-NaN'", () => {
+		const node = nodeWithApiSource({
+			apiItemState: { "1": { id: "1", label: "One", lastSeenAt: 12345 } } as unknown as Record<string, unknown>,
+			apiItemOrder: ["1"],
+		});
+		const sanitized = loadedNode(node);
+		expect(sanitized.apiItemState!["1"].lastSeenAt).toBeUndefined();
+	});
+
+	it("a lastSeenAt that doesn't parse as a date is dropped", () => {
+		const node = nodeWithApiSource({
+			apiItemState: { "1": { id: "1", label: "One", lastSeenAt: "not-a-date" } },
+			apiItemOrder: ["1"],
+		});
+		const sanitized = loadedNode(node);
+		expect(sanitized.apiItemState!["1"].lastSeenAt).toBeUndefined();
+	});
+
+	it("a valid lastSeenAt survives untouched", () => {
+		const node = nodeWithApiSource({
+			apiItemState: { "1": { id: "1", label: "One", lastSeenAt: "2026-09-25T00:00:00.000Z" } },
+			apiItemOrder: ["1"],
+		});
+		const sanitized = loadedNode(node);
+		expect(sanitized.apiItemState!["1"].lastSeenAt).toBe("2026-09-25T00:00:00.000Z");
+	});
+
+	it("a secondary that isn't a string is dropped", () => {
+		const node = nodeWithApiSource({
+			apiItemState: { "1": { id: "1", label: "One", secondary: { nested: true } } } as unknown as Record<string, unknown>,
+			apiItemOrder: ["1"],
+		});
+		const sanitized = loadedNode(node);
+		expect(sanitized.apiItemState!["1"].secondary).toBeUndefined();
+	});
+
+	it("a noteRef with no valid shape (missing kind/path) is dropped, not trusted by openRef later", () => {
+		const node = nodeWithApiSource({
+			apiItemState: { "1": { id: "1", label: "One", noteRef: { kind: "file" } } } as unknown as Record<string, unknown>,
+			apiItemOrder: ["1"],
+		});
+		const sanitized = loadedNode(node);
+		expect(sanitized.apiItemState!["1"].noteRef).toBeUndefined();
+	});
+
+	it("a noteRef that's a bare string (not a UnitRef object) is dropped", () => {
+		const node = nodeWithApiSource({
+			apiItemState: { "1": { id: "1", label: "One", noteRef: "Notes/One.md" } } as unknown as Record<string, unknown>,
+			apiItemOrder: ["1"],
+		});
+		const sanitized = loadedNode(node);
+		expect(sanitized.apiItemState!["1"].noteRef).toBeUndefined();
+	});
+
+	it("a well-formed noteRef survives untouched", () => {
+		const node = nodeWithApiSource({
+			apiItemState: { "1": { id: "1", label: "One", noteRef: { kind: "file", path: "Notes/One.md" } } },
+			apiItemOrder: ["1"],
+		});
+		const sanitized = loadedNode(node);
+		expect(sanitized.apiItemState!["1"].noteRef).toEqual({ kind: "file", path: "Notes/One.md" });
+	});
+
+	it("one corrupt entry among otherwise-valid ones is dropped without disturbing its siblings", () => {
+		const node = nodeWithApiSource({
+			apiItemState: {
+				"1": { id: "1", label: "One" },
+				"2": { id: "2" },
+				"3": { id: "3", label: "Three" },
+			} as unknown as Record<string, unknown>,
+			apiItemOrder: ["1", "2", "3"],
+		});
+		const sanitized = loadedNode(node);
+		expect(sanitized.apiItemState).toEqual({
+			"1": { id: "1", label: "One" },
+			"3": { id: "3", label: "Three" },
+		});
+		expect(sanitized.apiItemOrder).toEqual(["1", "3"]);
+	});
+});

@@ -1,9 +1,45 @@
 import { App } from "obsidian";
 import type { UnitIndex } from "./unit-index";
-import { ApiFieldMapping, ApiSourceConfig, DEFAULT_VIEW_NAME, StatusGovernance, Unit, UnitRef, View, ViewNode, createEmptyView, rewriteRefPath, unitRefsEqual, unitToRef } from "./types";
+import { ApiFieldMapping, ApiItemState, ApiSourceConfig, DEFAULT_VIEW_NAME, StatusGovernance, Unit, UnitRef, View, ViewNode, createEmptyView, rewriteRefPath, unitRefsEqual, unitToRef } from "./types";
 
 function generateNodeId(): string {
 	return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+/** R20/E9: a `noteRef` loaded from `data.json` can be any JSON value — validates it actually has the
+ * `UnitRef` shape (a known `kind` and a string `path`, plus `subpath` for a block) before it's trusted
+ * anywhere else, the same way `sanitizeApiItemState` validates the rest of a row's fields. */
+function isValidUnitRef(value: unknown): value is UnitRef {
+	if (!value || typeof value !== "object") return false;
+	const ref = value as { kind?: unknown; path?: unknown; subpath?: unknown };
+	if (typeof ref.path !== "string") return false;
+	if (ref.kind === "file" || ref.kind === "folder") return true;
+	if (ref.kind === "block") return typeof ref.subpath === "string";
+	return false;
+}
+
+/** R20/E9: `apiItemState` entries come straight from `data.json` and can each be malformed
+ * independently of the container being a well-shaped object — e.g. `{"1": {"id": "1"}}` (no label) or
+ * `{"1": 5}`. Left unchecked, a missing/non-string `label` crashes `apiItemMatchesFilter` and
+ * `item.label.trim()` (both called on every render/filter keystroke), and a non-string or unparsable
+ * `lastSeenAt` renders as "not found, last seen NaN-NaN-NaN". Returns `null` for an entry too broken to
+ * repair (not an object, or no string `label`); everything else is dropped field-by-field rather than
+ * discarding the whole row. `id` is always retaken from the state map's own key, since that's the
+ * value every other lookup (by id) actually keys on. */
+function sanitizeApiItemState(raw: unknown, key: string): ApiItemState | null {
+	if (!raw || typeof raw !== "object") return null;
+	const item = raw as Partial<ApiItemState>;
+	if (typeof item.label !== "string") return null;
+
+	const sanitized: ApiItemState = { id: key, label: item.label };
+	if (typeof item.secondary === "string") sanitized.secondary = item.secondary;
+	if (typeof item.explicitStatusId === "string") sanitized.explicitStatusId = item.explicitStatusId;
+	if (isValidUnitRef(item.noteRef)) sanitized.noteRef = item.noteRef;
+	if (item.notFound === true) sanitized.notFound = true;
+	if (typeof item.lastSeenAt === "string" && !isNaN(new Date(item.lastSeenAt).getTime())) {
+		sanitized.lastSeenAt = item.lastSeenAt;
+	}
+	return sanitized;
 }
 
 /** R17/E9: `data.json` is free-form JSON — hand-edited or corrupted, `apiSource` can be missing its
@@ -40,6 +76,13 @@ function sanitizeApiFields(node: ViewNode): void {
 	if (node.apiSource) {
 		if (!node.apiItemState || typeof node.apiItemState !== "object" || Array.isArray(node.apiItemState)) {
 			node.apiItemState = {};
+		} else {
+			const cleaned: Record<string, ApiItemState> = {};
+			for (const [id, raw] of Object.entries(node.apiItemState)) {
+				const sanitized = sanitizeApiItemState(raw, id);
+				if (sanitized) cleaned[id] = sanitized;
+			}
+			node.apiItemState = cleaned;
 		}
 		if (!Array.isArray(node.apiItemOrder)) {
 			node.apiItemOrder = Object.keys(node.apiItemState);
