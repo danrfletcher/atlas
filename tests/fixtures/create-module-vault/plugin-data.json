@@ -1,0 +1,407 @@
+{
+ "settings": {
+  "poolFolder": "_pool",
+  "excludedFolders": [
+   ".obsidian",
+   "_pool",
+   "_to_delete"
+  ],
+  "interfaceNoteAcceptAltNames": false,
+  "replaceNativeExplorerOnStartup": true,
+  "blockDisplayLength": 80,
+  "defaultViewId": "default",
+  "confirmAddToModule": true,
+  "glowEnabled": false,
+  "retainIcons": false,
+  "retainIconMatchBackground": false
+ },
+ "manualPromotions": [
+  {
+   "kind": "file",
+   "path": "Multi.md"
+  },
+  {
+   "kind": "file",
+   "path": "Alpha/Sub/Doc.md"
+  },
+  {
+   "kind": "file",
+   "path": "Alpha/Alpha.md"
+  }
+ ],
+ "activeViewId": "default",
+ "expandedModuleFolders": [],
+ "statusSets": [
+  {
+   "id": "set-basic",
+   "name": "Basic",
+   "defaultStatusId": "idea",
+   "statuses": [
+    {
+     "id": "idea",
+     "label": "Idea",
+     "color": "#aaaaaa"
+    },
+    {
+     "id": "doing",
+     "label": "Doing",
+     "color": "#bbbbbb"
+    },
+    {
+     "id": "done",
+     "label": "Done",
+     "color": "#cccccc",
+     "isCompleted": true
+    }
+   ]
+  }
+ ],
+ "colorPalette": [
+  "#ff0000"
+ ],
+ "views": [
+  {
+   "id": "default",
+   "name": "Default",
+   "inboxMode": "view",
+   "root": [
+    {
+     "id": "m1",
+     "type": "meta",
+     "label": "Field tech",
+     "children": [
+      {
+       "id": "u-zebra",
+       "type": "unit",
+       "ref": {
+        "kind": "file",
+        "path": "zebra.md"
+       },
+       "children": []
+      },
+      {
+       "id": "u-q",
+       "type": "unit",
+       "ref": {
+        "kind": "file",
+        "path": "Quarry drone LiDAR.md"
+       },
+       "children": [],
+       "collapsed": false,
+       "explicitStatusId": "doing"
+      },
+      {
+       "id": "u-readme",
+       "type": "unit",
+       "ref": {
+        "kind": "file",
+        "path": "README.md"
+       },
+       "children": []
+      },
+      {
+       "id": "m-sub",
+       "type": "meta",
+       "label": "Sub meta",
+       "children": [
+        {
+         "id": "u-multi-sub",
+         "type": "unit",
+         "ref": {
+          "kind": "file",
+          "path": "Multi.md"
+         },
+         "children": []
+        }
+       ]
+      }
+     ],
+     "collapsed": false
+    },
+    {
+     "id": "u-multi",
+     "type": "unit",
+     "ref": {
+      "kind": "file",
+      "path": "Multi.md"
+     },
+     "children": [
+      {
+       "id": "u-alpha",
+       "type": "unit",
+       "ref": {
+        "kind": "folder",
+        "path": "Alpha"
+       },
+       "children": []
+      },
+      {
+       "id": "u-reading",
+       "type": "unit",
+       "ref": {
+        "kind": "file",
+        "path": "Reading list.md"
+       },
+       "children": []
+      }
+     ],
+     "collapsed": false
+    },
+    {
+     "id": "u-beta",
+     "type": "unit",
+     "ref": {
+      "kind": "folder",
+      "path": "Beta"
+     },
+     "children": [
+      {
+       "id": "u-multi-beta",
+       "type": "unit",
+       "ref": {
+        "kind": "file",
+        "path": "Multi.md"
+       },
+       "children": []
+      }
+     ]
+    },
+    {
+     "id": "u-blk",
+     "type": "unit",
+     "ref": {
+      "kind": "block",
+      "path": "Multi.md",
+      "subpath": "^abc123"
+     },
+     "children": []
+    },
+    {
+     "id": "u-free",
+     "type": "unit",
+     "ref": {
+      "kind": "file",
+      "path": "_pool/20260925143012-k3xq.md"
+     },
+     "children": []
+    },
+    {
+     "id": "u-snail",
+     "type": "unit",
+     "ref": {
+      "kind": "file",
+      "path": "Snail.md"
+     },
+     "children": []
+    },
+    {
+     "id": "u-draft",
+     "type": "unit",
+     "ref": {
+      "kind": "file",
+      "path": "Draft [v2].md"
+     },
+     "children": []
+    },
+    {
+     "id": "u-empty",
+     "type": "unit",
+     "ref": {
+      "kind": "file",
+      "path": "Empty.md"
+     },
+     "children": []
+    },
+    {
+     "id": "u-v12",
+     "type": "unit",
+     "ref": {
+      "kind": "file",
+      "path": "v1.2 notes.md"
+     },
+     "children": []
+    },
+    {
+     "id": "u-taken",
+     "type": "unit",
+     "ref": {
+      "kind": "file",
+      "path": "Taken.md"
+     },
+     "children": []
+    },
+    {
+     "id": "u-zed",
+     "type": "unit",
+     "ref": {
+      "kind": "file",
+      "path": "Zed.md"
+     },
+     "children": []
+    },
+    {
+     "id": "u-pdf",
+     "type": "unit",
+     "ref": {
+      "kind": "file",
+      "path": "Manual.pdf"
+     },
+     "children": []
+    },
+    {
+     "id": "u-canvas",
+     "type": "unit",
+     "ref": {
+      "kind": "file",
+      "path": "Board.canvas"
+     },
+     "children": []
+    },
+    {
+     "id": "u-txt",
+     "type": "unit",
+     "ref": {
+      "kind": "file",
+      "path": "notes.txt"
+     },
+     "children": []
+    },
+    {
+     "id": "u-license",
+     "type": "unit",
+     "ref": {
+      "kind": "file",
+      "path": "LICENSE"
+     },
+     "children": []
+    },
+    {
+     "id": "u-png",
+     "type": "unit",
+     "ref": {
+      "kind": "file",
+      "path": "Diagram.png"
+     },
+     "children": []
+    },
+    {
+     "id": "u-deep",
+     "type": "unit",
+     "ref": {
+      "kind": "file",
+      "path": "Beta/Deep.md"
+     },
+     "children": []
+    },
+    {
+     "id": "u-sub-doc",
+     "type": "unit",
+     "ref": {
+      "kind": "file",
+      "path": "Alpha/Sub/Doc.md"
+     },
+     "children": []
+    },
+    {
+     "id": "u-alpha-note",
+     "type": "unit",
+     "ref": {
+      "kind": "file",
+      "path": "Alpha/Alpha.md"
+     },
+     "children": []
+    },
+    {
+     "id": "u-gone",
+     "type": "unit",
+     "ref": {
+      "kind": "file",
+      "path": "Gone.md"
+     },
+     "children": []
+    },
+    {
+     "id": "u-govfiles",
+     "type": "meta",
+     "children": [
+      {
+       "id": "u-gov1",
+       "type": "unit",
+       "ref": {
+        "kind": "file",
+        "path": "Gov1.md"
+       },
+       "children": [],
+       "explicitStatusId": "doing"
+      }
+     ],
+     "statusEnabled": true,
+     "statusSetId": "set-basic",
+     "inheritToSubfolders": false,
+     "applyTo": {
+      "file": true,
+      "module": false
+     },
+     "label": "GovFiles",
+     "collapsed": false
+    },
+    {
+     "id": "u-govmods",
+     "type": "meta",
+     "children": [
+      {
+       "id": "u-gov2",
+       "type": "unit",
+       "ref": {
+        "kind": "file",
+        "path": "Gov2.md"
+       },
+       "children": [],
+       "explicitStatusId": "done"
+      }
+     ],
+     "statusEnabled": true,
+     "statusSetId": "set-basic",
+     "inheritToSubfolders": false,
+     "applyTo": {
+      "file": false,
+      "module": true
+     },
+     "label": "GovMods",
+     "collapsed": false
+    }
+   ]
+  },
+  {
+   "id": "second",
+   "name": "Second",
+   "inboxMode": "view",
+   "root": [
+    {
+     "id": "u-second-gov",
+     "type": "meta",
+     "children": [
+      {
+       "id": "u-multi-second",
+       "type": "unit",
+       "ref": {
+        "kind": "file",
+        "path": "Multi.md"
+       },
+       "children": []
+      }
+     ],
+     "statusEnabled": true,
+     "statusSetId": "set-basic",
+     "inheritToSubfolders": false,
+     "applyTo": {
+      "file": true,
+      "module": true
+     },
+     "label": "GovSecond",
+     "collapsed": false
+    }
+   ]
+  }
+ ]
+}

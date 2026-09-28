@@ -8,6 +8,8 @@ import { StatusDefinition, pluralizeStatusLabel } from "./statuses";
 import { openStatusPickerPopup } from "./status-popup";
 import { createInterfaceNote, findInterfaceNote } from "./interface-notes";
 import { addBlock } from "./commands";
+import { addCreateModuleItem, startCreateModule, unitForRef } from "./create-module";
+import { noticeIfLinksNotUpdated } from "./links-notice";
 
 export const ATLAS_VIEW_TYPE = "atlas-explorer";
 
@@ -1594,7 +1596,25 @@ export class AtlasExplorerView extends ItemView {
 				.onClick(() => this.plugin.viewsManager.unplaceNode(view.id, node.id))
 		);
 		menu.addItem((item) => item.setTitle("Place in view…").setIcon("arrow-right-left").onClick(() => this.placeInViewFlow(ref)));
+		// Create Module: only on a placed row for a root-level .md file (not inbox rows, not free
+		// blocks, nested or promoted files, interface notes, or non-notes).
+		addCreateModuleItem(menu, this.plugin.app.vault, unitForRef(this.plugin.unitIndex.getUnits(), ref), (file) => this.startCreateModule(file));
 		menu.showAtMouseEvent(evt);
+	}
+
+	private startCreateModule(file: TFile): void {
+		const { plugin } = this;
+		void startCreateModule(
+			{
+				app: plugin.app,
+				convert: (filePath, folderPath) => void plugin.viewsManager.convertFileNodesToModule(filePath, folderPath, plugin.unitIndex),
+				save: () => plugin.flushSave(),
+				afterMove: () => void noticeIfLinksNotUpdated(plugin.app),
+				getPoolFolder: () => plugin.settings.poolFolder,
+				getExcludedFolders: () => plugin.settings.excludedFolders,
+			},
+			file
+		);
 	}
 
 	/** PR 15/17: the "Statuses" modal — opened from a bucket unit or meta folder's own context menu
