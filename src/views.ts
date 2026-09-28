@@ -557,6 +557,7 @@ export class ViewsManager {
 		delete found.node.label;
 		this.save();
 		return true;
+	}
 
 	/** G1/E6: sets (or clears, passing `undefined`) a Folder's API data source. Clearing also drops
 	 * its cache/item state — those have no meaning detached from a configured source. The device-local
