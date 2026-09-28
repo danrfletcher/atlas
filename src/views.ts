@@ -617,7 +617,6 @@ export class ViewsManager {
 		this.save();
 	}
 
-<<<<<<< HEAD
 	/** Create Module on a root file: every node (every view, every duplicate) referencing the file
 	 * becomes a module node, keeping id, position, fold state, status settings and children. Also
 	 * matches `<folder>/<folder>.md`, so it gives the same result before or after the rename hook.
