@@ -14,6 +14,10 @@ interface AtlasTestHarness {
 	noticeIfLinksNotUpdated(): boolean;
 	scenarioMoveIntoModule(filePath: string, folder: string): Promise<{ nodes: number; manualPromotions: number }>;
 	dump(): Promise<unknown>;
+	/** Graduation state: pending records, and the reverts Atlas is still waiting to see. */
+	graduationState(): { pending: number; ownReverts: string[] };
+	/** Wraps `fileManager.renameFile` to count and log calls (`[path, newPath]`); returns a restore function. */
+	spyRenameFile(): { calls: Array<[string, string]>; restore(): void };
 }
 
 export function registerTestHarness(plugin: AtlasPlugin): () => void {
@@ -41,6 +45,21 @@ export function registerTestHarness(plugin: AtlasPlugin): () => void {
 			const counts = plugin.viewsManager.convertFileNodesToModule(filePath, folder, plugin.unitIndex);
 			noticeIfLinksNotUpdated(app);
 			return counts;
+		},
+		graduationState: () => ({ pending: plugin.graduation.pendingCount(), ownReverts: [...plugin.graduation.getOwnReverts()] }),
+		spyRenameFile() {
+			const calls: Array<[string, string]> = [];
+			const original = app.fileManager.renameFile;
+			app.fileManager.renameFile = function (this: unknown, file, newPath) {
+				calls.push([file.path, newPath]);
+				return original.call(app.fileManager, file, newPath);
+			};
+			return {
+				calls,
+				restore() {
+					app.fileManager.renameFile = original;
+				},
+			};
 		},
 		async dump() {
 			await new Promise((resolve) => window.setTimeout(resolve, 600)); // let the debounced save land

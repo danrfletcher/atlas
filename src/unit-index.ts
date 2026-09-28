@@ -257,12 +257,18 @@ export class UnitIndex {
 		this.logIncremental("delete", start);
 	}
 
+	/** Points every manual promotion at `oldPath` (or under it) to `newPath`; true if any changed. */
+	rewriteManualPromotions(oldPath: string, newPath: string): boolean {
+		const rewritten = this.manualPromotions.map((ref) => rewriteRefPath(ref, oldPath, newPath));
+		const changed = rewritten.some((ref, i) => ref !== this.manualPromotions[i]);
+		this.manualPromotions = rewritten;
+		return changed;
+	}
+
 	/** Returns whether any manual promotion's path was rewritten, so callers know to persist. */
 	onVaultRename(file: TAbstractFile, oldPath: string): boolean {
 		const start = performance.now();
-		const rewritten = this.manualPromotions.map((ref) => rewriteRefPath(ref, oldPath, file.path));
-		const promotionsChanged = rewritten.some((ref, i) => ref !== this.manualPromotions[i]);
-		this.manualPromotions = rewritten;
+		const promotionsChanged = this.rewriteManualPromotions(oldPath, file.path);
 
 		if (file instanceof TFolder) {
 			// A folder rename can move every nested unit's path at once — re-derive from scratch

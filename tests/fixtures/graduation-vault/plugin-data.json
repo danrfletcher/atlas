@@ -1,0 +1,139 @@
+{
+	"settings": {
+		"poolFolder": "_pool",
+		"excludedFolders": [
+			".obsidian",
+			"_pool",
+			"_to_delete"
+		],
+		"interfaceNoteAcceptAltNames": false,
+		"replaceNativeExplorerOnStartup": true,
+		"blockDisplayLength": 80,
+		"defaultViewId": "default",
+		"confirmAddToModule": true,
+		"glowEnabled": false,
+		"retainIcons": false,
+		"retainIconMatchBackground": false
+	},
+	"manualPromotions": [
+		{
+			"kind": "file",
+			"path": "_pool/20260925143012-k3xq.md"
+		}
+	],
+	"views": [
+		{
+			"id": "default",
+			"name": "Default",
+			"inboxMode": "view",
+			"root": [
+				{
+					"id": "m1",
+					"type": "meta",
+					"label": "Field tech",
+					"collapsed": false,
+					"statusEnabled": true,
+					"statusSetId": "set-basic",
+					"applyTo": {
+						"block": true,
+						"file": true,
+						"module": true,
+						"metaFolder": true
+					},
+					"children": [
+						{
+							"id": "u-b1",
+							"type": "unit",
+							"ref": {
+								"kind": "file",
+								"path": "_pool/20260925143012-k3xq.md"
+							},
+							"children": [],
+							"explicitStatusId": "doing"
+						}
+					]
+				},
+				{
+					"id": "u-b1-dup",
+					"type": "unit",
+					"ref": {
+						"kind": "file",
+						"path": "_pool/20260925143012-k3xq.md"
+					},
+					"children": []
+				},
+				{
+					"id": "m2",
+					"type": "meta",
+					"label": "No files",
+					"collapsed": false,
+					"statusEnabled": true,
+					"statusSetId": "set-basic",
+					"applyTo": {
+						"block": true,
+						"file": false,
+						"module": true,
+						"metaFolder": true
+					},
+					"children": [
+						{
+							"id": "u-zz",
+							"type": "unit",
+							"ref": {
+								"kind": "file",
+								"path": "_pool/20260925160000-zz99.md"
+							},
+							"children": []
+						}
+					]
+				}
+			]
+		},
+		{
+			"id": "reading",
+			"name": "Reading",
+			"inboxMode": "view",
+			"root": [
+				{
+					"id": "u-b1-dup2",
+					"type": "unit",
+					"ref": {
+						"kind": "file",
+						"path": "_pool/20260925143012-k3xq.md"
+					},
+					"children": []
+				}
+			]
+		}
+	],
+	"activeViewId": "default",
+	"expandedModuleFolders": [],
+	"statusSets": [
+		{
+			"id": "set-basic",
+			"name": "Basic",
+			"defaultStatusId": "idea",
+			"statuses": [
+				{
+					"id": "idea",
+					"label": "Idea",
+					"color": "#aaaaaa"
+				},
+				{
+					"id": "doing",
+					"label": "Doing",
+					"color": "#bbbbbb"
+				},
+				{
+					"id": "done",
+					"label": "Done",
+					"color": "#cccccc",
+					"isCompleted": true
+				}
+			]
+		}
+	],
+	"colorPalette": [
+		"#ff0000"
+	]
+}
