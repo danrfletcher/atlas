@@ -1,4 +1,5 @@
 import { App } from "obsidian";
+import type { UnitIndex } from "./unit-index";
 import { DEFAULT_VIEW_NAME, StatusGovernance, Unit, UnitRef, View, ViewNode, createEmptyView, rewriteRefPath, unitRefsEqual, unitToRef } from "./types";
 
 function generateNodeId(): string {
@@ -417,6 +418,44 @@ export class ViewsManager {
 		if (!view || view.inboxMode === mode) return;
 		view.inboxMode = mode;
 		this.save();
+	}
+
+	/** Create Module on a root file: every node (every view, every duplicate) referencing the file
+	 * becomes a module node, keeping id, position, fold state, status settings and children. Also
+	 * matches `<folder>/<folder>.md`, so it gives the same result before or after the rename hook.
+	 * With `unitIndex`, manual promotions are converted too. Data-only (never touches disk); saves
+	 * and notifies once, and not at all when nothing matched. Block refs are left to the rename hook. */
+	convertFileNodesToModule(filePath: string, folderPath: string, unitIndex?: UnitIndex): { nodes: number; manualPromotions: number } {
+		const interfacePath = `${folderPath}/${folderPath.split("/").pop()}.md`;
+		let nodes = 0;
+		const walk = (list: ViewNode[]) => {
+			for (const node of list) {
+				const ref = node.ref;
+				if (node.type === "unit" && ref?.kind === "file" && (ref.path === filePath || ref.path === interfacePath)) {
+					node.ref = { kind: "folder", path: folderPath };
+					nodes++;
+				}
+				walk(node.children);
+			}
+		};
+		for (const view of this.views) walk(view.root);
+		const manualPromotions = unitIndex?.convertManualPromotionToModule(filePath, folderPath) ?? 0;
+		if (nodes > 0 || manualPromotions > 0) this.save();
+		return { nodes, manualPromotions };
+	}
+
+	/** Create on a meta folder: the meta node becomes a unit node in place. Same id, position, fold
+	 * state, status settings and children (all left as they are); only `type`/`ref` change and the
+	 * label goes. Returns false, changing nothing, unless `nodeId` is a meta node in `viewId`. */
+	replaceMetaNodeWithUnit(viewId: string, nodeId: string, ref: UnitRef): boolean {
+		const view = this.getView(viewId);
+		const found = view && this.findNode(view.root, nodeId);
+		if (!found || found.node.type !== "meta") return false;
+		found.node.type = "unit";
+		found.node.ref = ref;
+		delete found.node.label;
+		this.save();
+		return true;
 	}
 
 	/** F9 rename integrity: rewrite every matching ref (exact + prefix) across every view. */

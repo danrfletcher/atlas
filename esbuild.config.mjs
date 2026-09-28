@@ -9,6 +9,8 @@ if you want to view the source, please visit the github repository of this plugi
 `;
 
 const prod = process.argv[2] === "production";
+// The test-only `window.__atlasTest` harness is compiled in only for a non-production build run with ATLAS_TEST=1.
+const atlasTest = !prod && process.env.ATLAS_TEST === "1";
 
 const context = await esbuild.context({
 	banner: { js: banner },
@@ -37,6 +39,7 @@ const context = await esbuild.context({
 	treeShaking: true,
 	outfile: "main.js",
 	minify: prod,
+	define: { __ATLAS_TEST__: String(atlasTest) },
 });
 
 if (prod) {
