@@ -2,6 +2,20 @@
 
 Judgement calls made during the build, the alternative considered, and why. Newest first.
 
+## Create from a meta folder (block, file or module): the menu, the body and the failure order
+
+**Decision:** "Create" sits in a meta folder's right-click menu after "Rename folder". Obsidian's public `Menu` has no submenu API (`minAppVersion` 1.5.0, public APIs only), so choosing it pops a second small menu (Block, File, Module) at the same spot. It is still two clicks. Nothing else was added: no command, palette entry or setting.
+
+**Decision:** every file Create writes has the body `# <name>` plus one trailing newline (Block, File and the Module's note alike). The name is trimmed when the dialog returns it, and validated again against the live vault root at create time, because the dialog can stay open while other things change. Block only needs a non-empty name (its file is named by ID); File and Module use the full name rules.
+
+**Decision:** Create is not `addBlock` with a different name. `addBlock` opens the new file; Create must not. It shares only the ID generator, which now takes an injectable random source so the collision loop is testable. The ID loop never returns an occupied path and gives up after 100 tries.
+
+**Decision:** the disk step runs first, then the meta node is replaced with the existing `replaceMetaNodeWithUnit`, then `data.json` is flushed. If a later step fails, Atlas deletes only what it created (file, then the folder if empty, then a pool folder it made if empty) and the meta folder is left as it was. Folders are deleted with `force`, since Obsidian 1.13.7 throws EISDIR on a plain delete.
+
+**Decision:** an empty pool setting, or one that resolves to the vault root, makes Block refuse with a notice instead of writing into the root.
+
+**Why:** the replaced node keeps its id, position, fold state, status governance and children, so nothing on disk moves and the row does not flash "missing" (the unit index updates from the vault create event before the node is swapped).
+
 ## PR 22: grilled with Dan directly — truncation placeholder visual parity + sort-by-status/reverse
 
 Post-v0.2.0 remediation, grilled before any code (per Dan's own request to grill first). Full Q&A:

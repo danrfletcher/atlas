@@ -9,6 +9,7 @@ import { openStatusPickerPopup } from "./status-popup";
 import { createInterfaceNote, findInterfaceNote } from "./interface-notes";
 import { addBlock } from "./commands";
 import { addCreateModuleItem, startCreateModule, unitForRef } from "./create-module";
+import { CreateKind, addCreateItem, startCreateFromMeta } from "./create-from-meta";
 import { noticeIfLinksNotUpdated } from "./links-notice";
 
 export const ATLAS_VIEW_TYPE = "atlas-explorer";
@@ -1617,6 +1618,24 @@ export class AtlasExplorerView extends ItemView {
 		);
 	}
 
+	private startCreateFromMeta(kind: CreateKind, view: View, node: ViewNode): void {
+		const { plugin } = this;
+		void startCreateFromMeta(
+			{
+				app: plugin.app,
+				getPoolFolder: () => plugin.settings.poolFolder,
+				getExcludedFolders: () => plugin.settings.excludedFolders,
+				getNode: (viewId, nodeId) => plugin.viewsManager.getNode(viewId, nodeId),
+				replaceMetaNodeWithUnit: (viewId, nodeId, ref) => plugin.viewsManager.replaceMetaNodeWithUnit(viewId, nodeId, ref),
+				holdUnit: (path) => plugin.unitIndex.holdUnit(path),
+				save: () => plugin.flushSave(),
+			},
+			kind,
+			view.id,
+			node.id
+		);
+	}
+
 	/** PR 15/17: the "Statuses" modal — opened from a bucket unit or meta folder's own context menu
 	 * (`nodeId` set), or from the view-name selector for root-level assignment (`nodeId: null`,
 	 * PR 17) — both read/write through `ViewsManager`'s generic `getStatusGovernance`/
@@ -1673,6 +1692,10 @@ export class AtlasExplorerView extends ItemView {
 					}).open();
 				})
 		);
+		// Create: turns this meta folder into a real block, file or module (one item on disk, the row
+		// keeps its place, settings and children). Offered on every meta folder, whatever its children,
+		// depth or fold state; ignores any multi-selection, so it only ever acts on this one row.
+		addCreateItem(menu, evt, (kind) => this.startCreateFromMeta(kind, view, node));
 		if (node.children.length > 0) {
 			menu.addItem((item) => item.setTitle("Statuses").setIcon("circle-dot").onClick(() => this.openStatusesModal(view, node.id)));
 		}

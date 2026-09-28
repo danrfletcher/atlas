@@ -152,9 +152,14 @@ export class Vault {
 		return folder;
 	}
 
-	async create(path: string, _data: string): Promise<TFile> {
+	/** Content written through `create`, by path. */
+	contents = new Map<string, string>();
+
+	async create(path: string, data: string): Promise<TFile> {
 		this.calls.push("create");
+		if (this.entries.has(path)) throw new Error("File already exists.");
 		const file = this.seedFile(path);
+		this.contents.set(path, data);
 		this.emit("create", file);
 		return file;
 	}
@@ -319,6 +324,11 @@ export class Menu {
 		return this;
 	}
 	showAtMouseEvent(_evt: MouseEvent): void {}
+	/** Every menu shown through `showAtPosition`, newest last (a chooser popped from an item). */
+	static shownAtPosition: Menu[] = [];
+	showAtPosition(_position: { x: number; y: number }): void {
+		Menu.shownAtPosition.push(this);
+	}
 	titles(): string[] {
 		return this.items.map((item) => item.title);
 	}
