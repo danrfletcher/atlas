@@ -92,15 +92,18 @@ export class ApiSourceModal extends Modal {
 		this.contentEl.empty();
 	}
 
-	/** Fix 2 (Round 1 human testing): `render()` fully rebuilds `contentEl`, which resets its scroll
-	 * offset to 0 — fine for user-driven edits (each keystroke/toggle is already near the change),
-	 * but jarring for Fetch sample/Test, which the user often triggers after scrolling down to the
-	 * Command/extra-fields section. Captures and restores `contentEl`'s own scroll offset (Obsidian's
-	 * modal content is the scrolling element) around those two call sites only. */
+	/** Fix 2 (Round 1 human testing), corrected in Round 2 (T1-T5): `render()` fully rebuilds
+	 * `contentEl`, and clearing/regrowing its content inside the modal disturbs scroll position — but
+	 * `contentEl` (Obsidian's `.modal-content`) never itself scrolls in this modal's layout
+	 * (scrollHeight === clientHeight always, scrollTop permanently 0). The actual scrolling element the
+	 * user sees is `modalEl` (the ancestor `.modal`), which a bare `render()` doesn't reset but whose
+	 * position drifts anyway (e.g. via the browser's scroll anchoring) once the content changes size.
+	 * Captures and restores `modalEl.scrollTop` explicitly around Fetch sample/Test so the visible
+	 * scroll position is pinned rather than left to drift. */
 	private renderPreservingScroll(): void {
-		const scrollTop = this.contentEl.scrollTop;
+		const scrollTop = this.modalEl.scrollTop;
 		this.render();
-		this.contentEl.scrollTop = scrollTop;
+		this.modalEl.scrollTop = scrollTop;
 	}
 
 	private render(): void {
