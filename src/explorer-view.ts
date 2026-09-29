@@ -627,7 +627,7 @@ export class AtlasExplorerView extends ItemView {
 		const iconEl = row.createDiv({ cls: "atlas-icon" });
 		// R5: routes the dot click to the API item's own status setter — `pseudo` has no real `ViewNode`
 		// counterpart `setExplicitStatus` (the default) could resolve.
-		this.renderRowIcon(iconEl, view, pseudo, ancestors, "circle", (statusId) =>
+		this.renderRowIcon(iconEl, view, pseudo, ancestors, "plug", (statusId) =>
 			this.plugin.viewsManager.setApiItemStatus(view.id, folderNode.id, item.id, statusId)
 		);
 		row.createSpan({ cls: "atlas-row-text", text: item.label });
