@@ -54,3 +54,17 @@ describe("styles.css — API row rendering (T1/T2/T3)", () => {
 		expect(secondary).toMatch(/(max-width|overflow)\s*:/);
 	});
 });
+
+describe("styles.css — PR-6 fix 3: sample-field chips render one per line, not concatenated text", () => {
+	it("stacks the sample-field chips container in a column, one field per line", () => {
+		const chips = ruleBody(".atlas-api-field-chips");
+		expect(chips).toMatch(/display\s*:\s*flex/);
+		expect(chips).toMatch(/flex-direction\s*:\s*column/);
+	});
+
+	it("gives each sample field a distinct, bordered draggable chip rather than bare text", () => {
+		const chip = ruleBody(".atlas-api-field-chip");
+		expect(chip).toMatch(/border\s*:/);
+		expect(chip).toMatch(/(cursor)\s*:/);
+	});
+});

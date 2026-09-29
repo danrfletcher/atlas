@@ -471,6 +471,33 @@
 	margin: 0 0 8px;
 }
 
+/* PR-6 fix 3 (Round 1 human testing): sample fields for drag-mapping (G2) were bare <span> text
+ * nodes with no separator, rendering as one unbroken run of concatenated field names. One field
+ * per line, each a bordered draggable chip — no other draggable element in the plugin has its own
+ * established look, so this echoes `.atlas-badge`'s pill styling instead of inventing a new one. */
+.atlas-api-field-chips {
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+	margin-bottom: 8px;
+}
+
+.atlas-api-field-chip {
+	display: block;
+	width: fit-content;
+	padding: 4px 8px;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 4px;
+	background: var(--background-secondary);
+	color: var(--text-normal);
+	font-size: var(--font-ui-smaller);
+	cursor: grab;
+}
+
+.atlas-api-field-chip:hover {
+	background: var(--background-modifier-hover);
+}
+
 .atlas-badge {
 	font-size: var(--font-ui-smaller);
 	padding: 0 4px;
