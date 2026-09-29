@@ -1,5 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
 
+/** Fix 2 (Round 1 human testing): the real Obsidian `Modal`'s `contentEl` is the scrolling element,
+ * and clearing/rebuilding it (as every `render()` does) resets `scrollTop` back to 0 in a real
+ * browser — that's the bug. Mutable so individual tests can control the mocked HTTP response
+ * `fetchSample()` receives; declared via `vi.hoisted` since `vi.mock` factories are hoisted above
+ * regular imports/consts. */
+const mockHttpResponse = vi.hoisted(() => ({ status: 200, text: "[]" }));
+
 /** T1: the real bug only shows up in Obsidian's actual `ButtonComponent`, whose click listener is
  * bound once at construction and gates on the component's own `disabled` field — not whatever gets
  * poked onto `buttonEl.disabled` afterwards. The "obsidian" package ships types only (no runtime), so
@@ -13,9 +20,14 @@ vi.mock("obsidian", () => {
 			__settings: [] as any[],
 			cls: undefined as string | undefined,
 			textContent: "",
+			// Fix 2: mirrors a real scrollable `.modal-content` resetting its scroll offset once its
+			// content is cleared, so a test can fail against the old bug (bare `render()`) and pass
+			// against the fix (`renderPreservingScroll()`).
+			scrollTop: 0,
 			empty() {
 				this.children = [];
 				this.__settings = [];
+				this.scrollTop = 0;
 			},
 			createEl(_tag: string, opts?: { text?: string; cls?: string }) {
 				const child = createFakeElement();
@@ -225,7 +237,7 @@ vi.mock("obsidian", () => {
 		Notice: FakeNotice,
 		Platform: { isMobile: false },
 		Setting: FakeSetting,
-		requestUrl: async () => ({ status: 200, json: {} }),
+		requestUrl: async () => mockHttpResponse,
 	};
 });
 
@@ -344,5 +356,44 @@ describe("T1/T3/T5/T7 — ApiSourceModal's Save button after an empty-then-valid
 			}),
 			headers: [],
 		});
+	});
+});
+
+describe("Fix 2 (Round 1 human testing) — Fetch sample / Test preserve the modal's scroll position", () => {
+	it("renderPreservingScroll() restores contentEl.scrollTop across a full re-render", () => {
+		const modal = new ApiSourceModal({} as any, validConfig(), [], vi.fn());
+		(modal as any).onOpen();
+
+		(modal as any).contentEl.scrollTop = 240;
+		(modal as any).renderPreservingScroll();
+
+		expect((modal as any).contentEl.scrollTop).toBe(240);
+	});
+
+	it("runTest() preserves scroll position instead of resetting it", async () => {
+		const modal = new ApiSourceModal({} as any, validConfig(), [], vi.fn());
+		(modal as any).onOpen();
+		(modal as any).lastResponse = [{ id: "1", name: "One" }];
+
+		(modal as any).contentEl.scrollTop = 180;
+		await (modal as any).runTest();
+
+		expect((modal as any).contentEl.scrollTop).toBe(180);
+		// Regression: the test result content itself still updates — only scroll is unaffected.
+		expect((modal as any).testResult).toContain("1 row(s)");
+	});
+
+	it("fetchSample() preserves scroll position instead of resetting it", async () => {
+		mockHttpResponse.status = 200;
+		mockHttpResponse.text = JSON.stringify([{ id: "1", name: "One" }]);
+		const modal = new ApiSourceModal({} as any, validConfig(), [], vi.fn());
+		(modal as any).onOpen();
+
+		(modal as any).contentEl.scrollTop = 300;
+		await (modal as any).fetchSample();
+
+		expect((modal as any).contentEl.scrollTop).toBe(300);
+		// Regression: the sample content itself still updates — only scroll is unaffected.
+		expect((modal as any).sampleFields).toContain("id");
 	});
 });

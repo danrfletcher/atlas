@@ -92,6 +92,17 @@ export class ApiSourceModal extends Modal {
 		this.contentEl.empty();
 	}
 
+	/** Fix 2 (Round 1 human testing): `render()` fully rebuilds `contentEl`, which resets its scroll
+	 * offset to 0 — fine for user-driven edits (each keystroke/toggle is already near the change),
+	 * but jarring for Fetch sample/Test, which the user often triggers after scrolling down to the
+	 * Command/extra-fields section. Captures and restores `contentEl`'s own scroll offset (Obsidian's
+	 * modal content is the scrolling element) around those two call sites only. */
+	private renderPreservingScroll(): void {
+		const scrollTop = this.contentEl.scrollTop;
+		this.render();
+		this.contentEl.scrollTop = scrollTop;
+	}
+
 	private render(): void {
 		const { contentEl } = this;
 		contentEl.empty();
@@ -507,7 +518,7 @@ export class ApiSourceModal extends Modal {
 		if (this.sampleFields.length === 0 && this.arrayFieldCandidates.length === 0 && !Array.isArray(result.json)) {
 			new Notice("Atlas: response is not a JSON list and has no array field to pick.");
 		}
-		this.render();
+		this.renderPreservingScroll();
 	}
 
 	/** G3: "The Test button, Fetch sample and Save all use the active mode." Runs the active mode's
@@ -548,7 +559,7 @@ export class ApiSourceModal extends Modal {
 
 			this.testResult = parts.join(", ");
 		}
-		this.render();
+		this.renderPreservingScroll();
 	}
 
 	private save(): void {
