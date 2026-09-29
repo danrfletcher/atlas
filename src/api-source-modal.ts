@@ -246,7 +246,7 @@ export class ApiSourceModal extends Modal {
 					const field = evt.dataTransfer?.getData("text/plain");
 					if (!field) return;
 					this.mapping[target.key] = field;
-					this.render();
+					this.renderPreservingScroll();
 				});
 				if (this.mapping[target.key] && !target.required) {
 					targetRow.addExtraButton((btn) =>
@@ -277,7 +277,7 @@ export class ApiSourceModal extends Modal {
 					const field = evt.dataTransfer?.getData("text/plain");
 					if (!field) return;
 					extra.field = field;
-					this.render();
+					this.renderPreservingScroll();
 				});
 				targetRow.addExtraButton((btn) =>
 					btn
@@ -307,7 +307,7 @@ export class ApiSourceModal extends Modal {
 					name = `${name}_${n}`;
 				}
 				this.extraFields.push({ name, field });
-				this.render();
+				this.renderPreservingScroll();
 			});
 			addExtraRow.addButton((btn) =>
 				btn.setButtonText("Add extra field").onClick(() => {
