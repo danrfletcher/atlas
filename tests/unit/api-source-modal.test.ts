@@ -45,7 +45,16 @@ vi.mock("obsidian", () => {
 				this.textContent = t;
 			},
 			setAttr() {},
-			addEventListener() {},
+			__listeners: {} as Record<string, ((evt: any) => void)[]>,
+			addEventListener(type: string, cb: (evt: any) => void) {
+				(this.__listeners[type] ??= []).push(cb);
+			},
+			/** Simulates a real DOM event dispatch for the drop handlers under test — real drag-and-drop
+			 * verification is a container/manual-testing concern (see PR-6.C spec), this only exercises
+			 * the same event-handling code path at the unit level. */
+			dispatch(type: string, evt: any) {
+				for (const cb of this.__listeners[type] ?? []) cb(evt);
+			},
 		};
 		return el;
 	}
@@ -257,6 +266,25 @@ function settingNamed(modal: unknown, name: string): any {
 	return contentEl.__settings.find((s: any) => s.name === name);
 }
 
+/** Drop zones live in a `Setting`'s `controlEl`, which the fake `Setting` never attaches to its
+ * container's `children` — so finding them needs to walk both the element tree and every setting's
+ * `controlEl` recorded on `contentEl.__settings`. Order matches render order: the three
+ * `MAPPING_TARGETS` zones (ID, Label, Secondary), then one per existing extra field, then the
+ * "add extra field" zone last. */
+function findAllByClass(el: any, cls: string, seen = new Set<unknown>()): any[] {
+	if (!el || seen.has(el)) return [];
+	seen.add(el);
+	const out: any[] = [];
+	if ((el.cls ?? "").split(/\s+/).includes(cls)) out.push(el);
+	for (const child of el.children ?? []) out.push(...findAllByClass(child, cls, seen));
+	for (const setting of el.__settings ?? []) out.push(...findAllByClass(setting.controlEl, cls, seen));
+	return out;
+}
+
+function dropField(dropZone: any, field: string): void {
+	dropZone.dispatch("drop", { preventDefault() {}, dataTransfer: { getData: () => field } });
+}
+
 function validConfig(): ApiSourceConfig {
 	return {
 		url: "https://api.example.com/items",
@@ -403,5 +431,60 @@ describe("Fix 2 (Round 1 human testing) — Fetch sample / Test preserve the mod
 		expect((modal as any).modalEl.scrollTop).toBe(300);
 		// Regression: the sample content itself still updates — only scroll is unaffected.
 		expect((modal as any).sampleFields).toContain("id");
+	});
+});
+
+describe("PR-6.C fix — scroll position resets on the drop-triggered re-render", () => {
+	async function modalWithSample(): Promise<ApiSourceModal> {
+		mockHttpResponse.status = 200;
+		mockHttpResponse.text = JSON.stringify([{ id: "1", name: "One", extra: "x" }]);
+		const modal = new ApiSourceModal({} as any, validConfig(), [], vi.fn());
+		(modal as any).onOpen();
+		await (modal as any).fetchSample();
+		return modal;
+	}
+
+	it("dropping a field onto a mapping target (ID/Label/Secondary) preserves scroll", async () => {
+		const modal = await modalWithSample();
+		const [idZone] = findAllByClass((modal as any).contentEl, "atlas-api-drop-zone");
+
+		(modal as any).modalEl.scrollTop = 275;
+		dropField(idZone, "id");
+
+		expect((modal as any).modalEl.scrollTop).toBe(275);
+		// Regression: the drop itself still assigns the mapping.
+		expect((modal as any).mapping.idField).toBe("id");
+	});
+
+	it("dropping a field onto an existing extra field's target preserves scroll", async () => {
+		const modal = await modalWithSample();
+		(modal as any).extraFields = [{ name: "path", field: "" }];
+		(modal as any).render();
+
+		const zones = findAllByClass((modal as any).contentEl, "atlas-api-drop-zone");
+		// After the 3 MAPPING_TARGETS zones comes the one for the existing extra field.
+		const extraZone = zones[3];
+
+		(modal as any).modalEl.scrollTop = 150;
+		dropField(extraZone, "extra");
+
+		expect((modal as any).modalEl.scrollTop).toBe(150);
+		// Regression: the drop itself still assigns the extra field's mapping.
+		expect((modal as any).extraFields[0].field).toBe("extra");
+	});
+
+	it("dropping a field onto the 'add extra field' zone preserves scroll", async () => {
+		const modal = await modalWithSample();
+		const zones = findAllByClass((modal as any).contentEl, "atlas-api-drop-zone");
+		// With no existing extra fields, the "add extra field" zone is the last one after ID/Label/Secondary.
+		const addZone = zones[zones.length - 1];
+
+		(modal as any).modalEl.scrollTop = 90;
+		dropField(addZone, "extra");
+
+		expect((modal as any).modalEl.scrollTop).toBe(90);
+		// Regression: the drop itself still creates a new extra field mapped to the dropped field.
+		expect((modal as any).extraFields).toHaveLength(1);
+		expect((modal as any).extraFields[0].field).toBe("extra");
 	});
 });
