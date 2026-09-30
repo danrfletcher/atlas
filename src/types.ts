@@ -113,6 +113,140 @@ export interface ViewNode extends StatusGovernance {
 	 * `StatusGovernance`, above). Absent means "show the governing set's own default status," the
 	 * same as before this PR existed. */
 	explicitStatusId?: string;
+	/** PR-2 (API-backed Atlas Folders): request/mapping config for a "Folder" (meta node) whose rows
+	 * are pulled from a JSON API instead of (or alongside) manually placed children. Only ever set on
+	 * a `type: "meta"` node. Headers (including any bearer token) are deliberately absent from this
+	 * shape — see `ApiHeadersStore` — so this object is safe to persist in synced `data.json` (G13).
+	 *
+	 * E7 (ticket 34n6ct71muguncxk, not yet built anywhere in this repo as of PR-3 either): whatever code
+	 * converts a meta Folder into a real disk-backed folder must copy this field (including PR-3's
+	 * `overwrite`/guard/refresh-every additions), `apiCache`, `apiItemState`, `apiItemOrder` and
+	 * `apiAwaitingConfirmation` onto the resulting node unchanged, and must leave any already-placed/
+	 * pulled children alone — the conversion affects only the Folder node itself. */
+	apiSource?: ApiSourceConfig;
+	/** Last-refresh outcome. Holds mapped rows only, never the raw response (G13/E9: cache contents
+	 * assertion). */
+	apiCache?: ApiCache;
+	/** Per-API-row durable state (status, note, "not found" flag), keyed by the API's own row id —
+	 * survives refreshes independently of whatever the API currently reports. */
+	apiItemState?: Record<string, ApiItemState>;
+	/** Display order of `apiItemState`'s keys — a plain `Record` has no reliable iteration order
+	 * across a JSON round-trip, so order is tracked explicitly alongside it. */
+	apiItemOrder?: string[];
+	/** PR-3 (G6b): true only while an automatic refresh (timer or view-load) found rows it would need
+	 * to delete under Overwrite, asked for confirmation, and got no answer (dismissed via Escape/view
+	 * close). Drives the amber "waiting for confirmation" dot and suppresses re-asking on further
+	 * automatic refreshes for this Folder — cleared the moment any refresh is actually answered
+	 * (confirmed or cancelled), including a later manual "Refresh now", which always asks again
+	 * regardless of this flag. Meaningless (and always cleared) once `apiSource` itself is absent. */
+	apiAwaitingConfirmation?: boolean;
+}
+
+/** A single request header, e.g. `Authorization: Bearer …`. Never persisted in `data.json` — see
+ * `ApiHeadersStore` (G13: device-local only). */
+export interface ApiHeader {
+	key: string;
+	value: string;
+}
+
+/** PR-5 (G9b): which action to perform when an API row is clicked. */
+export type ApiClickAction = "none" | "open-attachment" | "run-command";
+
+/** Which sample field maps to which target (G2). `arrayField` is set only when the raw response is
+ * a plain object rather than a list — the top-level key whose value is the array to read rows from. */
+export interface ApiFieldMapping {
+	idField: string;
+	labelField: string;
+	secondaryField?: string;
+	arrayField?: string;
+	/** PR-5 (G2): extra named fields mapped beyond id/label/secondary. Key is the extra field name
+	 * (letters, digits, underscore, e.g. "path"), value is the sample item's field name. */
+	extraFields?: Record<string, string>;
+}
+
+export interface ApiSourceConfig {
+	url: string;
+	/** GET only in this PR (G1) — the type exists so a later PR's JS/other-method work has somewhere to
+	 * grow into, without this PR's own code ever producing or accepting anything else. */
+	method: "GET";
+	mapping: ApiFieldMapping;
+	mode: "append" | "merge" | "overwrite";
+	/** G5a. */
+	refreshOnViewLoad: boolean;
+	/** G5b: "Refresh every [X] minutes", off by default with no fixed value — independent of
+	 * `refreshOnViewLoad`/"Refresh now" (G5). `refreshEveryMinutes` is only meaningful while this is
+	 * on; below-minimum/blank/non-numeric values are rejected by the modal before they ever reach this
+	 * field (`validateRefreshMinutes`), and a value that reaches here some other way (hand-edited
+	 * `data.json`) is clamped up to `MIN_REFRESH_MINUTES` on load, never rejected outright. */
+	refreshEveryMinutesEnabled?: boolean;
+	refreshEveryMinutes?: number;
+	/** G6b(i): Overwrite-only, default on (absent/`undefined` means on — only an explicit `false`
+	 * turns it off). With this on, a refresh whose response is an empty list leaves every row as-is
+	 * instead of following Overwrite's normal "replace everything" rule. */
+	keepOnEmpty?: boolean;
+	/** G6b(ii): Overwrite-only, default on. With this on, a refresh that would delete one or more rows
+	 * asks for confirmation first (`ApiSourceController`'s confirm-delete flow) instead of deleting
+	 * outright. */
+	confirmBeforeDelete?: boolean;
+	/** PR-4 (G3): "drag" (default, absent) maps via `mapping` exactly as PR-2/PR-3; "js" replaces the
+	 * mapping step with `jsSource` instead. `mapping` is kept as-is while in "js" mode (never cleared),
+	 * so switching back to drag restores whatever drag mapping was last set. */
+	mappingMode?: "drag" | "js";
+	/** PR-4 (G3): the JS mapper's full source, `(response) => [{id, label, secondary, extra}]` — only
+	 * meaningful while `mappingMode` is "js". Not a secret (covered by the modal's own warning instead);
+	 * stored in synced `data.json` like the rest of `source`, unlike headers (`ApiHeadersStore`). */
+	jsSource?: string;
+	/** PR-5 (G9b): click action on an API row — "none", "open-attachment" (default), or "run-command"
+	 * (desktop only). */
+	action?: ApiClickAction;
+	/** PR-5 (G9b): alias for `action`, matching PR-5 spec/brief phrases interchangeably. */
+	clickAction?: ApiClickAction;
+	/** PR-5 (G9b): command string executed in the background when action is "run-command". */
+	command?: string;
+}
+
+/** A row exactly as mapped from a response — this is all the cache ever holds, never the raw
+ * response (G13, E9). */
+export interface ApiMappedRow {
+	id: string;
+	label: string;
+	secondary?: string;
+	/** PR-4/PR-5: extra named fields alongside id/label/secondary — populated by JS mode now; a
+	 * drag-mapping equivalent is PR-5's job. Carried through the cache unchanged for PR-5's click
+	 * action to read once it exists. */
+	extra?: Record<string, unknown>;
+}
+
+export interface ApiCache {
+	fetchedAt: number | null;
+	ok: boolean;
+	error: string | null;
+	rows: ApiMappedRow[];
+	/** E2: items skipped for a missing/duplicate id, this refresh. */
+	skippedCount: number;
+	/** E4: true when the response had more than 5,000 valid rows. */
+	truncated: boolean;
+	/** R3/G11: the time of the *last successful* refresh, carried through subsequent failures so the
+	 * dot's tooltip can keep reporting it ("unreachable, last updated 3 h ago") instead of the failed
+	 * attempt's own time. `undefined`/absent means never successfully refreshed. */
+	lastSuccessAt?: number;
+}
+
+/** One API row's durable, per-id state (G6c: status and note never change on refresh; label and
+ * secondary text always follow the API). */
+export interface ApiItemState {
+	id: string;
+	label: string;
+	secondary?: string;
+	explicitStatusId?: string;
+	noteRef?: UnitRef;
+	/** Merge mode only (G6): the row vanished from the API but is kept, marked "not found". */
+	notFound?: boolean;
+	/** R13: stamped to the refresh time every time the API actually reports this row present —
+	 * including the moment it reappears (G6c) — never to the time a later refresh notices it's
+	 * gone. So while `notFound` is true, this is the last time the row was truly seen, which is what
+	 * "not found, last seen <date>" reports. */
+	lastSeenAt?: string;
 }
 
 /** PR 17: extends `StatusGovernance` so the view root itself can be a governor — "Statuses" on the

@@ -1,0 +1,15 @@
+[
+  {
+    "id": "docker",
+    "name": "Docker",
+    "path": "/Applications/Docker.app",
+    "bundleId": "com.docker.docker",
+    "version": "4.34.0"
+  },
+  {
+    "id": "brew:git",
+    "name": "git",
+    "path": "/opt/homebrew/bin/git",
+    "version": "2.46.0"
+  }
+]

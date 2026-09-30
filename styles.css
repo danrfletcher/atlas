@@ -368,14 +368,134 @@
 	border-radius: 3px;
 }
 
+/* T2/R21/R22: the label must never fully vanish under flex shrink pressure, but it also must not
+ * grow to fill the row — this class is shared by every row kind (bucket, inbox, Folder, API,
+ * truncation, Module Contents), and a positive flex-grow here pushes every trailing badge/suffix
+ * (promoted badge, "in <file>", "(missing)", API secondary/last-seen text, the Folder's own
+ * connection dot) to the row's right edge instead of sitting just after the label.
+ * R22: a fixed-length `min-width` here clamps the box *upward* too, so any label shorter than the
+ * floor (CLI rows like "go"/"jq"/"gh", a Folder named "AI") gets padded with blank space and its
+ * trailing text/dot is pushed away from it on every row kind, not just the one row that needed
+ * protecting. Keep this shared rule at `min-width: 0` and give the API "not found" row (the only
+ * row with two `.atlas-row-secondary` spans, see below) its own scoped floor instead. */
 .atlas-row-text {
 	overflow: hidden;
 	text-overflow: ellipsis;
+	flex: 0 1 auto;
+	min-width: 0;
+}
+
+/* T2/R22: only an API row's "not found" state renders a second `.atlas-row-secondary` span (the
+ * normal secondary-value span plus the not-found/last-seen span), which is what let the label
+ * shrink to 0 in the first place. Give the label a floor scoped to that exact row shape, so short
+ * labels elsewhere (CLI tool names, Folder names) don't get a padded box they don't need. */
+.atlas-row-api-item.atlas-not-found .atlas-row-text {
+	min-width: 3em;
 }
 
 .atlas-row-secondary {
 	color: var(--text-faint);
 	font-size: var(--font-ui-smaller);
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	flex: 0 1 auto;
+	min-width: 0;
+	max-width: 40%;
+}
+
+/* T2/R22: the second secondary span only appears on a "not found" row alongside the first — cap
+ * it more tightly and let it shrink faster than the first, so the two secondaries share the
+ * squeeze instead of both hogging space at the label's expense. */
+.atlas-row-secondary ~ .atlas-row-secondary {
+	flex-shrink: 3;
+	max-width: 30%;
+}
+
+/* T1/T3 (G11): connection dot for an API-backed Folder — green ok / grey never-refreshed /
+ * red last-refresh-failed. Sized like the status dot's inner circle (`.atlas-status-dot-circle`)
+ * so the two read as the same visual language on the row. */
+.atlas-api-connection-dot {
+	display: inline-block;
+	flex-shrink: 0;
+	width: 8px;
+	height: 8px;
+	border-radius: 50%;
+	box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.15);
+}
+
+.atlas-api-dot-green {
+	background-color: var(--color-green, #4caf50);
+}
+
+.atlas-api-dot-grey {
+	background-color: var(--text-faint);
+}
+
+.atlas-api-dot-red {
+	background-color: var(--color-red, #e53935);
+}
+
+/* PR-3 (G11): amber — an automatic refresh's delete confirmation went unanswered. */
+.atlas-api-dot-amber {
+	background-color: var(--color-orange, #f0a020);
+}
+
+/* PR-3 (G5b): inline validation message under the "Refresh every X minutes" field. */
+.atlas-api-field-error {
+	color: var(--text-error, #e53935);
+	font-size: var(--font-ui-smaller);
+	margin: 0 0 8px;
+}
+
+/* PR-4 (G3): persistent unsandboxed-code warning next to the JS mapping editor — visible without
+ * scrolling, so it sits directly above the textarea rather than in a tooltip/collapsed section. */
+.atlas-api-js-warning {
+	color: var(--text-warning, #f0a020);
+	font-size: var(--font-ui-smaller);
+	margin: 0 0 8px;
+}
+
+/* PR-5 (G9b): persistent command trust/shell warning next to click-action command field. */
+.atlas-api-command-warning {
+	color: var(--text-warning, #f0a020);
+	font-size: var(--font-ui-smaller);
+	margin: 0 0 8px;
+}
+
+/* PR-4 (G3): the Test button's row/skip/truncate summary or mapping error — never saves or touches
+ * the cache, so it's styled like any other inline status line rather than a field error. */
+.atlas-api-test-result {
+	color: var(--text-muted);
+	font-size: var(--font-ui-smaller);
+	margin: 0 0 8px;
+}
+
+/* PR-6 fix 3 (Round 1 human testing): sample fields for drag-mapping (G2) were bare <span> text
+ * nodes with no separator, rendering as one unbroken run of concatenated field names. One field
+ * per line, each a bordered draggable chip — no other draggable element in the plugin has its own
+ * established look, so this echoes `.atlas-badge`'s pill styling instead of inventing a new one. */
+.atlas-api-field-chips {
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+	margin-bottom: 8px;
+}
+
+.atlas-api-field-chip {
+	display: block;
+	width: fit-content;
+	padding: 4px 8px;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 4px;
+	background: var(--background-secondary);
+	color: var(--text-normal);
+	font-size: var(--font-ui-smaller);
+	cursor: grab;
+}
+
+.atlas-api-field-chip:hover {
+	background: var(--background-modifier-hover);
 }
 
 .atlas-badge {

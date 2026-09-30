@@ -1,9 +1,9 @@
-import { App, FuzzySuggestModal, ItemView, Menu, Modal, Notice, TFile, TFolder, WorkspaceLeaf, setIcon, setTooltip } from "obsidian";
+import { App, FuzzySuggestModal, ItemView, MarkdownView, Menu, Modal, Notice, Platform, TFile, TFolder, WorkspaceLeaf, setIcon, setTooltip } from "obsidian";
 import type AtlasPlugin from "./main";
-import { StatusGovernance, TruncatedStatusConfig, Unit, UnitRef, View, ViewNode, unitRefKey, unitToRef } from "./types";
-import { MetaTarget, flattenMetaFolders } from "./views";
+import { ApiItemState, StatusGovernance, TruncatedStatusConfig, Unit, UnitRef, View, ViewNode, unitRefKey, unitToRef } from "./types";
+import { ApiSourceIdPair, MetaTarget, collectApiSourceNodeIdPairs, flattenMetaFolders, nodeHasApiRows } from "./views";
 import { resolveUnit } from "./unit-display";
-import { TextPromptModal, ConfirmModal, StatusesModal } from "./modals";
+import { TextPromptModal, ConfirmModal, ConfirmDeleteRowsModal, StatusesModal } from "./modals";
 import { StatusDefinition, pluralizeStatusLabel } from "./statuses";
 import { openStatusPickerPopup } from "./status-popup";
 import { createInterfaceNote, findInterfaceNote } from "./interface-notes";
@@ -11,6 +11,14 @@ import { addBlock } from "./commands";
 import { addCreateModuleItem, startCreateModule, unitForRef } from "./create-module";
 import { CreateKind, addCreateItem, startCreateFromMeta } from "./create-from-meta";
 import { noticeIfLinksNotUpdated } from "./links-notice";
+import { generateBlockId } from "./display-text";
+import { ApiSourceModal } from "./api-source-modal";
+import { ViewLoadTrigger, dotStateFor, dotTooltip } from "./api-source-controller";
+import { obsidianRequestImpl } from "./api-request-obsidian";
+import { apiItemMatchesFilter, formatLocalDateFromIso } from "./api-mapping";
+import { MIN_REFRESH_MINUTES, RefreshEveryTimers } from "./api-refresh-timer";
+import { executeApiCommand } from "./api-command-runner";
+import { resolveArgv, tokenizeCommand } from "./command-argv";
 
 export const ATLAS_VIEW_TYPE = "atlas-explorer";
 
@@ -38,6 +46,13 @@ const MODULE_HOVER_DWELL_MS = 650;
  * so every existing drop-handling call site only needed to start iterating instead of gaining a
  * second, parallel "batch" code path next to the original single-item one. */
 type DragPayload = { kind: "node"; nodeIds: string[]; viewId: string } | { kind: "inbox"; refs: UnitRef[] };
+
+/** R14: an API item's label is arbitrary upstream data, not a filename Atlas chose — strip path
+ * separators and other characters the vault/filesystem reject or reinterpret before using it as
+ * one, so attaching a note/block/module to an item never throws or nests into an unrelated path. */
+function sanitizeFileName(name: string): string {
+	return name.replace(/[/\\:*?"<>|]/g, "-").trim();
+}
 
 interface RowInfo {
 	text: string;
@@ -295,7 +310,21 @@ export class AtlasExplorerView extends ItemView {
 	 * own `cancelDwell` while its timer is live and clears it again once the timer fires or cancels
 	 * normally via `dragleave`/`drop`. */
 	private cancelActiveDwell: (() => void) | null = null;
+	/** G5a: fires refresh-on-view-load exactly once per open/return of this leaf, not on every
+	 * unrelated re-render. */
+	private viewLoadTrigger = new ViewLoadTrigger();
+	/** G5b/F3: one interval per API Folder with "Refresh every X minutes" on, scoped to the *active*
+	 * named View only — same scoping G5a's own view-load refresh already uses, so switching to a
+	 * different View stops timers for Folders that aren't currently showing, and returning to this one
+	 * schedules them fresh (with at most one immediate catch-up refresh if it's overdue, never a burst).
+	 * Alive only for as long as this Atlas leaf itself is open — `onClose()` stops every one of them. */
+	private refreshEveryTimers = new RefreshEveryTimers();
 	private unsubscribers: (() => void)[] = [];
+	/** R1: a `ConfirmDeleteRowsModal` opened from `refreshApiSource` belongs to the app, not this leaf —
+	 * Obsidian never closes it just because the leaf that opened it did. Tracked here so `onClose` can
+	 * close every still-open one itself, resolving it as "dismissed" (the edge case: "confirmation modal
+	 * dismissed by ... view close counts as unanswered on an automatic refresh"). */
+	private openConfirmDeleteModals: ConfirmDeleteRowsModal[] = [];
 	private renderQueued = false;
 	/** F11: rebuilt once per render from the flat unit list, so resolving a ref is O(1) instead of
 	 * an O(n) `find` per row — at thousands of units the naive scan-per-row was O(n^2) per render. */
@@ -323,7 +352,17 @@ export class AtlasExplorerView extends ItemView {
 	async onOpen(): Promise<void> {
 		this.unsubscribers.push(this.plugin.unitIndex.onChange(() => this.queueRender()));
 		this.unsubscribers.push(this.plugin.viewsManager.onChange(() => this.queueRender()));
-		this.registerEvent(this.plugin.app.workspace.on("active-leaf-change", () => this.updateActiveHighlight()));
+		this.registerEvent(
+			this.plugin.app.workspace.on("active-leaf-change", (leaf) => {
+				this.updateActiveHighlight();
+				if (leaf === this.leaf) {
+					if (this.viewLoadTrigger.activate()) this.refreshApiSourcesOnViewLoad();
+				} else {
+					this.viewLoadTrigger.deactivate();
+				}
+			})
+		);
+		if (this.viewLoadTrigger.activate()) this.refreshApiSourcesOnViewLoad();
 		this.registerEvent(this.plugin.app.workspace.on("file-open", () => this.updateActiveHighlight()));
 		// Review follow-up (retroactive PR 9 finding): `dragPayload` was only ever cleared by a
 		// specific row's own `drop` handler or a Module Contents modal closing — never by a drag
@@ -356,6 +395,11 @@ export class AtlasExplorerView extends ItemView {
 
 	async onClose(): Promise<void> {
 		for (const unsub of this.unsubscribers) unsub();
+		this.refreshEveryTimers.stopAll();
+		// R1: closing each modal fires its own onClose, which reports "dismissed" and (via the callback
+		// wired in refreshApiSource) removes itself from this array — iterate a copy so that in-loop
+		// mutation of the live array never skips an entry.
+		for (const modal of [...this.openConfirmDeleteModals]) modal.close();
 	}
 
 	/** Collapses bursts of index/view change events (a drag can fire several) into one render. */
@@ -376,6 +420,266 @@ export class AtlasExplorerView extends ItemView {
 	 * these toggles. */
 	refresh(): void {
 		this.queueRender();
+	}
+
+	// --- G1/G5/G6/G11: API-backed Folders ---------------------------------------------------------
+
+	/** G5a: refreshes every Folder in the active view that has "refresh when Atlas view loads" on. */
+	private refreshApiSourcesOnViewLoad(): void {
+		const view = this.plugin.viewsManager.getActiveView();
+		for (const node of this.collectApiSourceNodes(view.root)) {
+			if (node.apiSource?.refreshOnViewLoad) this.refreshApiSource(view, node, "automatic");
+		}
+	}
+
+	private collectApiSourceNodes(nodes: ViewNode[]): ViewNode[] {
+		const out: ViewNode[] = [];
+		for (const node of nodes) {
+			if (node.type === "meta") {
+				if (node.apiSource) out.push(node);
+				out.push(...this.collectApiSourceNodes(node.children));
+			}
+		}
+		return out;
+	}
+
+	/** G5b/F3: (re)schedules this Atlas view's "Refresh every X minutes" timers against the active
+	 * View's current set of eligible Folders — called after every render, so a saved config change
+	 * (interval edited, toggle flipped, source removed) reschedules cleanly on the very next render
+	 * rather than needing a dedicated call site of its own for each way that can happen. */
+	private syncRefreshTimers(view: View): void {
+		const nodes = this.collectApiSourceNodes(view.root)
+			.filter((node) => node.apiSource?.refreshEveryMinutesEnabled)
+			.map((node) => ({
+				id: node.id,
+				enabled: true,
+				minutes: node.apiSource?.refreshEveryMinutes ?? MIN_REFRESH_MINUTES,
+				lastFetchedAt: node.apiCache?.fetchedAt ?? null,
+			}));
+		this.refreshEveryTimers.sync(nodes, (nodeId) => {
+			const activeView = this.plugin.viewsManager.getActiveView();
+			const target = this.collectApiSourceNodes(activeView.root).find((n) => n.id === nodeId);
+			if (target) this.refreshApiSource(activeView, target, "automatic");
+		});
+	}
+
+	/** R8/G13: the one choke point every refresh trigger in this file goes through (view-load, the
+	 * every-X-minutes timer, "Refresh now", post-save) — mobile shows cached rows only and can never
+	 * trigger a live request. `trigger` (G5/G6b) distinguishes "Refresh now" (always asks again when a
+	 * delete needs confirming) from the two automatic triggers (ask at most once per Folder). */
+	private refreshApiSource(view: View, node: ViewNode, trigger: "manual" | "automatic" = "manual"): void {
+		if (!node.apiSource || Platform.isMobile) return;
+		const headers = this.plugin.apiHeadersStore.get(node.id);
+		void this.plugin.apiSourceController.refresh(node, node.apiSource, headers, () => this.plugin.viewsManager.notifyExternalMutation(), {
+			requestImpl: obsidianRequestImpl,
+			trigger,
+			confirmDelete: (count) =>
+				new Promise((resolve) => {
+					const modal = new ConfirmDeleteRowsModal(this.plugin.app, count, (answer) => {
+						this.openConfirmDeleteModals = this.openConfirmDeleteModals.filter((m) => m !== modal);
+						resolve(answer);
+					});
+					this.openConfirmDeleteModals.push(modal);
+					modal.open();
+				}),
+		});
+	}
+
+	private openApiSourceModal(view: View, node: ViewNode): void {
+		const headers = this.plugin.apiHeadersStore.get(node.id);
+		new ApiSourceModal(this.plugin.app, node.apiSource ?? null, headers, (result) => {
+			this.plugin.apiHeadersStore.set(node.id, result.headers);
+			this.plugin.viewsManager.setApiSource(view.id, node.id, result.source);
+			this.refreshApiSource(view, node, "manual");
+		}).open();
+	}
+
+	/** R3/G7: `duplicateNode` deep-copies `apiSource` itself, but the device-local headers for it (and
+	 * for any nested sourced Folder in the duplicated subtree) live outside the synced view tree in
+	 * `ApiHeadersStore` — copied across separately here using the original/clone id pairs, or the copy's
+	 * first refresh of a token-authed API would fail 401 despite its modal showing the same settings. */
+	private duplicateFolder(view: View, node: ViewNode): void {
+		const clone = this.plugin.viewsManager.duplicateNode(view.id, node.id);
+		if (!clone) return;
+		const pairs: ApiSourceIdPair[] = collectApiSourceNodeIdPairs(node, clone);
+		for (const pair of pairs) {
+			const headers = this.plugin.apiHeadersStore.get(pair.originalId);
+			if (headers.length > 0) this.plugin.apiHeadersStore.set(pair.cloneId, headers);
+		}
+	}
+
+	/** G9: opens an API item's already-attached note/block/module. Only ever called once `item.noteRef`
+	 * is set (R7: a click on an unattached item is a no-op — attaching is a deliberate, menu-driven
+	 * action, not an accidental side effect of the default click). */
+	private async openApiItemAttachment(item: ApiItemState): Promise<void> {
+		if (!item.noteRef) return;
+		await this.openRef(item.noteRef);
+	}
+
+	/** G9: creates a new note (file), block, or module (folder) and attaches it to this API item as
+	 * its one attachment, replacing whatever was attached before. Mirrors the existing "Add
+	 * note"/"Add block"/"Add module" creation shapes elsewhere in this file (`addFile`, `addBlock`,
+	 * `addFolder`) rather than inventing a fourth. */
+	private async attachApiItem(view: View, folderNode: ViewNode, item: ApiItemState, kind: "file" | "block" | "folder"): Promise<void> {
+		const { vault } = this.plugin.app;
+		// R14: the API label is arbitrary upstream data — '/' or '\\' would otherwise be read as
+		// path separators (nesting into/creating folders vault.create/createFolder don't expect)
+		// and ':' throws on some platforms; sanitising keeps the created file/folder name a sibling
+		// in the current location, matching every other "Add …" action in this file.
+		const label = sanitizeFileName(item.label.trim()) || "Untitled";
+		let ref: UnitRef;
+		let openable: TFile | null = null;
+		if (kind === "file") {
+			const file = await vault.create(await this.uniquePath(label, "md"), "");
+			ref = { kind: "file", path: file.path };
+			openable = file;
+		} else if (kind === "folder") {
+			const folder = await vault.createFolder(await this.uniquePath(label, null));
+			ref = { kind: "folder", path: folder.path };
+			// R14: "Add module" created a plain folder with nothing else linked to it, so openRef's
+			// folder branch (which only ever opens a *found* interface note) had nothing to open —
+			// a click on the row silently did nothing. Give it the same interface note the existing
+			// module flow creates (`createInterfaceNote`, used from the bucket unit's own menu).
+			openable = await createInterfaceNote(this.plugin.app, folder);
+		} else {
+			const poolFolder = this.plugin.settings.poolFolder;
+			if (!(vault.getAbstractFileByPath(poolFolder) instanceof TFolder)) await vault.createFolder(poolFolder);
+			let path: string;
+			do {
+				path = `${poolFolder}/${generateBlockId(new Date())}.md`;
+			} while (vault.getAbstractFileByPath(path));
+			const file = await vault.create(path, `# ${item.label}\n`);
+			ref = { kind: "block", path: file.path, subpath: file.basename };
+			openable = file;
+		}
+		this.plugin.viewsManager.setApiItemNoteRef(view.id, folderNode.id, item.id, ref);
+		if (openable) {
+			const leaf = this.plugin.app.workspace.getLeaf(false);
+			await leaf.openFile(openable);
+			if (kind === "block") this.plugin.app.workspace.getActiveViewOfType(MarkdownView)?.editor.setCursor({ line: 1, ch: 0 });
+		}
+	}
+
+	/** G9: "Add note / block / module" — the only context-menu action for an API item besides status
+	 * (G10: no drag, nest, reorder, remove, rename, or duplicate, all of which require a real
+	 * `ViewNode`, which items never get). With action = run command, the attachment stays reachable
+	 * from this menu. Status itself is set via the dot click (R5), not this menu. */
+	private showApiItemMenu(evt: MouseEvent, view: View, folderNode: ViewNode, item: ApiItemState): void {
+		const menu = new Menu();
+		if (item.noteRef) {
+			menu.addItem((mi) => mi.setTitle("Open attachment").setIcon("file-text").onClick(() => void this.openApiItemAttachment(item)));
+			menu.addSeparator();
+		}
+		menu.addItem((mi) => mi.setTitle("Add note").setIcon("file-plus").onClick(() => void this.attachApiItem(view, folderNode, item, "file")));
+		menu.addItem((mi) => mi.setTitle("Add block").setIcon("square-plus").onClick(() => void this.attachApiItem(view, folderNode, item, "block")));
+		menu.addItem((mi) => mi.setTitle("Add module").setIcon("folder-plus").onClick(() => void this.attachApiItem(view, folderNode, item, "folder")));
+		menu.showAtMouseEvent(evt);
+	}
+
+	/** G9/G9b: handles click on an API item row according to the folder's configured click action. */
+	private async handleApiItemClick(folderNode: ViewNode, item: ApiItemState): Promise<void> {
+		const action = folderNode.apiSource?.action ?? folderNode.apiSource?.clickAction ?? "open-attachment";
+		if (action === "none") return;
+		if (action === "open-attachment") {
+			if (item.noteRef) await this.openApiItemAttachment(item);
+			return;
+		}
+		if (action === "run-command") {
+			// G13: Click-action commands are not available on mobile
+			if (Platform.isMobile) return;
+			const command = folderNode.apiSource?.command;
+			if (!command || !command.trim()) return;
+
+			const tokenResult = tokenizeCommand(command);
+			if (!tokenResult.ok) {
+				new Notice(`Atlas: command error — ${tokenResult.error}`);
+				return;
+			}
+
+			// Read extra fields from the cached mapped row
+			const cachedRow = folderNode.apiCache?.rows.find((r) => r.id === item.id);
+			const extra = cachedRow?.extra;
+
+			const resolved = resolveArgv(tokenResult.tokens, extra);
+			if (!resolved.ok) {
+				new Notice(`Atlas: ${resolved.error}`);
+				return;
+			}
+
+			await executeApiCommand(resolved.argv);
+		}
+	}
+
+	/** G8: a throwaway pseudo-`ViewNode` so an API item can go through the same status-resolution
+	 * machinery as a real node, without ever being inserted into `children[]` (G10 — API items are
+	 * never draggable/nestable/reorderable/removable/renamable/duplicatable, which would otherwise
+	 * need special-casing throughout the drag/drop and context-menu code if they lived there). */
+	private pseudoNodeForApiItem(item: ApiItemState): ViewNode {
+		return { id: item.id, type: "unit", children: [], explicitStatusId: item.explicitStatusId };
+	}
+
+	private renderApiItemRow(item: ApiItemState, container: HTMLElement, view: View, folderNode: ViewNode, depth: number, ancestors: StatusGovernance[]): void {
+		const pseudo = this.pseudoNodeForApiItem(item);
+		const row = container.createDiv({ cls: "atlas-row atlas-row-unit atlas-row-api-item" });
+		row.style.paddingLeft = `${depth * 16}px`;
+		row.toggleClass("atlas-not-found", !!item.notFound);
+		row.createDiv({ cls: "atlas-chevron" }); // empty spacer — keeps icons aligned at this depth, same as any childless row
+		const iconEl = row.createDiv({ cls: "atlas-icon" });
+		// R5: routes the dot click to the API item's own status setter — `pseudo` has no real `ViewNode`
+		// counterpart `setExplicitStatus` (the default) could resolve.
+		this.renderRowIcon(iconEl, view, pseudo, ancestors, "plug", (statusId) =>
+			this.plugin.viewsManager.setApiItemStatus(view.id, folderNode.id, item.id, statusId)
+		);
+		row.createSpan({ cls: "atlas-row-text", text: item.label });
+		if (item.secondary) row.createSpan({ cls: "atlas-row-secondary", text: item.secondary });
+		if (item.notFound) {
+			// R4: previously rendered "not found" with no date — G6 requires the last-seen date too.
+			// R13: format as ISO-date (2026-09-25), matching the spec's example, rather than
+			// `toLocaleDateString`'s locale-dependent format (25/09/2026 in en-GB).
+			// R19: format the *local* calendar date — `lastSeenAt` is a UTC ISO string, and slicing it
+			// directly reports the UTC date, which can be a day behind the local one near midnight.
+			const text = item.lastSeenAt ? `not found, last seen ${formatLocalDateFromIso(item.lastSeenAt)}` : "not found";
+			row.createSpan({ cls: "atlas-row-secondary", text });
+		}
+
+		// G9/G9b: click opens attachment or runs terminal command per source clickAction config
+		row.addEventListener("click", () => {
+			void this.handleApiItemClick(folderNode, item);
+		});
+
+		// G9/R7: "Add note / block / module" — status is set via the dot click instead (R5).
+		row.addEventListener("contextmenu", (evt) => {
+			evt.preventDefault();
+			this.showApiItemMenu(evt, view, folderNode, item);
+		});
+	}
+
+	/** Renders a Folder's live API items, in `apiItemOrder`, right after its real children — separate
+	 * from `renderNodeList` since these have no `ViewNode` of their own to iterate (G10). */
+	private renderApiItems(node: ViewNode, container: HTMLElement, view: View, depth: number, ancestors: StatusGovernance[]): void {
+		// G4: a Folder can have rows with no live source at all (source removed, rows kept as static) —
+		// gated on the rows themselves, not on `apiSource` being present.
+		if (!node.apiItemOrder) return;
+		for (const itemId of node.apiItemOrder) {
+			const item = node.apiItemState?.[itemId];
+			if (!item) continue;
+			// R18: API rows must respect the explorer filter, same as any unit row (G12 — a Folder with
+			// API rows behaves "like any Folder with its own children").
+			if (!apiItemMatchesFilter(this.filterText, item.label, item.secondary)) continue;
+			this.renderApiItemRow(item, container, view, node, depth, ancestors);
+		}
+	}
+
+	/** R18: does this Folder's own API rows (not its real `children`) contain a filter match? Used
+	 * alongside `subtreeHasMatch` everywhere a collapsed Folder needs to be force-revealed, or bypass
+	 * truncation grouping, for a matching descendant — API rows are a Folder's rows too, just not
+	 * `ViewNode`s (G10), so they need the same "never hide a match behind a stale fold" treatment. */
+	private apiItemsMatchFilter(node: ViewNode): boolean {
+		if (!node.apiItemOrder) return false;
+		return node.apiItemOrder.some((itemId) => {
+			const item = node.apiItemState?.[itemId];
+			return item ? apiItemMatchesFilter(this.filterText, item.label, item.secondary) : false;
+		});
 	}
 
 	// --- ref resolution (shared by bucket + inbox rendering) -------------------------------------
@@ -442,6 +746,12 @@ export class AtlasExplorerView extends ItemView {
 		// collision aside) just be a stale, meaningless-looking highlight on whatever nodes happen to
 		// render next. Inbox selection is unaffected — a ref key means the same thing across views.
 		if (view.id !== this.lastRenderedViewId) {
+			// R9: G5a is "opening or returning to an Atlas view", not just "Obsidian leaf activation" —
+			// switching the *internal* Atlas view (the view switcher, `setActiveViewId`) is exactly that,
+			// and previously fired no refresh at all since it never touches `active-leaf-change`. Guarded
+			// on `lastRenderedViewId !== null` so this is a genuine switch, not the view's very first
+			// render (which `onOpen`'s own `activate()` call already covers).
+			if (this.lastRenderedViewId !== null) this.refreshApiSourcesOnViewLoad();
 			this.lastRenderedViewId = view.id;
 			this.selectedBucketNodeIds.clear();
 			if (this.selectionAnchorScope === "bucket") {
@@ -474,6 +784,7 @@ export class AtlasExplorerView extends ItemView {
 
 		container.scrollTop = scrollTop;
 		this.updateActiveHighlight();
+		this.syncRefreshTimers(view);
 	}
 
 	// --- toolbar -------------------------------------------------------------------------------
@@ -734,6 +1045,7 @@ export class AtlasExplorerView extends ItemView {
 					const info = await this.resolveRef(node.ref);
 					if (this.matchesFilter(info.text)) bypass = true;
 				}
+				if (!bypass && node.type === "meta" && this.apiItemsMatchFilter(node)) bypass = true;
 				if (!bypass && node.children.length > 0 && (await this.subtreeHasMatch(node.children))) bypass = true;
 			}
 			resolved.push({ node, status, governor, bypass });
@@ -971,6 +1283,9 @@ export class AtlasExplorerView extends ItemView {
 				const info = await this.resolveRef(n.ref);
 				if (this.matchesFilter(info.text)) return true;
 			}
+			// R18: a Folder's API rows are its rows too, just not `ViewNode` children (G10) — a filter
+			// match among them must force-reveal the Folder the same as a matching real descendant would.
+			if (n.type === "meta" && this.apiItemsMatchFilter(n)) return true;
 			if (n.children.length > 0 && (await this.subtreeHasMatch(n.children))) return true;
 		}
 		return false;
@@ -1006,7 +1321,7 @@ export class AtlasExplorerView extends ItemView {
 		if (filterActive) {
 			if (!this.preFilterCollapsedState) this.preFilterCollapsedState = new Map();
 			if (!this.preFilterCollapsedState.has(node.id)) this.preFilterCollapsedState.set(node.id, node.collapsed);
-			if (await this.subtreeHasMatch(node.children)) effectiveCollapsed = false;
+			if ((await this.subtreeHasMatch(node.children)) || this.apiItemsMatchFilter(node)) effectiveCollapsed = false;
 		}
 		setIcon(chevron, effectiveCollapsed ? "chevron-right" : "chevron-down");
 
@@ -1024,6 +1339,11 @@ export class AtlasExplorerView extends ItemView {
 		// the chain, so a grandparent's `inheritToSubfolders` can still reach past `node` if `node`
 		// itself isn't a governor (or is, but doesn't itself reach — same walk either way).
 		await this.renderNodeList(node.children, childrenInner, view, depth + 1, [node, ...ancestors]);
+		// T2: was gated on `node.apiSource` alone, so "Remove data source" (which clears `apiSource`
+		// but deliberately keeps `apiItemState`/`apiItemOrder`, per G4) made this permanently false and
+		// hid the surviving static rows from the tree entirely, even though `renderApiItems` itself is
+		// already correctly gated on the rows, not the source (see its own comment above).
+		if (node.type === "meta" && nodeHasApiRows(node)) this.renderApiItems(node, childrenInner, view, depth + 1, [node, ...ancestors]);
 
 		// Local optimistic state, not `node.collapsed` — real bug caught in review: `node.collapsed`
 		// only updates once the delayed `setNodeCollapsed` below actually runs, so a second click
@@ -1068,7 +1388,19 @@ export class AtlasExplorerView extends ItemView {
 	 * color or its background color, Dan's choice, not a fixed black/white contrast heuristic.
 	 * Shared by meta and unit rows so the two can't drift out of sync with each other, the same
 	 * reasoning `renderFoldableChildren`'s own extraction already used. */
-	private renderRowIcon(iconEl: HTMLElement, view: View, node: ViewNode, ancestors: StatusGovernance[], fallbackIconName: string): void {
+	/** R5: `onSetStatus`, when given, replaces the default "resolve `node` as a real `ViewNode` via
+	 * `setExplicitStatus`" behavior — a pseudo-`ViewNode` built for an API item (see
+	 * `pseudoNodeForApiItem`) has no real counterpart `setExplicitStatus` could ever find by id, so
+	 * without this the dot click was either a silent no-op or, worse, could collide with and corrupt
+	 * an unrelated real node that happened to share the pseudo node's id. */
+	private renderRowIcon(
+		iconEl: HTMLElement,
+		view: View,
+		node: ViewNode,
+		ancestors: StatusGovernance[],
+		fallbackIconName: string,
+		onSetStatus?: (statusId: string) => void
+	): void {
 		const status = this.plugin.statusesManager.resolveNodeStatus(ancestors, node);
 		if (!status) {
 			setIcon(iconEl, fallbackIconName);
@@ -1103,7 +1435,7 @@ export class AtlasExplorerView extends ItemView {
 				anchor: circle,
 				statusSet: set,
 				currentStatusId: status.id,
-				onSelect: (picked) => this.plugin.viewsManager.setExplicitStatus(view.id, node.id, picked.id),
+				onSelect: (picked) => (onSetStatus ? onSetStatus(picked.id) : this.plugin.viewsManager.setExplicitStatus(view.id, node.id, picked.id)),
 			});
 		});
 	}
@@ -1119,6 +1451,14 @@ export class AtlasExplorerView extends ItemView {
 			const iconEl = row.createDiv({ cls: "atlas-icon" });
 			this.renderRowIcon(iconEl, view, node, ancestors, "layers");
 			row.createSpan({ cls: "atlas-row-text", text: node.label ?? "" });
+			if (node.apiSource) {
+				// G11: connection dot — green ok / grey never-refreshed / red last-refresh-failed / amber
+				// (PR-3) waiting on an unanswered automatic delete confirmation.
+				const dot = row.createSpan({
+					cls: `atlas-api-connection-dot atlas-api-dot-${dotStateFor(node.apiCache, node.apiAwaitingConfirmation)}`,
+				});
+				setTooltip(dot, dotTooltip(node.apiCache, Date.now(), node.apiAwaitingConfirmation));
+			}
 
 			// PR 20: a meta row's plain click never did anything before this (no open target) — safe
 			// to bind unconditionally, since the previous behavior ("nothing happens") is preserved
@@ -1587,7 +1927,7 @@ export class AtlasExplorerView extends ItemView {
 		// PR 13: clones this row (and its whole meta-nested subtree, if it has one) as a new sibling
 		// right after it — same underlying unit, no disk duplicate, no naming scheme (two rows with
 		// the same label is expected — see duplicateNode's own doc comment for why).
-		menu.addItem((item) => item.setTitle("Duplicate (Meta)").setIcon("copy-plus").onClick(() => this.plugin.viewsManager.duplicateNode(view.id, node.id)));
+		menu.addItem((item) => item.setTitle("Duplicate (Meta)").setIcon("copy-plus").onClick(() => this.duplicateFolder(view, node)));
 		menu.addItem((item) =>
 			item
 				.setTitle("Remove from view")
@@ -1681,7 +2021,7 @@ export class AtlasExplorerView extends ItemView {
 		// PR 13: same clone-as-sibling action as a unit row's context menu — a meta folder has no
 		// disk identity to begin with, so "duplicating" it just clones the organizational label and
 		// its whole subtree, same mechanics either way (`duplicateNode` doesn't distinguish types).
-		menu.addItem((item) => item.setTitle("Duplicate (Meta)").setIcon("copy-plus").onClick(() => this.plugin.viewsManager.duplicateNode(view.id, node.id)));
+		menu.addItem((item) => item.setTitle("Duplicate (Meta)").setIcon("copy-plus").onClick(() => this.duplicateFolder(view, node)));
 		menu.addItem((item) =>
 			item
 				.setTitle("Rename folder")
@@ -1696,9 +2036,56 @@ export class AtlasExplorerView extends ItemView {
 		// keeps its place, settings and children). Offered on every meta folder, whatever its children,
 		// depth or fold state; ignores any multi-selection, so it only ever acts on this one row.
 		addCreateItem(menu, evt, (kind) => this.startCreateFromMeta(kind, view, node));
-		if (node.children.length > 0) {
+		// R6: an API-only Folder has no real children yet still governs its API rows' statuses (G8) —
+		// without `node.apiSource` here, such a Folder could never configure a status set at all. G4:
+		// a Folder whose source was removed can still be carrying static rows from before — same reason
+		// applies just as much to those.
+		if (node.children.length > 0 || nodeHasApiRows(node)) {
 			menu.addItem((item) => item.setTitle("Statuses").setIcon("circle-dot").onClick(() => this.openStatusesModal(view, node.id)));
 		}
+		menu.addSeparator();
+		menu.addItem((item) =>
+			item
+				.setTitle("Data source…")
+				.setIcon("plug-zap")
+				.onClick(() => this.openApiSourceModal(view, node))
+		);
+		if (node.apiSource) {
+			menu.addItem((item) =>
+				item
+					.setTitle("Refresh now")
+					.setIcon("refresh-cw")
+					.onClick(() => {
+						// R8/G13: mobile shows cached rows only — say so rather than silently doing nothing.
+						if (Platform.isMobile) {
+							new Notice("Refreshing isn't available on mobile — showing cached rows.");
+							return;
+						}
+						this.refreshApiSource(view, node, "manual");
+					})
+			);
+			menu.addItem((item) =>
+				item
+					.setTitle("Remove data source")
+					.setIcon("unplug")
+					.onClick(() => {
+						new ConfirmModal(
+							this.plugin.app,
+							`Remove the data source from "${node.label}"? Its current rows stay in place as plain rows — it just stops refreshing.`,
+							"Remove",
+							() => {
+								this.plugin.viewsManager.setApiSource(view.id, node.id, undefined);
+								// R4/G4: the source config itself includes headers (device-local, in
+								// ApiHeadersStore) — Remove drops those too, same as Delete folder already
+								// does, so a bearer token doesn't linger on the device or silently reappear
+								// if a source is added back to this Folder later.
+								this.plugin.apiHeadersStore.delete(node.id);
+							}
+						).open();
+					})
+			);
+		}
+		menu.addSeparator();
 		menu.addItem((item) =>
 			item
 				.setTitle("Delete folder")
@@ -1708,7 +2095,12 @@ export class AtlasExplorerView extends ItemView {
 						this.plugin.app,
 						`Delete "${node.label}"? Its contents move up one level — nothing on disk changes.`,
 						"Delete",
-						() => this.plugin.viewsManager.deleteMetaFolder(view.id, node.id)
+						() => {
+							// E6: the device-local headers entry has no home in the synced view data, so
+							// it's cleaned up here rather than inside `deleteMetaFolder` itself.
+							this.plugin.apiHeadersStore.delete(node.id);
+							this.plugin.viewsManager.deleteMetaFolder(view.id, node.id);
+						}
 					).open();
 				})
 		);
