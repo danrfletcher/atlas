@@ -312,7 +312,10 @@ describe("T1/T3/T5/T7 — ApiSourceModal's Save button after an empty-then-valid
 		const minutesField = () => settingNamed(modal, "Refresh every").components[1];
 		const errorText = () => (modal as any).contentEl.children.find((c: any) => c.cls === "atlas-api-field-error")?.textContent;
 
-		expect((modal as any).saveButton.disabled).toBe(true);
+		// Toggling on from blank now pre-fills the floor (MIN_REFRESH_MINUTES) instead of leaving the
+		// field empty, so this is already a valid value and Save stays enabled — no premature error.
+		expect(errorText()).toBeFalsy();
+		expect((modal as any).saveButton.disabled).toBe(false);
 
 		// T7 / C38 checkpoint 2: 3, 4 and blank are all rejected with an inline error and a blocked Save.
 		for (const bad of ["3", "4", ""]) {
@@ -396,12 +399,15 @@ describe("T1/T3/T5/T7 — ApiSourceModal's Save button after an empty-then-valid
 });
 
 describe("Fix 2 (Round 1 human testing) — Fetch sample / Test preserve the modal's scroll position", () => {
-	it("renderPreservingScroll() restores modalEl.scrollTop across a full re-render", () => {
+	it("render() restores modalEl.scrollTop across a full re-render", () => {
+		// PR-6.C round 3: scroll preservation moved from an opt-in renderPreservingScroll() wrapper
+		// (only 5 of ~20 call sites remembered to use it) into render() itself, unconditionally, so
+		// every call site — present and future — is covered with nothing separate to remember.
 		const modal = new ApiSourceModal({} as any, validConfig(), [], vi.fn());
 		(modal as any).onOpen();
 
 		(modal as any).modalEl.scrollTop = 240;
-		(modal as any).renderPreservingScroll();
+		(modal as any).render();
 
 		expect((modal as any).modalEl.scrollTop).toBe(240);
 	});

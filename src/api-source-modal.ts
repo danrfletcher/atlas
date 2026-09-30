@@ -3,7 +3,7 @@ import { canSaveApiSource, findArrayFields, isMapError, isValidExtraFieldName, m
 import { generateJsFromMapping, runJsMapping, validateJsSource } from "./api-js-mapping";
 import { httpGetJson } from "./api-http";
 import { obsidianRequestImpl } from "./api-request-obsidian";
-import { validateRefreshMinutes } from "./api-refresh-timer";
+import { MIN_REFRESH_MINUTES, validateRefreshMinutes } from "./api-refresh-timer";
 import { resolveArgv, validateCommand } from "./command-argv";
 import { ConfirmModal } from "./modals";
 import { ApiClickAction, ApiFieldMapping, ApiHeader, ApiSourceConfig } from "./types";
@@ -92,21 +92,24 @@ export class ApiSourceModal extends Modal {
 		this.contentEl.empty();
 	}
 
-	/** Fix 2 (Round 1 human testing), corrected in Round 2 (T1-T5): `render()` fully rebuilds
+	/** Fix 2 (Round 1 human testing), corrected in Round 2 (T1-T5), made unconditional after Round 3
+	 * (PR-6.C — the same jump kept recurring on every toggle/dropdown one at a time, because only the
+	 * handful of call sites someone remembered to wrap were protected): `render()` fully rebuilds
 	 * `contentEl`, and clearing/regrowing its content inside the modal disturbs scroll position — but
 	 * `contentEl` (Obsidian's `.modal-content`) never itself scrolls in this modal's layout
 	 * (scrollHeight === clientHeight always, scrollTop permanently 0). The actual scrolling element the
-	 * user sees is `modalEl` (the ancestor `.modal`), which a bare `render()` doesn't reset but whose
+	 * user sees is `modalEl` (the ancestor `.modal`), which a bare rebuild doesn't reset but whose
 	 * position drifts anyway (e.g. via the browser's scroll anchoring) once the content changes size.
-	 * Captures and restores `modalEl.scrollTop` explicitly around Fetch sample/Test so the visible
-	 * scroll position is pinned rather than left to drift. */
-	private renderPreservingScroll(): void {
+	 * `render()` itself now always captures and restores `modalEl.scrollTop` around the rebuild, so
+	 * every call site — present and future — is covered with no separate "preserving" variant to
+	 * remember to call. */
+	private render(): void {
 		const scrollTop = this.modalEl.scrollTop;
-		this.render();
+		this.renderBody();
 		this.modalEl.scrollTop = scrollTop;
 	}
 
-	private render(): void {
+	private renderBody(): void {
 		const { contentEl } = this;
 		contentEl.empty();
 		contentEl.createEl("h3", { text: "Data source" });
@@ -246,7 +249,7 @@ export class ApiSourceModal extends Modal {
 					const field = evt.dataTransfer?.getData("text/plain");
 					if (!field) return;
 					this.mapping[target.key] = field;
-					this.renderPreservingScroll();
+					this.render();
 				});
 				if (this.mapping[target.key] && !target.required) {
 					targetRow.addExtraButton((btn) =>
@@ -277,7 +280,7 @@ export class ApiSourceModal extends Modal {
 					const field = evt.dataTransfer?.getData("text/plain");
 					if (!field) return;
 					extra.field = field;
-					this.renderPreservingScroll();
+					this.render();
 				});
 				targetRow.addExtraButton((btn) =>
 					btn
@@ -307,7 +310,7 @@ export class ApiSourceModal extends Modal {
 					name = `${name}_${n}`;
 				}
 				this.extraFields.push({ name, field });
-				this.renderPreservingScroll();
+				this.render();
 			});
 			addExtraRow.addButton((btn) =>
 				btn.setButtonText("Add extra field").onClick(() => {
@@ -372,6 +375,12 @@ export class ApiSourceModal extends Modal {
 			.addToggle((toggle) =>
 				toggle.setValue(this.refreshEveryMinutesEnabled).onChange((value) => {
 					this.refreshEveryMinutesEnabled = value;
+					// Turning it on with nothing typed yet pre-fills the floor rather than leaving the
+					// field blank — a blank field on a freshly-enabled toggle isn't an invalid entry the
+					// user made, so it shouldn't show the "minimum 5" error before they've touched it.
+					if (value && !this.refreshEveryMinutesRaw.trim()) {
+						this.refreshEveryMinutesRaw = String(MIN_REFRESH_MINUTES);
+					}
 					// Enabling/disabling the field's own editability — a discrete click, not a keystroke,
 					// so a full re-render here doesn't cost focus the way it would mid-typing.
 					this.render();
@@ -521,7 +530,7 @@ export class ApiSourceModal extends Modal {
 		if (this.sampleFields.length === 0 && this.arrayFieldCandidates.length === 0 && !Array.isArray(result.json)) {
 			new Notice("Atlas: response is not a JSON list and has no array field to pick.");
 		}
-		this.renderPreservingScroll();
+		this.render();
 	}
 
 	/** G3: "The Test button, Fetch sample and Save all use the active mode." Runs the active mode's
@@ -562,7 +571,7 @@ export class ApiSourceModal extends Modal {
 
 			this.testResult = parts.join(", ");
 		}
-		this.renderPreservingScroll();
+		this.render();
 	}
 
 	private save(): void {
