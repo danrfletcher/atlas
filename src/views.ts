@@ -18,6 +18,7 @@ import {
 	createEmptyView,
 	rewritePathString,
 	rewriteRefPath,
+	unitRefKey,
 	unitRefsEqual,
 	unitToRef,
 } from "./types";
@@ -193,6 +194,7 @@ function sanitizeFolderSource(node: ViewNode): void {
 	const rawMinutes = raw.refreshEveryMinutes;
 	const validMinutes = typeof rawMinutes === "number" && Number.isFinite(rawMinutes);
 	const refreshEveryMinutes = validMinutes ? clampRefreshMinutes(rawMinutes) : undefined;
+	const rawRemoved = raw.removedRefs;
 	node.folderSource = {
 		type: "folder",
 		location: raw.location === "outside" ? "outside" : "inside",
@@ -202,6 +204,9 @@ function sanitizeFolderSource(node: ViewNode): void {
 		refreshOnViewLoad: !!raw.refreshOnViewLoad,
 		refreshEveryMinutesEnabled: !!raw.refreshEveryMinutesEnabled && refreshEveryMinutes !== undefined,
 		refreshEveryMinutes,
+		// R1 fix: `unitRefKey` strings the user has removed from this source's managed set — any
+		// non-string entry (hand-edited `data.json`) is dropped rather than rejecting the whole list.
+		removedRefs: Array.isArray(rawRemoved) ? rawRemoved.filter((key): key is string => typeof key === "string") : undefined,
 	};
 }
 
@@ -498,10 +503,28 @@ export class ViewsManager {
 	 * `unplaceUnit`/`deleteMetaFolder`. */
 	unplaceNode(viewId: string, nodeId: string): void {
 		const view = this.getView(viewId);
-		const found = view && this.findNode(view.root, nodeId);
+		if (!view) return;
+		const found = this.findNode(view.root, nodeId);
 		if (!found) return;
+		this.rememberFolderSourceRemoval(view, found.node);
 		found.siblings.splice(found.index, 1, ...found.node.children);
 		this.save();
+	}
+
+	/** R1 fix: when a Folder-source-managed row is removed from the view entirely (not moved or
+	 * renested elsewhere, which `refreshFolderSource`'s whole-view search already tolerates without
+	 * this), remembers its ref on the owning source's `removedRefs` so the next refresh treats it as
+	 * "the user removed this," not "never resolved yet," and doesn't recreate it — the same permanence
+	 * any other removal in this codebase already has. No-op for a node that isn't Folder-source-managed,
+	 * or whose owning node no longer carries a Folder source. */
+	private rememberFolderSourceRemoval(view: View, node: ViewNode): void {
+		if (!node.folderSourceManaged || !node.ref || !node.folderSourceOwnerId) return;
+		const owner = this.findNode(view.root, node.folderSourceOwnerId);
+		const source = owner?.node.folderSource;
+		if (!source) return;
+		const key = unitRefKey(node.ref);
+		if (!source.removedRefs) source.removedRefs = [key];
+		else if (!source.removedRefs.includes(key)) source.removedRefs.push(key);
 	}
 
 	addMetaFolder(viewId: string, parentId: string | null, label: string): ViewNode | null {
@@ -790,15 +813,24 @@ export class ViewsManager {
 	 * never creates/moves/deletes anything on disk (F5). */
 	refreshFolderSource(viewId: string, nodeId: string): void {
 		const view = this.getView(viewId);
-		const found = view && this.findNode(view.root, nodeId);
+		if (!view) return;
+		const found = this.findNode(view.root, nodeId);
 		if (!found || found.node.type !== "meta" || !found.node.folderSource) return;
-		found.node.children = buildFolderSourceChildren(this.app.vault, found.node.folderSource, found.node.children, (ref) => ({
-			id: generateNodeId(),
-			type: "unit",
-			ref,
-			children: [],
-			folderSourceManaged: true,
-		}));
+		const ownerId = found.node.id;
+		found.node.children = buildFolderSourceChildren(
+			this.app.vault,
+			found.node.folderSource,
+			found.node.children,
+			(ref) => ({
+				id: generateNodeId(),
+				type: "unit",
+				ref,
+				children: [],
+				folderSourceManaged: true,
+				folderSourceOwnerId: ownerId,
+			}),
+			{ sourceNodeId: ownerId, viewRoot: view.root }
+		);
 		this.save();
 	}
 
