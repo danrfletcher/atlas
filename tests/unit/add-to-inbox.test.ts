@@ -1,13 +1,28 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { App, TFile } from "obsidian";
+import type { CachedMetadata } from "obsidian";
+import * as obsidianMock from "obsidian";
 import { AddFileSuggestModal, AtlasExplorerView, candidateFilesForAdd } from "../../src/explorer-view";
-import type { Unit, UnitRef } from "../../src/types";
+import type { Unit, UnitRef, View } from "../../src/types";
+import { createEmptyView } from "../../src/types";
 import { seedRoot } from "../helpers";
+import { DEFAULT_SETTINGS } from "../../src/settings";
+import { UnitIndex } from "../../src/unit-index";
 
 const file = (path: string): UnitRef => ({ kind: "file", path });
 
 function filesOf(app: App, paths: string[]): TFile[] {
 	return paths.map((p) => app.vault.getAbstractFileByPath(p) as TFile);
+}
+
+/** Mirrors `unit-index.test.ts`'s `stubLinks` — wires `getFileCache`/`getFirstLinkpathDest` so a
+ * real `UnitIndex.rebuild()` sees the given link graph. */
+function stubLinks(app: App, caches: Record<string, CachedMetadata>, resolve: Record<string, string>): void {
+	app.metadataCache.getFileCache = ((f: TFile) => caches[f.path] ?? null) as App["metadataCache"]["getFileCache"];
+	app.metadataCache.getFirstLinkpathDest = ((linkpath: string) => {
+		const destPath = resolve[linkpath];
+		return destPath ? (app.vault.getAbstractFileByPath(destPath) as TFile) : null;
+	}) as App["metadataCache"]["getFirstLinkpathDest"];
 }
 
 // --- candidateFilesForAdd: G2 exclusion rules, F3 eligibility-blindness -----------------------------
@@ -44,6 +59,14 @@ describe("candidateFilesForAdd (G2, E4, F3)", () => {
 		const units: Unit[] = [{ type: "added-file", path: "Areas/Added.md" }];
 		const result = candidateFilesForAdd(app.vault.getFiles(), units, () => false);
 		expect(result.map((f) => f.path).sort()).toEqual(["Other.md"]);
+	});
+
+	it("R2: a file whose only unit is a promoted block (no file-level unit) is still offered — a block unit is not 'the file already present as a unit' (G2)", () => {
+		const app = new App();
+		seedRoot(app, ["ModuleA/WithBlock.md", "Other.md"], ["ModuleA"]);
+		const units: Unit[] = [{ type: "promoted-block", path: "ModuleA/WithBlock.md", subpath: "^abc123" }];
+		const result = candidateFilesForAdd(app.vault.getFiles(), units, () => false);
+		expect(result.map((f) => f.path).sort()).toEqual(["ModuleA/WithBlock.md", "Other.md"]);
 	});
 
 	it("G2: excludes a file already placed/nested as a node in any view, even though it is not classified as any Unit", () => {
@@ -86,6 +109,42 @@ describe("candidateFilesForAdd (G2, E4, F3)", () => {
 		const units: Unit[] = [{ type: "added-file", path: "Only.md" }];
 		expect(() => candidateFilesForAdd(app.vault.getFiles(), units, () => false)).not.toThrow();
 		expect(candidateFilesForAdd(app.vault.getFiles(), units, () => false)).toEqual([]);
+	});
+
+	// R4(d): the hand-built Unit[] fixtures above are what let R1/R2 go unnoticed — a real UnitIndex
+	// computes promoted-block/promoted-file classifications itself, so feeding its actual getUnits()
+	// output through here exercises the same code path a live vault would.
+	it("integration: against a real UnitIndex, a file whose only unit is a promoted block stays a candidate, and an added file survives a later block reference into it (R1, R2)", () => {
+		const app = new App();
+		seedRoot(
+			app,
+			["ModuleA/Source.md", "ModuleA/WithBlock.md", "Areas/Added.md", "Areas/Eligible.md"],
+			["ModuleA", "Areas"],
+		);
+		stubLinks(
+			app,
+			{
+				"ModuleA/Source.md": {
+					links: [
+						{ link: "WithBlock#^b1", original: "[[WithBlock#^b1]]" } as never,
+						{ link: "Added#^b2", original: "[[Added#^b2]]" } as never,
+					],
+				},
+			},
+			{ WithBlock: "ModuleA/WithBlock.md", Added: "Areas/Added.md" },
+		);
+		const index = new UnitIndex(app, DEFAULT_SETTINGS, [], {}, [], [{ ref: file("Areas/Added.md"), tag: "added" }]);
+		index.rebuild();
+
+		const result = candidateFilesForAdd(app.vault.getFiles(), index.getUnits(), () => false).map((f) => f.path).sort();
+
+		// WithBlock.md has only a promoted-block unit — R2 says that's not "already a unit" for G2's
+		// purposes, so it must still be offered.
+		expect(result).toContain("ModuleA/WithBlock.md");
+		expect(result).toContain("Areas/Eligible.md");
+		// Added.md is already an added-file unit (surfaced per R1/R3 despite the block reference into
+		// it) — it must be excluded so "+" can't double-add it.
+		expect(result).not.toContain("Areas/Added.md");
 	});
 });
 
@@ -206,6 +265,25 @@ describe("AtlasExplorerView.openAddFileModal (G2, G3, E4, GP3)", () => {
 		expect(fake.plugin.flushSave).not.toHaveBeenCalled();
 		expect(fake.render).not.toHaveBeenCalled();
 	});
+
+	it("R4(c): a folder in the vault is never offered — the candidate source is app.vault.getFiles(), which never includes folders", () => {
+		const app = new App();
+		seedRoot(app, ["Areas/Notes.md"], ["Areas", "Areas/Sub"]);
+		const files = app.vault.getFiles();
+		// getFiles() itself never returns a folder; assert that directly so a future change to the
+		// candidate source (e.g. switching to getAllLoadedFiles()) would be caught here.
+		expect(files.every((f) => f instanceof TFile)).toBe(true);
+		const fake = fakeFor([], files);
+
+		let built: AddFileSuggestModal | undefined;
+		vi.spyOn(AddFileSuggestModal.prototype, "open").mockImplementation(function (this: AddFileSuggestModal) {
+			built = this;
+		});
+
+		callOpenAddFileModal(fake);
+
+		expect(built!.getItems().map((f) => f.path)).toEqual(["Areas/Notes.md"]);
+	});
 });
 
 // --- renderInboxRow: "added" badge rendering (G3), distinct from and mutually exclusive with
@@ -269,5 +347,95 @@ describe("renderInboxRow — added badge (G3)", () => {
 			missing: false,
 		});
 		expect(row.querySelectorAll(".atlas-badge").length).toBe(0);
+	});
+});
+
+// --- renderInboxSection header: "+" icon placement/tooltip (G1), This view/Global toggle regression
+// (R4a, R4b) ------------------------------------------------------------------------------------------
+
+type FakeSectionThis = {
+	inboxCollapsed: boolean;
+	plugin: { viewsManager: { setInboxMode: ReturnType<typeof vi.fn> }; app: { vault: App["vault"] } };
+	openAddFileModal: ReturnType<typeof vi.fn>;
+	matchesFilter: ReturnType<typeof vi.fn>;
+	sortMode: string;
+	inboxSelectOrder: string[];
+	inboxRefByKey: Map<string, UnitRef>;
+	// units=[] in every test below means neither of these is ever exercised for real content — stubbed
+	// only so the unconditional calls `renderInboxSection` makes don't hit the real (heavy) prototype
+	// methods, which need far more of `this` than this header-focused test fakes.
+	renderVirtualizedInboxRows: ReturnType<typeof vi.fn>;
+	makeDropZone: ReturnType<typeof vi.fn>;
+};
+
+function fakeSectionThis(app: App): FakeSectionThis {
+	return {
+		inboxCollapsed: false,
+		plugin: { viewsManager: { setInboxMode: vi.fn() }, app: { vault: app.vault } },
+		openAddFileModal: vi.fn(),
+		matchesFilter: vi.fn(() => true),
+		sortMode: "alphabetical",
+		inboxSelectOrder: [],
+		inboxRefByKey: new Map(),
+		renderVirtualizedInboxRows: vi.fn(),
+		makeDropZone: vi.fn(),
+	};
+}
+
+function callRenderInboxSection(fake: FakeSectionThis, container: HTMLElement, view: View): Promise<void> {
+	return (
+		AtlasExplorerView.prototype as unknown as {
+			renderInboxSection: (this: FakeSectionThis, container: HTMLElement, view: View, units: Unit[], viewportScrollTop: number) => Promise<void>;
+		}
+	).renderInboxSection.call(fake, container, view, [], 0);
+}
+
+describe("renderInboxSection header (G1, R4a, R4b)", () => {
+	it("R4a: renders a '.atlas-inbox-add-btn' with the 'plus' icon and the 'Add file to inbox' tooltip, next to '.atlas-inbox-mode', and clicking it opens the modal without toggling collapse", async () => {
+		const app = new App();
+		const setIconSpy = vi.spyOn(obsidianMock, "setIcon");
+		const setTooltipSpy = vi.spyOn(obsidianMock, "setTooltip");
+		const fake = fakeSectionThis(app);
+		const container = document.createElement("div");
+
+		await callRenderInboxSection(fake, container, createEmptyView("v1", "Default"));
+
+		const header = container.querySelector(".atlas-section-header")!;
+		const addBtn = header.querySelector<HTMLElement>(".atlas-inbox-add-btn")!;
+		expect(addBtn).toBeTruthy();
+		expect(header.querySelector(".atlas-inbox-mode")).toBeTruthy();
+		// Sibling of (not nested inside) .atlas-inbox-mode, per the G1 implementation note.
+		expect(addBtn.parentElement).toBe(header);
+
+		expect(setIconSpy).toHaveBeenCalledWith(addBtn, "plus");
+		expect(setTooltipSpy).toHaveBeenCalledWith(addBtn, "Add file to inbox");
+
+		addBtn.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+		expect(fake.openAddFileModal).toHaveBeenCalledTimes(1);
+		// The header's own click listener (added after the add button's, which stopPropagation()s)
+		// toggles collapse — clicking "+" must never trigger that.
+		expect(fake.inboxCollapsed).toBe(false);
+
+		setIconSpy.mockRestore();
+		setTooltipSpy.mockRestore();
+	});
+
+	it("R4b: the 'This view'/'Global' toggle still renders with the '+' icon present, and clicking a mode button still switches modes", async () => {
+		const app = new App();
+		const fake = fakeSectionThis(app);
+		const container = document.createElement("div");
+		const view = createEmptyView("v1", "Default");
+
+		await callRenderInboxSection(fake, container, view);
+
+		const header = container.querySelector(".atlas-section-header")!;
+		const modeToggle = header.querySelector(".atlas-inbox-mode")!;
+		const buttons = Array.from(modeToggle.querySelectorAll<HTMLElement>(".atlas-inbox-mode-btn"));
+		expect(buttons.map((b) => b.textContent)).toEqual(["This view", "Global"]);
+		expect(header.querySelector(".atlas-inbox-add-btn")).toBeTruthy();
+
+		const globalBtn = buttons.find((b) => b.textContent === "Global")!;
+		globalBtn.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+		expect(fake.plugin.viewsManager.setInboxMode).toHaveBeenCalledWith("v1", "global");
 	});
 });

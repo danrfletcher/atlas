@@ -117,8 +117,15 @@ export class AddFileSuggestModal extends FuzzySuggestModal<TFile> {
  * modal can never produce a duplicate inbox row. List-level exclusion only: no runtime dedupe is
  * exercised once a file is chosen. */
 export function candidateFilesForAdd(allFiles: TFile[], units: Unit[], isPlacedAnywhere: (ref: UnitRef) => boolean): TFile[] {
-	const unitPaths = new Set(units.map((unit) => unit.path));
-	return allFiles.filter((file) => !unitPaths.has(file.path) && !isPlacedAnywhere({ kind: "file", path: file.path }));
+	// R2: only a *file-kind* ref counts as "the file already present as a unit" (G2) — a promoted-block
+	// unit's `.path` is its containing file's path even though it's kind "block" (per `unitToRef`), so
+	// comparing bare paths wrongly excluded a file whose only unit is a promoted block from this list.
+	const fileRefKeys = new Set(
+		units.filter((unit) => unitToRef(unit).kind === "file").map((unit) => unitRefKey(unitToRef(unit)))
+	);
+	return allFiles.filter(
+		(file) => !fileRefKeys.has(unitRefKey({ kind: "file", path: file.path })) && !isPlacedAnywhere({ kind: "file", path: file.path })
+	);
 }
 
 /** PR 9 (issue 2): replaces inline fold/unfold for modules with a browsable read-only tree of the
