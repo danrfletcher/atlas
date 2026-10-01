@@ -33,8 +33,5 @@
 	"activeViewId": "default",
 	"expandedModuleFolders": ["Projects/Sub"],
 	"statusSets": [],
-	"colorPalette": ["#ff0000"],
-	"dismissedByView": { "default": [{ "kind": "file", "path": "Bar.md" }] },
-	"dismissedGlobal": [],
-	"addedItems": []
+	"colorPalette": ["#ff0000"]
 }

@@ -15,11 +15,15 @@ describe("data compatibility (a v0.2.1 data.json)", () => {
 		expect(Object.keys(DEFAULT_SETTINGS).sort()).toEqual(Object.keys(data.settings).sort());
 	});
 
-	it("persisted AtlasData keys are unchanged", () => {
+	it("persisted AtlasData keys are the v0.2.1 fixture's keys plus PR-2's new fields", () => {
 		const main = read("src/main.ts");
 		const block = main.slice(main.indexOf("await this.saveData({"), main.indexOf("} satisfies AtlasData"));
 		const keys = [...block.matchAll(/^\s+(\w+):/gm)].map((m) => m[1]).sort();
-		expect(keys).toEqual(Object.keys(data).sort());
+		// PR-2 added dismissedByView/dismissedGlobal/addedItems: absent from this v0.2.1 fixture
+		// (so it still proves old-data compatibility), named explicitly so a future key addition
+		// doesn't silently hide in this list the way PR-2's did before.
+		const newPr2Keys = ["dismissedByView", "dismissedGlobal", "addedItems"];
+		expect(keys).toEqual([...Object.keys(data), ...newPr2Keys].sort());
 	});
 
 	it("views and promotions load and re-save byte-identical, including after non-matching helper calls", () => {
