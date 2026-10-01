@@ -191,6 +191,68 @@ describe("UnitIndex.computePromotions — fence regressions", () => {
 		expect(promotedFilePaths(index)).toEqual(["ModuleB/Target.md"]);
 	});
 
+	it("F5 (R4): a reference from an excluded source folder never promotes, even though the target is cross-module", () => {
+		const { index } = makeIndex(
+			["_to_delete/Ghost.md", "ModuleB/Target.md"],
+			["_to_delete", "ModuleB"],
+			{
+				"_to_delete/Ghost.md": {
+					links: [{ link: "Target", original: "[[Target]]" } as never],
+				},
+			},
+			{ Target: "ModuleB/Target.md" },
+			[],
+			{ excludedFolders: ["_to_delete"] },
+		);
+		expect(promotedFilePaths(index)).toEqual([]);
+	});
+
+	it("F5 (R4): a reference to a target inside an excluded folder never promotes", () => {
+		const { index } = makeIndex(
+			["ModuleA/Source.md", "_to_delete/Ghost.md"],
+			["ModuleA", "_to_delete"],
+			{
+				"ModuleA/Source.md": {
+					links: [{ link: "Ghost", original: "[[Ghost]]" } as never],
+				},
+			},
+			{ Ghost: "_to_delete/Ghost.md" },
+			[],
+			{ excludedFolders: ["_to_delete"] },
+		);
+		expect(promotedFilePaths(index)).toEqual([]);
+	});
+
+	it("F5 (R4): a plain (subpath-less) reference to a pool free block never promotes the file — a free block has no module to record", () => {
+		const { index } = makeIndex(
+			["ModuleA/Source.md", "_pool/Abc.md"],
+			["ModuleA", "_pool"],
+			{
+				"ModuleA/Source.md": {
+					links: [{ link: "Abc", original: "[[Abc]]" } as never],
+				},
+			},
+			{ Abc: "_pool/Abc.md" },
+			[],
+			{ excludedFolders: ["_pool"] }, // mirrors computeDefaultExcludedFolders(), which always excludes the pool folder itself
+		);
+		expect(promotedFilePaths(index)).toEqual([]);
+	});
+
+	it("F5 (R4): a plain (subpath-less) reference to a vault-root file never promotes the file — a vault-root file has no module to record", () => {
+		const { index } = makeIndex(
+			["ModuleA/Source.md", "Root.md"],
+			["ModuleA"],
+			{
+				"ModuleA/Source.md": {
+					links: [{ link: "Root", original: "[[Root]]" } as never],
+				},
+			},
+			{ Root: "Root.md" },
+		);
+		expect(promotedFilePaths(index)).toEqual([]);
+	});
+
 	it("interface-note promotion is unaffected by either fix — still only reached via the subpath-less branch, after the module check", () => {
 		// The linked interface note (`Sub/Sub.md`) is nested inside ModuleA, distinct from ModuleA
 		// itself, so promoting it (as a folder) is observable — unlike linking a module's own
