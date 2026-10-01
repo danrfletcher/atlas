@@ -86,6 +86,10 @@ export class ApiSourceModal extends Modal {
 	private folderPath: string;
 	private showFiles: boolean;
 	private showFolders: boolean;
+	/** R1 fix: refs the user has removed from this source's managed set, carried through unedited —
+	 * saving after only changing a toggle or path must not forget them and let reconcile resurrect
+	 * rows the user deliberately removed. */
+	private removedRefs: string[] | undefined;
 
 	constructor(
 		app: App,
@@ -126,6 +130,7 @@ export class ApiSourceModal extends Modal {
 			this.refreshEveryMinutesEnabled = initialFolderSource.refreshEveryMinutesEnabled ?? false;
 			this.refreshEveryMinutesRaw =
 				initialFolderSource.refreshEveryMinutes !== undefined ? String(initialFolderSource.refreshEveryMinutes) : "";
+			this.removedRefs = initialFolderSource.removedRefs;
 		}
 	}
 
@@ -166,6 +171,7 @@ export class ApiSourceModal extends Modal {
 		this.folderPath = "";
 		this.showFiles = true;
 		this.showFolders = true;
+		this.removedRefs = undefined;
 		this.resetSharedRefreshFields();
 	}
 
@@ -816,6 +822,7 @@ export class ApiSourceModal extends Modal {
 				refreshOnViewLoad: this.refreshOnViewLoad,
 				refreshEveryMinutesEnabled: this.refreshEveryMinutesEnabled,
 				refreshEveryMinutes: refreshEveryMinutesValidation?.ok ? refreshEveryMinutesValidation.minutes : undefined,
+				removedRefs: this.removedRefs,
 			};
 			this.close();
 			this.onSave({ type: "folder", source });
