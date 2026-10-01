@@ -73,6 +73,7 @@ export class TAbstractFile {
 
 export class TFile extends TAbstractFile {
 	extension = "md";
+	stat = { ctime: 0, mtime: 0, size: 0 };
 	get basename(): string {
 		return this.name.slice(0, this.name.length - this.extension.length - 1);
 	}

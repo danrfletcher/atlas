@@ -8,6 +8,7 @@ import { createEmptyView } from "../../src/types";
 import { seedRoot } from "../helpers";
 import { DEFAULT_SETTINGS } from "../../src/settings";
 import { UnitIndex } from "../../src/unit-index";
+import { resolveUnit } from "../../src/unit-display";
 
 const file = (path: string): UnitRef => ({ kind: "file", path });
 
@@ -309,6 +310,48 @@ function callRenderInboxRow(container: HTMLElement, ref: UnitRef, info: FakeRowI
 		}
 	).renderInboxRow.call(fake, container, ref, info);
 }
+
+// --- resolveUnit/resolveRef: added-file units carry added:true/promoted:false end to end (R5) ------
+
+describe("resolveUnit on an added-file unit from a real UnitIndex (G3, R5)", () => {
+	it("markAdded on a file that fails auto-promotion eligibility (no outside-module references) yields a unit that resolves to added: true, promoted: false", async () => {
+		const app = new App();
+		seedRoot(app, ["Areas/Career/Notes.md"], ["Areas", "Areas/Career"]);
+		const index = new UnitIndex(app, DEFAULT_SETTINGS, [], {}, [], []);
+		index.rebuild();
+		index.markAdded(file("Areas/Career/Notes.md"));
+
+		const units = index.getUnits();
+		const addedUnit = units.find((u) => u.path === "Areas/Career/Notes.md");
+		expect(addedUnit?.type).toBe("added-file");
+
+		const resolved = await resolveUnit(app, DEFAULT_SETTINGS, addedUnit!);
+		expect(resolved?.added).toBe(true);
+		expect(resolved?.promoted).toBe(false);
+	});
+
+	it("renders through renderInboxRow with exactly one '.atlas-badge' reading 'added'", async () => {
+		const app = new App();
+		seedRoot(app, ["Areas/Career/Notes.md"], ["Areas", "Areas/Career"]);
+		const index = new UnitIndex(app, DEFAULT_SETTINGS, [], {}, [], []);
+		index.rebuild();
+		index.markAdded(file("Areas/Career/Notes.md"));
+
+		const addedUnit = index.getUnits().find((u) => u.path === "Areas/Career/Notes.md")!;
+		const resolved = await resolveUnit(app, DEFAULT_SETTINGS, addedUnit);
+
+		const container = document.createElement("div");
+		const row = callRenderInboxRow(container, file("Areas/Career/Notes.md"), {
+			text: resolved!.text,
+			icon: resolved!.icon,
+			promoted: resolved!.promoted,
+			added: resolved!.added,
+			missing: false,
+		});
+		const badges = Array.from(row.querySelectorAll(".atlas-badge")).map((b) => b.textContent);
+		expect(badges).toEqual(["added"]);
+	});
+});
 
 describe("renderInboxRow — added badge (G3)", () => {
 	it("renders an 'added' badge (atlas-badge class, 'added' text) when info.added is true, and no 'promoted' badge", () => {
