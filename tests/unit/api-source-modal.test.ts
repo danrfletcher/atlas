@@ -584,9 +584,86 @@ describe("PR-3 — source type dropdown and modal-body switching", () => {
 		(modal as any).saveButton.simulateClick();
 		expect(onSave).not.toHaveBeenCalled();
 
-		// Still blocked after selecting a stub type — Folder/Table/CSV have no config of their own to
-		// ever become savable against in this PR.
+		// Still blocked after selecting a stub type — Table/CSV have no config of their own to ever
+		// become savable against in this PR.
+		settingNamed(modal, "Source type").components[0].select("markdown-table");
+		expect((modal as any).saveButton.disabled).toBe(true);
+
+		// Folder (PR-4) has a real config section, but Save stays blocked until a folder path is
+		// chosen — the selector starts empty (GP1/PR-3 contract), not defaulted to anything.
 		settingNamed(modal, "Source type").components[0].select("folder");
 		expect((modal as any).saveButton.disabled).toBe(true);
+	});
+});
+
+describe("PR-4 — Folder source config section", () => {
+	it("selecting Folder + Inside vault renders the folder path field and both Show toggles, path starting empty", () => {
+		const modal = new ApiSourceModal({} as any, null, [], vi.fn());
+		(modal as any).onOpen();
+
+		settingNamed(modal, "Source type").components[0].select("folder");
+
+		expect(settingNamed(modal, "Location").components[0].value).toBe("inside");
+		const folderField = settingNamed(modal, "Folder").components[0];
+		expect(folderField.value).toBe("");
+		expect(settingNamed(modal, "Show files").components[0].value).toBe(true);
+		expect(settingNamed(modal, "Show folders").components[0].value).toBe(true);
+		// G10: the same shared refresh toggles as "api", both off by default.
+		expect(settingNamed(modal, "Refresh when Atlas view loads").components[0].value).toBe(false);
+		expect(settingNamed(modal, "Refresh every").components[0].value).toBe(false);
+	});
+
+	it("selecting Outside vault shows a deferred-to-PR-5 stub instead of the folder config", () => {
+		const modal = new ApiSourceModal({} as any, null, [], vi.fn());
+		(modal as any).onOpen();
+
+		settingNamed(modal, "Source type").components[0].select("folder");
+		settingNamed(modal, "Location").components[0].select("outside");
+
+		expect(settingNamed(modal, "Folder")).toBeUndefined();
+		expect(settingNamed(modal, "Show files")).toBeUndefined();
+	});
+
+	it("Save stays disabled until a folder path is entered, then saves a FolderSourceConfig", () => {
+		const onSave = vi.fn();
+		const modal = new ApiSourceModal({} as any, null, [], onSave);
+		(modal as any).onOpen();
+
+		settingNamed(modal, "Source type").components[0].select("folder");
+		expect((modal as any).saveButton.disabled).toBe(true);
+
+		settingNamed(modal, "Folder").components[0].type("Projects/Active");
+		expect((modal as any).saveButton.disabled).toBe(false);
+
+		(modal as any).saveButton.simulateClick();
+		expect(onSave).toHaveBeenCalledWith({
+			type: "folder",
+			source: expect.objectContaining({
+				type: "folder",
+				location: "inside",
+				path: "Projects/Active",
+				showFiles: true,
+				showFolders: true,
+			}),
+		});
+	});
+
+	it("an existing FolderSourceConfig pre-selects Folder and restores its fields", () => {
+		const folderSource = {
+			location: "inside" as const,
+			path: "Archive",
+			showFiles: false,
+			showFolders: true,
+			refreshOnViewLoad: true,
+			refreshEveryMinutesEnabled: false,
+		};
+		const modal = new ApiSourceModal({} as any, null, [], vi.fn(), folderSource);
+		(modal as any).onOpen();
+
+		expect(settingNamed(modal, "Source type").components[0].value).toBe("folder");
+		expect(settingNamed(modal, "Folder").components[0].value).toBe("Archive");
+		expect(settingNamed(modal, "Show files").components[0].value).toBe(false);
+		expect(settingNamed(modal, "Show folders").components[0].value).toBe(true);
+		expect(settingNamed(modal, "Refresh when Atlas view loads").components[0].value).toBe(true);
 	});
 });
