@@ -164,7 +164,17 @@ export interface ApiFieldMapping {
 	extraFields?: Record<string, string>;
 }
 
+/** PR-3 (G1): the data-source modal's type selector. `ApiSourceConfig` is the only shape this PR
+ * actually builds — `folder`/`markdown-table`/`csv` are stub shapes with nothing but the discriminant
+ * itself, existing purely so the union/mechanism is in place for PR-4 through PR-8 to grow into
+ * without altering this PR's code. */
+export type DataSourceType = "api" | "folder" | "markdown-table" | "csv";
+
 export interface ApiSourceConfig {
+	/** PR-3 (G1): optional, not required, so a source persisted before this PR (with no `type` at all)
+	 * still loads as an API source — only the modal's own in-memory state treats "no type selected" as
+	 * meaningfully different from "api". */
+	type?: "api";
 	url: string;
 	/** GET only in this PR (G1) — the type exists so a later PR's JS/other-method work has somewhere to
 	 * grow into, without this PR's own code ever producing or accepting anything else. */
@@ -204,6 +214,25 @@ export interface ApiSourceConfig {
 	/** PR-5 (G9b): command string executed in the background when action is "run-command". */
 	command?: string;
 }
+
+/** PR-3 (G1) stubs: no fields of their own yet — PR-4 (Folder), PR-7 (Markdown Table) and PR-8 (CSV)
+ * replace each with its real config shape. They exist only so `DataSourceConfig` below is already a
+ * real discriminated union by the time those PRs land, instead of each one having to introduce the
+ * union mechanism itself. */
+export interface FolderSourceConfigStub {
+	type: "folder";
+}
+export interface MarkdownTableSourceConfigStub {
+	type: "markdown-table";
+}
+export interface CsvSourceConfigStub {
+	type: "csv";
+}
+
+/** PR-3 (G1): the sibling-shapes union `ApiSourceConfig`'s new `type` field exists to support —
+ * `ViewNode.apiSource` itself stays `ApiSourceConfig`-typed until a later PR actually implements
+ * Folder/Table/CSV persistence; this union is exercised today only inside `ApiSourceModal`. */
+export type DataSourceConfig = ApiSourceConfig | FolderSourceConfigStub | MarkdownTableSourceConfigStub | CsvSourceConfigStub;
 
 /** A row exactly as mapped from a response — this is all the cache ever holds, never the raw
  * response (G13, E9). */
