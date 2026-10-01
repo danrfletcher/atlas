@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { App } from "obsidian";
-import { TFolder, Vault } from "../../tests/mocks/obsidian";
+import { App as MockApp, TFolder, Vault } from "../../tests/mocks/obsidian";
 import { buildFolderSourceChildren, folderToRows, isAncestorOrSelf, reconcileManagedChildren } from "../../src/folder-source";
 import { ViewsManager } from "../../src/views";
 import { FolderSourceConfig, UnitRef, ViewNode } from "../../src/types";
@@ -127,6 +127,28 @@ describe("reconcileManagedChildren — G7/G9/E2", () => {
 		);
 		expect(result).toEqual([existing]);
 	});
+
+	it("R1: does not duplicate a ref already managed elsewhere in the view (dedupe.managedElsewhere)", () => {
+		const result = reconcileManagedChildren(
+			[],
+			[{ kind: "file", path: "Projects/a.md" }],
+			{ showFiles: true, showFolders: true },
+			(ref) => unitNode(ref, { folderSourceManaged: true }),
+			{ managedElsewhere: new Set(["file:Projects/a.md"]) }
+		);
+		expect(result).toEqual([]);
+	});
+
+	it("R1: does not recreate a ref the user explicitly removed (dedupe.removedRefs)", () => {
+		const result = reconcileManagedChildren(
+			[],
+			[{ kind: "file", path: "Projects/a.md" }],
+			{ showFiles: true, showFolders: true },
+			(ref) => unitNode(ref, { folderSourceManaged: true }),
+			{ removedRefs: new Set(["file:Projects/a.md"]) }
+		);
+		expect(result).toEqual([]);
+	});
 });
 
 describe("buildFolderSourceChildren — G16/E1", () => {
@@ -177,6 +199,23 @@ describe("buildFolderSourceChildren — G16/E1", () => {
 		vault.seedFolder("Projects/Sub");
 		expect(isAncestorOrSelf("Projects", "Projects")).toBe(true);
 		expect(() => buildFolderSourceChildren(vault, source({ path: "Projects" }), [], (ref) => unitNode(ref, { folderSourceManaged: true }))).not.toThrow();
+	});
+
+	it("R2: keeps existing managed rows as-is when the target folder stops resolving, instead of collapsing them into a sentinel", () => {
+		const nestedChild = unitNode({ kind: "file", path: "Projects/Sub/inner.md" });
+		const managedFolder = unitNode(
+			{ kind: "folder", path: "Projects/Sub" },
+			{ folderSourceManaged: true, children: [nestedChild], explicitStatusId: "done" }
+		);
+		const managedFile = unitNode({ kind: "file", path: "Projects/a.md" }, { folderSourceManaged: true, collapsed: true });
+		const existing = [managedFolder, managedFile];
+
+		const result = buildFolderSourceChildren({ getAbstractFileByPath: () => null }, source({ path: "Projects" }), existing, (ref) =>
+			unitNode(ref, { folderSourceManaged: true })
+		);
+
+		expect(result).toBe(existing);
+		expect(result).toEqual([managedFolder, managedFile]);
 	});
 });
 
@@ -236,5 +275,71 @@ describe("ref-rewrite-on-rename — G5", () => {
 		vm.onVaultRename("Projects", "Renamed");
 
 		expect(vm.getNode(view.id, folder.id)!.folderSource!.path).toBe("Unrelated");
+	});
+});
+
+/** Counts how many nodes anywhere in the tree (recursively, not just direct children) carry `ref`. */
+function countRef(nodes: ViewNode[], ref: UnitRef): number {
+	let count = 0;
+	for (const node of nodes) {
+		if (node.ref && node.ref.kind === ref.kind && node.ref.path === ref.path) count += 1;
+		count += countRef(node.children, ref);
+	}
+	return count;
+}
+
+describe("R1 end-to-end — a managed row survives refresh after being moved or removed by hand", () => {
+	function makeRealViewsManager() {
+		const app = new MockApp();
+		app.vault.seedFolder("Projects");
+		app.vault.seedFile("Projects/a.md");
+		app.vault.seedFile("Projects/b.md");
+		const vm = new ViewsManager(app as unknown as App, [], "", () => {});
+		const view = vm.getViews()[0];
+		const folder = vm.addMetaFolder(view.id, null, "Folder source")!;
+		vm.setFolderSource(view.id, folder.id, source());
+		vm.refreshFolderSource(view.id, folder.id);
+		return { vm, view, folder };
+	}
+
+	it("nesting a managed child under another managed child, then refreshing, does not duplicate it", () => {
+		const { vm, view, folder } = makeRealViewsManager();
+		const aRef: UnitRef = { kind: "file", path: "Projects/a.md" };
+		const children = vm.getNode(view.id, folder.id)!.children;
+		const aNode = children.find((n) => n.ref && n.ref.path === "Projects/a.md")!;
+		const bNode = children.find((n) => n.ref && n.ref.path === "Projects/b.md")!;
+
+		expect(vm.moveNode(view.id, aNode.id, bNode.id, 0)).toBe(true);
+		vm.refreshFolderSource(view.id, folder.id);
+
+		expect(countRef(view.root, aRef)).toBe(1);
+		expect(vm.getNode(view.id, bNode.id)!.children.some((n) => n.id === aNode.id)).toBe(true);
+	});
+
+	it("dragging a managed child out to the view's top level, then refreshing, does not duplicate it", () => {
+		const { vm, view, folder } = makeRealViewsManager();
+		const aRef: UnitRef = { kind: "file", path: "Projects/a.md" };
+		const children = vm.getNode(view.id, folder.id)!.children;
+		const aNode = children.find((n) => n.ref && n.ref.path === "Projects/a.md")!;
+
+		expect(vm.moveNode(view.id, aNode.id, null, view.root.length)).toBe(true);
+		vm.refreshFolderSource(view.id, folder.id);
+
+		expect(countRef(view.root, aRef)).toBe(1);
+		expect(view.root.some((n) => n.id === aNode.id)).toBe(true);
+	});
+
+	it("removing a managed child via unplaceNode, then refreshing, does not resurrect it", () => {
+		const { vm, view, folder } = makeRealViewsManager();
+		const aRef: UnitRef = { kind: "file", path: "Projects/a.md" };
+		const children = vm.getNode(view.id, folder.id)!.children;
+		const aNode = children.find((n) => n.ref && n.ref.path === "Projects/a.md")!;
+
+		vm.unplaceNode(view.id, aNode.id);
+		expect(countRef(view.root, aRef)).toBe(0);
+
+		vm.refreshFolderSource(view.id, folder.id);
+
+		expect(countRef(view.root, aRef)).toBe(0);
 	});
 });
