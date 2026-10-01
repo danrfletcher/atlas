@@ -1,7 +1,7 @@
 import { Debouncer, Notice, Plugin, TFile, TFolder, WorkspaceLeaf, debounce } from "obsidian";
 import { AtlasSettingTab, AtlasSettings, DEFAULT_SETTINGS, computeDefaultExcludedFolders } from "./settings";
 import { UnitIndex } from "./unit-index";
-import { UnitRef, View } from "./types";
+import { AddedItem, UnitRef, View } from "./types";
 import { registerAddBlockCommand } from "./commands";
 import { AtlasLinkSuggest } from "./link-suggest";
 import { applySuggesterPrecedence, removeSuggesterPrecedence } from "./suggester-precedence";
@@ -30,11 +30,22 @@ interface AtlasData {
 	statusSets: StatusSet[];
 	/** PR 14: shared/global palette offered by every status-color picker. */
 	colorPalette: string[];
+	/** PR-2: per-view dismiss state (view id -> dismissed refs) plus one separate global-scope set —
+	 * a global dismiss is a single entry here, never enumerated into every view's own map. */
+	dismissedByView: Record<string, UnitRef[]>;
+	dismissedGlobal: UnitRef[];
+	/** PR-2: units manually added to the inbox via "+", distinct from `manualPromotions`. */
+	addedItems: AddedItem[];
 }
 
 export default class AtlasPlugin extends Plugin {
 	declare settings: AtlasSettings;
 	manualPromotions: UnitRef[];
+	/** PR-2: staged at load time, then handed to `UnitIndex`, which becomes authoritative — same
+	 * lifecycle as `manualPromotions` above. */
+	private dismissedByView: Record<string, UnitRef[]>;
+	private dismissedGlobal: UnitRef[];
+	private addedItems: AddedItem[];
 	/** PR 10: runtime form of `AtlasData.expandedModuleFolders` — a `Set` for O(1) membership checks
 	 * from the modal, which re-checks every visible subfolder's expanded state on each open. */
 	private expandedModuleFolders: Set<string>;
@@ -57,7 +68,14 @@ export default class AtlasPlugin extends Plugin {
 
 		this.persistDebounced = debounce(() => void this.persistNow(), 500, true);
 
-		this.unitIndex = new UnitIndex(this.app, this.settings, this.manualPromotions);
+		this.unitIndex = new UnitIndex(
+			this.app,
+			this.settings,
+			this.manualPromotions,
+			this.dismissedByView,
+			this.dismissedGlobal,
+			this.addedItems
+		);
 		this.viewsManager = new ViewsManager(
 			this.app,
 			data?.views ?? [],
@@ -79,7 +97,9 @@ export default class AtlasPlugin extends Plugin {
 			afterMove: () => void noticeIfLinksNotUpdated(this.app),
 			onHiddenMove: (oldPath, newPath) => {
 				// Obsidian sends no rename event for a file it has hidden, so replay the placement hooks.
-				if (this.unitIndex.rewriteManualPromotions(oldPath, newPath)) this.persistDebounced();
+				const manualChanged = this.unitIndex.rewriteManualPromotions(oldPath, newPath);
+				const dismissedChanged = this.unitIndex.rewriteDismissedAndAddedPaths(oldPath, newPath);
+				if (manualChanged || dismissedChanged) this.persistDebounced();
 				this.viewsManager.onVaultRename(oldPath, newPath);
 			},
 			openDialog: (options) => openNameDialog(this.app, options),
@@ -170,6 +190,9 @@ export default class AtlasPlugin extends Plugin {
 	private loadFromData(data: AtlasData | null): void {
 		this.settings = Object.assign({}, DEFAULT_SETTINGS, data?.settings);
 		this.manualPromotions = data?.manualPromotions ?? [];
+		this.dismissedByView = data?.dismissedByView ?? {};
+		this.dismissedGlobal = data?.dismissedGlobal ?? [];
+		this.addedItems = data?.addedItems ?? [];
 		this.expandedModuleFolders = new Set(data?.expandedModuleFolders ?? []);
 		if (!data) {
 			this.settings.excludedFolders = computeDefaultExcludedFolders(this.app, this.settings.poolFolder);
@@ -191,6 +214,9 @@ export default class AtlasPlugin extends Plugin {
 			expandedModuleFolders: Array.from(this.expandedModuleFolders),
 			statusSets: this.statusesManager.getStatusSets(),
 			colorPalette: this.statusesManager.getColorPalette(),
+			dismissedByView: this.unitIndex.getDismissedByView(),
+			dismissedGlobal: this.unitIndex.getDismissedGlobal(),
+			addedItems: this.unitIndex.getAddedItems(),
 		} satisfies AtlasData);
 	}
 
