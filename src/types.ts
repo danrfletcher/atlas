@@ -39,7 +39,10 @@ export type Unit =
 	| { type: "folder-unit"; path: string }
 	| { type: "promoted-file"; path: string; topLevelFolder: string }
 	| { type: "promoted-folder"; path: string; topLevelFolder: string }
-	| { type: "promoted-block"; path: string; subpath: string };
+	| { type: "promoted-block"; path: string; subpath: string }
+	/** PR-3 (G3): a file manually added to the inbox via "+" — see `AddedItem`. Always a file (the
+	 * "+" modal only ever offers `app.vault.getFiles()`, never a folder). */
+	| { type: "added-file"; path: string };
 
 export function unitKey(unit: Unit): string {
 	return unit.type === "promoted-block" ? `block:${unit.path}#${unit.subpath}` : `${unit.type}:${unit.path}`;

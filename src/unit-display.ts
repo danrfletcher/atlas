@@ -10,6 +10,9 @@ export interface ResolvedUnit {
 	secondary?: string;
 	icon: string;
 	promoted: boolean;
+	/** PR-3 (G3): true for a unit manually added via the inbox "+" modal — renders an "added" badge
+	 * instead of (never alongside) the "promoted" badge. */
+	added: boolean;
 	/** ctime of the underlying file/folder, for the inbox's "newest first" default sort. */
 	ctime: number;
 }
@@ -45,26 +48,28 @@ export async function resolveUnit(
 	const file = app.vault.getAbstractFileByPath(unit.path);
 	if (!file) return null;
 	const promoted = unit.type === "promoted-file" || unit.type === "promoted-folder" || unit.type === "promoted-block";
+	const added = unit.type === "added-file";
 
 	switch (unit.type) {
 		case "root-file":
 		case "promoted-file":
+		case "added-file":
 			if (!(file instanceof TFile)) return null;
-			return { unit, text: file.basename, icon: iconFor(unit), promoted, ctime: file.stat.ctime };
+			return { unit, text: file.basename, icon: iconFor(unit), promoted, added, ctime: file.stat.ctime };
 		case "folder-unit":
 		case "promoted-folder":
 			if (!(file instanceof TFolder)) return null;
-			return { unit, text: file.name, icon: iconFor(unit), promoted, ctime: 0 };
+			return { unit, text: file.name, icon: iconFor(unit), promoted, added, ctime: 0 };
 		case "free-block": {
 			if (!(file instanceof TFile)) return null;
 			const cached = freeBlockCache?.get(unit.path);
 			const text = cached ?? (await getFreeBlockDisplayText(app, file, settings.blockDisplayLength));
-			return { unit, text, icon: iconFor(unit), promoted, ctime: file.stat.ctime };
+			return { unit, text, icon: iconFor(unit), promoted, added, ctime: file.stat.ctime };
 		}
 		case "promoted-block": {
 			if (!(file instanceof TFile)) return null;
 			const text = await getPromotedBlockDisplayText(app, file, unit.subpath, settings.blockDisplayLength);
-			return { unit, text, secondary: `in ${file.name}`, icon: iconFor(unit), promoted, ctime: file.stat.ctime };
+			return { unit, text, secondary: `in ${file.name}`, icon: iconFor(unit), promoted, added, ctime: file.stat.ctime };
 		}
 	}
 }

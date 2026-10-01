@@ -60,13 +60,22 @@ export class UnitIndex {
 	}
 
 	getUnits(): Unit[] {
-		const all = [
+		const base = [
 			...this.folderUnits.values(),
 			...this.baseFileUnits.values(),
 			...this.promotedFiles.values(),
 			...this.promotedFolders.values(),
 			...this.promotedBlocks.values(),
 		];
+		// PR-3 (E4): a file added via "+" can later become auto-/manually-promoted (or already be a
+		// root-file/pool unit); skip the added-file unit whenever another classification already
+		// covers the same path, so the row is never duplicated — the "added" provenance stays in
+		// storage but stops being surfaced once a stronger classification exists.
+		const knownPaths = new Set(base.map((unit) => unit.path));
+		const added: Unit[] = this.addedItems
+			.filter((item) => item.ref.kind === "file" && !knownPaths.has(item.ref.path))
+			.map((item) => ({ type: "added-file", path: item.ref.path }));
+		const all = [...base, ...added];
 		return this.held.size === 0 ? all : all.filter((unit) => !this.held.has(unit.path));
 	}
 
