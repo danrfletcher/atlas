@@ -282,3 +282,65 @@ describe("UnitIndex.computePromotions — fence regressions", () => {
 		expect(promotedFilePaths(index)).toEqual(["ModuleA/Other.md"]);
 	});
 });
+
+// R3: bug 1's original fix moved the *entire* `targetTop === null || targetTop === sourceTop`
+// check ahead of the subpath branch, which (as an unflagged side effect) also stopped block/heading
+// references from promoting when their target has no module of its own — vault-root files and pool
+// free blocks, since topLevelFolderFor() returns null for both. Before that fix, the subpath branch
+// ran first and promoted any resolved block reference unconditionally, so those cases did promote.
+// Per the review, this PR narrows the fix instead of changing that behaviour: only the
+// `targetTop === sourceTop` same-module comparison was moved ahead of the subpath branch; the
+// `targetTop === null` guard stays exactly where it was, applying only to the plain-file/folder
+// branch (where it's meaningful — a promoted file/folder records its module). A block reference to
+// a target with no module is therefore still "from outside" the source's real module and promotes,
+// same as pre-fix. The one new edge case this introduces: a source that *also* has no module (a
+// vault-root file, or a pool free block) now compares `null === null` and is treated as "the same
+// non-module", so a block reference between two such module-less files does not promote — this
+// didn't happen before (the subpath branch's old unconditional `continue` ran regardless of source),
+// but is an obscure pairing with no spec requirement either way, so this PR documents it here rather
+// than special-casing it further.
+describe("UnitIndex.computePromotions — block references to module-less targets (R3)", () => {
+	it("a block reference from inside a module to a pool free block still promotes the block (restored pre-fix behaviour)", () => {
+		const { index } = makeIndex(
+			["ModuleA/Source.md", "_pool/Abc.md"],
+			["ModuleA", "_pool"],
+			{
+				"ModuleA/Source.md": {
+					links: [{ link: "Abc#^xyz", original: "[[Abc#^xyz]]" } as never],
+				},
+			},
+			{ Abc: "_pool/Abc.md" },
+			[],
+			{ excludedFolders: ["_pool"] },
+		);
+		expect(promotedBlockPaths(index)).toEqual(["_pool/Abc.md#^xyz"]);
+	});
+
+	it("a block reference from inside a module to a vault-root file still promotes the block (restored pre-fix behaviour)", () => {
+		const { index } = makeIndex(
+			["ModuleA/Source.md", "Root.md"],
+			["ModuleA"],
+			{
+				"ModuleA/Source.md": {
+					links: [{ link: "Root#^xyz", original: "[[Root#^xyz]]" } as never],
+				},
+			},
+			{ Root: "Root.md" },
+		);
+		expect(promotedBlockPaths(index)).toEqual(["Root.md#^xyz"]);
+	});
+
+	it("a block reference between two module-less files (vault-root source, vault-root target) does not promote — both compare as 'the same non-module'", () => {
+		const { index } = makeIndex(
+			["Root.md", "Root2.md"],
+			[],
+			{
+				"Root.md": {
+					links: [{ link: "Root2#^xyz", original: "[[Root2#^xyz]]" } as never],
+				},
+			},
+			{ Root2: "Root2.md" },
+		);
+		expect(promotedBlockPaths(index)).toEqual([]);
+	});
+});
