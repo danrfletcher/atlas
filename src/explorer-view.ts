@@ -1,6 +1,6 @@
 import { App, FuzzySuggestModal, ItemView, MarkdownView, Menu, Modal, Notice, Platform, TFile, TFolder, WorkspaceLeaf, setIcon, setTooltip } from "obsidian";
 import type AtlasPlugin from "./main";
-import { ApiItemState, StatusGovernance, TruncatedStatusConfig, Unit, UnitRef, View, ViewNode, unitRefKey, unitToRef } from "./types";
+import { ApiItemState, PLACEHOLDER_ROW_KIND, StatusGovernance, TruncatedStatusConfig, Unit, UnitRef, View, ViewNode, unitRefKey, unitToRef } from "./types";
 import { ApiSourceIdPair, MetaTarget, collectApiSourceNodeIdPairs, flattenMetaFolders, nodeHasApiRows } from "./views";
 import { resolveUnit } from "./unit-display";
 import { TextPromptModal, ConfirmModal, ConfirmDeleteRowsModal, StatusesModal } from "./modals";
@@ -560,12 +560,17 @@ export class AtlasExplorerView extends ItemView {
 		}
 	}
 
-	/** G9: "Add note / block / module" — the only context-menu action for an API item besides status
-	 * (G10: no drag, nest, reorder, remove, rename, or duplicate, all of which require a real
+	/** G9/G26/G28: "Add note / block / module" plus (G29: gated on the item's shared placeholder tag,
+	 * never an API-specific check) "Remove attachment" whenever `noteRef` is set, and "Remove"
+	 * whenever the row is `notFound` — the only context-menu actions for a placeholder item besides
+	 * status (G10: no drag, nest, reorder, rename, or duplicate, all of which require a real
 	 * `ViewNode`, which items never get). With action = run command, the attachment stays reachable
-	 * from this menu. Status itself is set via the dot click (R5), not this menu. */
+	 * from this menu. Status itself is set via the dot click (R5), not this menu. Remove/Remove
+	 * attachment are additive — "Open attachment"/"Add note"/"Add block"/"Add module" keep their
+	 * existing conditions and ordering. */
 	private showApiItemMenu(evt: MouseEvent, view: View, folderNode: ViewNode, item: ApiItemState): void {
 		const menu = new Menu();
+		const isPlaceholder = item.kind === PLACEHOLDER_ROW_KIND;
 		if (item.noteRef) {
 			menu.addItem((mi) => mi.setTitle("Open attachment").setIcon("file-text").onClick(() => void this.openApiItemAttachment(item)));
 			menu.addSeparator();
@@ -573,6 +578,20 @@ export class AtlasExplorerView extends ItemView {
 		menu.addItem((mi) => mi.setTitle("Add note").setIcon("file-plus").onClick(() => void this.attachApiItem(view, folderNode, item, "file")));
 		menu.addItem((mi) => mi.setTitle("Add block").setIcon("square-plus").onClick(() => void this.attachApiItem(view, folderNode, item, "block")));
 		menu.addItem((mi) => mi.setTitle("Add module").setIcon("folder-plus").onClick(() => void this.attachApiItem(view, folderNode, item, "folder")));
+		if (isPlaceholder && (item.noteRef || item.notFound)) menu.addSeparator();
+		// G28: a manual backstop, available for any reason noteRef went stale — not conditioned on
+		// G27's auto-clear having run or being able to.
+		if (isPlaceholder && item.noteRef) {
+			menu.addItem((mi) =>
+				mi.setTitle("Remove attachment").setIcon("unlink").onClick(() => this.plugin.viewsManager.clearApiItemNoteRef(view.id, folderNode.id, item.id))
+			);
+		}
+		// G26: no bulk remove (F3), no undo (F4) — deletes the apiItemState entry outright, immediately.
+		if (isPlaceholder && item.notFound) {
+			menu.addItem((mi) =>
+				mi.setTitle("Remove").setIcon("trash-2").onClick(() => this.plugin.viewsManager.removeApiItem(view.id, folderNode.id, item.id))
+			);
+		}
 		menu.showAtMouseEvent(evt);
 	}
 
