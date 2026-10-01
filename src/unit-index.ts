@@ -191,13 +191,17 @@ export class UnitIndex {
 				const destPath = linkpath ? this.app.metadataCache.getFirstLinkpathDest(linkpath, file.path)?.path : file.path;
 				if (!destPath || destPath === file.path || this.isExcluded(destPath)) continue; // unresolved, or "from another file" fails
 
+				// The module-equality check applies to every reference the same way, subpath or not —
+				// a block reference from inside the same module is exactly as "not outside it" as a
+				// plain file link from inside the same module would be, so it must run before the
+				// subpath branch decides whether to promote the block.
+				const targetTop = this.topLevelFolderFor(destPath);
+				if (targetTop === null || targetTop === sourceTop) continue; // not inside a folder-unit, or not "outside" it
+
 				if (subpath) {
 					promotedBlocks.set(`${destPath}#${subpath}`, { type: "promoted-block", path: destPath, subpath });
 					continue;
 				}
-
-				const targetTop = this.topLevelFolderFor(destPath);
-				if (targetTop === null || targetTop === sourceTop) continue; // not inside a folder-unit, or not "outside" it
 
 				const targetFile = this.app.vault.getAbstractFileByPath(destPath);
 				if (!(targetFile instanceof TFile)) continue;
