@@ -19,6 +19,7 @@ declare global {
 		addClass(...cls: string[]): void;
 		removeClass(...cls: string[]): void;
 		toggleClass(cls: string, on: boolean): void;
+		setAttr(name: string, value: string): void;
 	}
 }
 
@@ -57,6 +58,9 @@ proto.removeClass = function (...cls: string[]) {
 };
 proto.toggleClass = function (cls: string, on: boolean) {
 	this.classList.toggle(cls, on);
+};
+proto.setAttr = function (name: string, value: string) {
+	this.setAttribute(name, value);
 };
 
 // --- Vault model --------------------------------------------------------------------------------

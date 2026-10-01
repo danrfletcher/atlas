@@ -131,6 +131,35 @@ describe("UnitIndex dismiss/added-state — E3 delete is inert", () => {
 	});
 });
 
+describe("UnitIndex.getUnits() — added-file merge and dedup (PR-3 G3, E4)", () => {
+	it("an added item for a path not covered by any other classification surfaces as an added-file unit", () => {
+		const { index } = makeIndex(["Areas/Career/Notes.md"], ["Areas", "Areas/Career"], [], {}, [], [{ ref: file("Areas/Career/Notes.md"), tag: "added" }]);
+		const added = index.getUnits().filter((u) => u.type === "added-file");
+		expect(added).toEqual([{ type: "added-file", path: "Areas/Career/Notes.md" }]);
+	});
+
+	it("E4: an added item whose path is also a manual/auto-promoted unit is not duplicated — only the promoted classification surfaces", () => {
+		const { index } = makeIndex(
+			["ModuleA/Both.md"],
+			["ModuleA"],
+			[file("ModuleA/Both.md")],
+			{},
+			[],
+			[{ ref: file("ModuleA/Both.md"), tag: "added" }],
+		);
+		const units = index.getUnits().filter((u) => u.path === "ModuleA/Both.md");
+		expect(units).toHaveLength(1);
+		expect(units[0].type).toBe("promoted-file");
+	});
+
+	it("an added item for a vault-root file (already a root-file unit) is not duplicated", () => {
+		const { index } = makeIndex(["RootFile.md"], [], [], {}, [], [{ ref: file("RootFile.md"), tag: "added" }]);
+		const units = index.getUnits().filter((u) => u.path === "RootFile.md");
+		expect(units).toHaveLength(1);
+		expect(units[0].type).toBe("root-file");
+	});
+});
+
 describe("UnitIndex dismiss/added-state — F6 fence regression", () => {
 	it("a dismiss/add/un-dismiss cycle never mutates manualPromotions", () => {
 		const promotions = [file("Promoted.md")];
