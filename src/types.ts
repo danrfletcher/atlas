@@ -161,6 +161,11 @@ export interface ViewNode extends StatusGovernance {
 	 * hand, without needing new dedup logic (E2 is handled entirely by existing multi-placement
 	 * support). Absent/false means "not mine" — never cleared or removed by reconciliation. */
 	folderSourceManaged?: boolean;
+	/** PR-4 (R1 fix): the id of the meta node whose `folderSource` created this row, set alongside
+	 * `folderSourceManaged` and never cleared by moving/nesting it elsewhere in the view (G7) — this is
+	 * what lets a refresh find a managed row again no matter where the user dragged or nested it,
+	 * instead of only looking at the source's own direct children. */
+	folderSourceOwnerId?: string;
 }
 
 /** A single request header, e.g. `Authorization: Bearer …`. Never persisted in `data.json` — see
@@ -255,6 +260,11 @@ export interface FolderSourceConfig {
 	refreshOnViewLoad: boolean;
 	refreshEveryMinutesEnabled?: boolean;
 	refreshEveryMinutes?: number;
+	/** PR-4 (R1 fix): `unitRefKey`-keyed refs the user has explicitly removed from this source's
+	 * managed set (via "Remove from view", the Delete key, or dragging to the inbox) — reconcile never
+	 * recreates one of these, the same way any other removed ref stays gone rather than being
+	 * resurrected on the next refresh. */
+	removedRefs?: string[];
 }
 
 export interface MarkdownTableSourceConfigStub {
