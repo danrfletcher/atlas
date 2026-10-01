@@ -21,6 +21,17 @@ export function rewriteRefPath(ref: UnitRef, oldPath: string, newPath: string): 
 	return ref;
 }
 
+/** PR-2: which dismiss collection a check/write targets — `"view"` is one specific view's own
+ * dismiss set, `"global"` is the single cross-view set written when dismissing from Global view. */
+export type DismissScope = "view" | "global";
+
+/** PR-2: a unit manually added to the inbox via "+" (F3/G1-G3). Distinct from a `manualPromotions`
+ * entry — the `tag` makes the two unambiguous at read time even though both are `UnitRef`-keyed. */
+export interface AddedItem {
+	ref: UnitRef;
+	tag: "added";
+}
+
 /** A unit as classified by the index — the computed shape the explorer (F8) will render. */
 export type Unit =
 	| { type: "root-file"; path: string }
