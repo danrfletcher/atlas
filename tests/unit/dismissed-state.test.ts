@@ -138,7 +138,7 @@ describe("UnitIndex.getUnits() — added-file merge and dedup (PR-3 G3, E4)", ()
 		expect(added).toEqual([{ type: "added-file", path: "Areas/Career/Notes.md" }]);
 	});
 
-	it("E4: an added item whose path is also a manual/auto-promoted unit is not duplicated — only the promoted classification surfaces", () => {
+	it("R3: an added item whose path is also a manual/auto-promoted unit is not duplicated — the \"added\" classification surfaces, not \"promoted\" (added is terminal, per spec edge case)", () => {
 		const { index } = makeIndex(
 			["ModuleA/Both.md"],
 			["ModuleA"],
@@ -149,7 +149,7 @@ describe("UnitIndex.getUnits() — added-file merge and dedup (PR-3 G3, E4)", ()
 		);
 		const units = index.getUnits().filter((u) => u.path === "ModuleA/Both.md");
 		expect(units).toHaveLength(1);
-		expect(units[0].type).toBe("promoted-file");
+		expect(units[0].type).toBe("added-file");
 	});
 
 	it("an added item for a vault-root file (already a root-file unit) is not duplicated", () => {
