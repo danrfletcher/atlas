@@ -194,18 +194,20 @@ export class UnitIndex {
 				// The same-module check applies to every reference the same way, subpath or not — a
 				// block reference from inside the same module is exactly as "not outside it" as a
 				// plain file link from inside the same module would be, so it must run before the
-				// subpath branch decides whether to promote the block. (When source and target both
-				// have no module of their own — vault-root files, pool free blocks — this treats them
-				// as "the same non-module" too, so a block reference between two such files doesn't
-				// promote either; see the F5/R3 tests for that edge case.)
+				// subpath branch decides whether to promote the block. Having no module of your own
+				// (vault-root files, pool free blocks) is not the same as sharing a module, so the
+				// `=== null` guard keeps a null targetTop from ever matching a null sourceTop here:
+				// a block reference between two such module-less files still promotes, exactly as it
+				// did before this PR; see the R3/R5 tests for that edge case.
 				const targetTop = this.topLevelFolderFor(destPath);
-				if (targetTop === sourceTop) continue; // not "outside" the source's module (including "both have none")
+				if (targetTop !== null && targetTop === sourceTop) continue; // only a genuine same-module match is "not outside"
 
 				if (subpath) {
 					// Unlike a plain file/folder reference, a promoted *block* doesn't need its own module:
 					// pool free blocks and vault-root files aren't inside any folder-unit to begin with, so a
-					// reference to one of their blocks from inside a real module is still "from outside" and
-					// should promote, exactly as it did before bug 1's fix.
+					// reference to one of their blocks — from inside a real module, from another module-less
+					// file, or from a different pool free block — is still "from outside" and should promote,
+					// exactly as it did before bug 1's fix.
 					promotedBlocks.set(`${destPath}#${subpath}`, { type: "promoted-block", path: destPath, subpath });
 					continue;
 				}

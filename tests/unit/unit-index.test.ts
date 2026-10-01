@@ -283,7 +283,7 @@ describe("UnitIndex.computePromotions — fence regressions", () => {
 	});
 });
 
-// R3: bug 1's original fix moved the *entire* `targetTop === null || targetTop === sourceTop`
+// R3/R5: bug 1's original fix moved the *entire* `targetTop === null || targetTop === sourceTop`
 // check ahead of the subpath branch, which (as an unflagged side effect) also stopped block/heading
 // references from promoting when their target has no module of its own — vault-root files and pool
 // free blocks, since topLevelFolderFor() returns null for both. Before that fix, the subpath branch
@@ -293,12 +293,14 @@ describe("UnitIndex.computePromotions — fence regressions", () => {
 // `targetTop === null` guard stays exactly where it was, applying only to the plain-file/folder
 // branch (where it's meaningful — a promoted file/folder records its module). A block reference to
 // a target with no module is therefore still "from outside" the source's real module and promotes,
-// same as pre-fix. The one new edge case this introduces: a source that *also* has no module (a
-// vault-root file, or a pool free block) now compares `null === null` and is treated as "the same
-// non-module", so a block reference between two such module-less files does not promote — this
-// didn't happen before (the subpath branch's old unconditional `continue` ran regardless of source),
-// but is an obscure pairing with no spec requirement either way, so this PR documents it here rather
-// than special-casing it further.
+// same as pre-fix.
+//
+// R5 fixed a second unflagged side effect of that same comparison: when source and target *both*
+// have no module (two vault-root files, two pool free blocks, or one of each), `null === null`
+// compared equal and the reference was treated as "the same non-module", so it stopped promoting —
+// a behaviour change this PR never asked for. Having no module is not the same as sharing one, so
+// the check is now `targetTop !== null && targetTop === sourceTop`: a null targetTop never matches,
+// and every module-less pairing promotes exactly as it did before this PR.
 describe("UnitIndex.computePromotions — block references to module-less targets (R3)", () => {
 	it("a block reference from inside a module to a pool free block still promotes the block (restored pre-fix behaviour)", () => {
 		const { index } = makeIndex(
@@ -330,7 +332,7 @@ describe("UnitIndex.computePromotions — block references to module-less target
 		expect(promotedBlockPaths(index)).toEqual(["Root.md#^xyz"]);
 	});
 
-	it("a block reference between two module-less files (vault-root source, vault-root target) does not promote — both compare as 'the same non-module'", () => {
+	it("a block reference between two module-less files (vault-root source, vault-root target) still promotes (restored pre-fix behaviour)", () => {
 		const { index } = makeIndex(
 			["Root.md", "Root2.md"],
 			[],
@@ -341,6 +343,22 @@ describe("UnitIndex.computePromotions — block references to module-less target
 			},
 			{ Root2: "Root2.md" },
 		);
-		expect(promotedBlockPaths(index)).toEqual([]);
+		expect(promotedBlockPaths(index)).toEqual(["Root2.md#^xyz"]);
+	});
+
+	it("a block reference between two pool free blocks still promotes (restored pre-fix behaviour)", () => {
+		const { index } = makeIndex(
+			["_pool/Abc.md", "_pool/Def.md"],
+			["_pool"],
+			{
+				"_pool/Abc.md": {
+					links: [{ link: "Def#^xyz", original: "[[Def#^xyz]]" } as never],
+				},
+			},
+			{ Def: "_pool/Def.md" },
+			[],
+			{ excludedFolders: ["_pool"] },
+		);
+		expect(promotedBlockPaths(index)).toEqual(["_pool/Def.md#^xyz"]);
 	});
 });
