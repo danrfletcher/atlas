@@ -2,7 +2,7 @@ import { TFile } from "obsidian";
 import type AtlasPlugin from "./main";
 import { NameDialogOptions, openNameDialog } from "./name-dialog";
 import { noticeIfLinksNotUpdated } from "./links-notice";
-import { UnitRef } from "./types";
+import { DismissScope, UnitRef } from "./types";
 
 /** Test-only handle for driving the PR-1 helpers from the desktop container over CDP. Registered
  * only when `__ATLAS_TEST__` is true (never in a production build). */
@@ -18,6 +18,11 @@ interface AtlasTestHarness {
 	graduationState(): { pending: number; ownReverts: string[] };
 	/** Wraps `fileManager.renameFile` to count and log calls (`[path, newPath]`); returns a restore function. */
 	spyRenameFile(): { calls: Array<[string, string]>; restore(): void };
+	/** PR-2: drives the dismiss/added-state storage foundation directly, since this PR has no UI. */
+	setDismissed(ref: UnitRef, scope: DismissScope, value: boolean, viewId?: string): Promise<void>;
+	isDismissed(ref: UnitRef, scope: DismissScope, viewId?: string): boolean;
+	markAdded(ref: UnitRef): Promise<void>;
+	isAdded(ref: UnitRef): boolean;
 }
 
 export function registerTestHarness(plugin: AtlasPlugin): () => void {
@@ -61,6 +66,18 @@ export function registerTestHarness(plugin: AtlasPlugin): () => void {
 				},
 			};
 		},
+		async setDismissed(ref, scope, value, viewId) {
+			if (scope === "global") plugin.unitIndex.setDismissed(ref, "global", value);
+			else plugin.unitIndex.setDismissed(ref, "view", value, viewId ?? "");
+			await plugin.flushSave();
+		},
+		isDismissed: (ref, scope, viewId) =>
+			scope === "global" ? plugin.unitIndex.isDismissed(ref, "global") : plugin.unitIndex.isDismissed(ref, "view", viewId ?? ""),
+		async markAdded(ref) {
+			plugin.unitIndex.markAdded(ref);
+			await plugin.flushSave();
+		},
+		isAdded: (ref) => plugin.unitIndex.isAdded(ref),
 		async dump() {
 			await new Promise((resolve) => window.setTimeout(resolve, 600)); // let the debounced save land
 			return {
