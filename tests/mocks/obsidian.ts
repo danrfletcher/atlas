@@ -335,6 +335,19 @@ export class Menu {
 }
 export class Plugin {}
 export class PluginSettingTab {}
+/** Minimal stand-in for Obsidian's `EditorSuggest` — just enough for `AtlasLinkSuggest` (and any
+ * other test that merely needs to import `src/main.ts`) to extend it; no test here exercises the
+ * actual suggester popup. */
+export class EditorSuggest<T> {
+	limit?: number;
+	constructor(public app: App) {}
+	open(): void {}
+	close(): void {}
+}
+export function prepareFuzzySearch(_query: string): (text: string) => { score: number; matches: unknown[] } | null {
+	return () => null;
+}
+export function renderResults(_el: HTMLElement, _text: string, _match: unknown): void {}
 export class WorkspaceLeaf {}
 export class TextComponent {}
 export class ToggleComponent {}
