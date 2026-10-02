@@ -1,7 +1,7 @@
 import { App } from "obsidian";
 import type { UnitIndex } from "./unit-index";
 import { clampRefreshMinutes } from "./api-refresh-timer";
-import { ApiClickAction, ApiFieldMapping, ApiItemState, ApiSourceConfig, DEFAULT_VIEW_NAME, StatusGovernance, Unit, UnitRef, View, ViewNode, createEmptyView, rewriteRefPath, unitRefsEqual, unitToRef } from "./types";
+import { ApiClickAction, ApiFieldMapping, ApiItemState, ApiSourceConfig, DEFAULT_VIEW_NAME, PLACEHOLDER_ROW_KIND, StatusGovernance, Unit, UnitRef, View, ViewNode, createEmptyView, rewriteRefPath, unitRefsEqual, unitToRef } from "./types";
 
 function generateNodeId(): string {
 	return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
@@ -32,7 +32,7 @@ function sanitizeApiItemState(raw: unknown, key: string): ApiItemState | null {
 	const item = raw as Partial<ApiItemState>;
 	if (typeof item.label !== "string") return null;
 
-	const sanitized: ApiItemState = { id: key, label: item.label };
+	const sanitized: ApiItemState = { id: key, label: item.label, kind: PLACEHOLDER_ROW_KIND };
 	if (typeof item.secondary === "string") sanitized.secondary = item.secondary;
 	if (typeof item.explicitStatusId === "string") sanitized.explicitStatusId = item.explicitStatusId;
 	if (isValidUnitRef(item.noteRef)) sanitized.noteRef = item.noteRef;
@@ -738,6 +738,35 @@ export class ViewsManager {
 		this.save();
 	}
 
+	/** G26/G29: removes a placeholder row's `apiItemState` entry outright — gated by the caller on
+	 * the row's shared placeholder tag plus `notFound` (E6: removal still proceeds even if the row
+	 * flipped back to found between menu-open and click, since this method itself never re-checks
+	 * `notFound`). No bulk variant exists (F3) and there is no undo (F4) — this is the only way an
+	 * entry is deleted here. */
+	removeApiItem(viewId: string, nodeId: string, itemId: string): void {
+		const view = this.getView(viewId);
+		const found = view && this.findNode(view.root, nodeId);
+		if (!found?.node.apiItemState || !(itemId in found.node.apiItemState)) return;
+		delete found.node.apiItemState[itemId];
+		if (found.node.apiItemOrder) {
+			found.node.apiItemOrder = found.node.apiItemOrder.filter((id) => id !== itemId);
+		}
+		this.save();
+	}
+
+	/** G28/G29: manual backstop that clears only a placeholder row's stale `noteRef`, independent of
+	 * whether G27's vault-delete auto-clear already ran (or ever could) — usable for any reason the
+	 * reference went stale. The row's other fields (`notFound`/`lastSeenAt` included) are untouched.
+	 * A no-op, safely, if `noteRef` is already unset. */
+	clearApiItemNoteRef(viewId: string, nodeId: string, itemId: string): void {
+		const view = this.getView(viewId);
+		const found = view && this.findNode(view.root, nodeId);
+		const item = found?.node.apiItemState?.[itemId];
+		if (!item) return;
+		item.noteRef = undefined;
+		this.save();
+	}
+
 	/** G1/G6/G11: for callers (`ApiSourceController`) that mutate a node's `apiCache`/`apiItemState`
 	 * fields directly rather than through a dedicated setter — persists and notifies the same as any
 	 * other change here. */
@@ -778,6 +807,39 @@ export class ViewsManager {
 				}
 			}
 			if (this.rewriteTree(node.children, oldPath, newPath)) changed = true;
+		}
+		return changed;
+	}
+
+	/** G27: a vault `delete` event clears any placeholder row's `noteRef` that pointed at the
+	 * deleted path — additive alongside `unitIndex.onVaultDelete`/`graduation.handleDelete`
+	 * (`main.ts`), independent of `onVaultRename`'s path-rewrite logic above (rename rewrites;
+	 * delete clears, since there is no new path to rewrite to). Only the `noteRef` field is cleared;
+	 * the `apiItemState` entry itself survives untouched (E5: a path matching nothing is a no-op;
+	 * clears every matching entry across every node/view, not just the first). Exact-path match
+	 * only — a single deleted file, not a deleted folder's whole subtree — so a delete immediately
+	 * followed (same tick) by a recreate at the same path, where the `noteRef` was already rewritten
+	 * elsewhere to a different path, is never mistaken for this file's reference. */
+	onVaultDelete(path: string): void {
+		let changed = false;
+		for (const view of this.views) {
+			if (this.clearNoteRefsForPath(view.root, path)) changed = true;
+		}
+		if (changed) this.save();
+	}
+
+	private clearNoteRefsForPath(nodes: ViewNode[], path: string): boolean {
+		let changed = false;
+		for (const node of nodes) {
+			if (node.apiItemState) {
+				for (const item of Object.values(node.apiItemState)) {
+					if (item.noteRef && item.noteRef.path === path) {
+						item.noteRef = undefined;
+						changed = true;
+					}
+				}
+			}
+			if (this.clearNoteRefsForPath(node.children, path)) changed = true;
 		}
 		return changed;
 	}

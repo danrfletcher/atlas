@@ -84,8 +84,8 @@ describe("ApiSourceController — integration against a real HTTP server", () =>
 		expect(node.apiCache?.lastSuccessAt).toBe(1000);
 		expect(dotStateFor(node.apiCache)).toBe("green");
 		expect(node.apiItemState).toEqual({
-			"1": { id: "1", label: "One", secondary: undefined, lastSeenAt: new Date(1000).toISOString() },
-			"2": { id: "2", label: "Two", secondary: undefined, lastSeenAt: new Date(1000).toISOString() },
+			"1": { id: "1", label: "One", kind: "placeholder", secondary: undefined, lastSeenAt: new Date(1000).toISOString() },
+			"2": { id: "2", label: "Two", kind: "placeholder", secondary: undefined, lastSeenAt: new Date(1000).toISOString() },
 		});
 	});
 

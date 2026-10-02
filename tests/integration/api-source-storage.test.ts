@@ -264,7 +264,7 @@ describe("R17/E9 — corrupt or missing apiSource/apiCache/apiItemState/apiItemO
 		const sanitized = loadedNode(node);
 		expect(sanitized.apiSource).toBeUndefined();
 		expect(sanitized.apiCache).toBeUndefined();
-		expect(sanitized.apiItemState).toEqual({ "1": { id: "1", label: "One" } });
+		expect(sanitized.apiItemState).toEqual({ "1": { id: "1", label: "One", kind: "placeholder" } });
 		expect(sanitized.apiItemOrder).toEqual(["1"]);
 	});
 
@@ -285,7 +285,7 @@ describe("R17/E9 — corrupt or missing apiSource/apiCache/apiItemState/apiItemO
 		};
 		const sanitized = loadedNode(node);
 		expect(sanitized.apiCache).toBeUndefined();
-		expect(sanitized.apiItemState).toEqual({ "1": { id: "1", label: "One" } });
+		expect(sanitized.apiItemState).toEqual({ "1": { id: "1", label: "One", kind: "placeholder" } });
 		expect(sanitized.apiItemOrder).toEqual(["1"]);
 	});
 
@@ -306,7 +306,7 @@ describe("R17/E9 — corrupt or missing apiSource/apiCache/apiItemState/apiItemO
 		const sanitized = loadedNode(node);
 		expect(sanitized.apiSource).toEqual(makeSource());
 		expect(sanitized.apiItemOrder).toEqual(["1"]);
-		expect(sanitized.apiItemState).toEqual({ "1": { id: "1", label: "One" } });
+		expect(sanitized.apiItemState).toEqual({ "1": { id: "1", label: "One", kind: "placeholder" } });
 	});
 
 	it("R6: a hand-edited refreshEveryMinutes of zero is clamped to the minimum, not treated as invalid and switched off", () => {
@@ -399,7 +399,7 @@ describe("R20/E9 — corrupt individual apiItemState entries never crash on load
 			apiItemOrder: ["1"],
 		});
 		const sanitized = loadedNode(node);
-		expect(sanitized.apiItemState).toEqual({ "1": { id: "1", label: "One" } });
+		expect(sanitized.apiItemState).toEqual({ "1": { id: "1", label: "One", kind: "placeholder" } });
 	});
 
 	it("a lastSeenAt that isn't a string is dropped rather than rendering 'NaN-NaN-NaN'", () => {
@@ -476,8 +476,8 @@ describe("R20/E9 — corrupt individual apiItemState entries never crash on load
 		});
 		const sanitized = loadedNode(node);
 		expect(sanitized.apiItemState).toEqual({
-			"1": { id: "1", label: "One" },
-			"3": { id: "3", label: "Three" },
+			"1": { id: "1", label: "One", kind: "placeholder" },
+			"3": { id: "3", label: "Three", kind: "placeholder" },
 		});
 		expect(sanitized.apiItemOrder).toEqual(["1", "3"]);
 	});

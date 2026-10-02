@@ -114,6 +114,9 @@ export default class AtlasPlugin extends Plugin {
 			this.app.vault.on("delete", (file) => {
 				this.unitIndex.onVaultDelete(file.path);
 				this.graduation.handleDelete(file);
+				// G27: clears any placeholder row's noteRef pointing at the deleted file — additive
+				// alongside the two existing calls above, which this leaves untouched.
+				this.viewsManager.onVaultDelete(file.path);
 			})
 		);
 		this.registerEvent(

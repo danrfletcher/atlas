@@ -232,11 +232,21 @@ export interface ApiCache {
 	lastSuccessAt?: number;
 }
 
+/** G29: the one general placeholder-row kind tag every placeholder row carries — shared by
+ * API-sourced rows today and (future) Table-sourced rows, so menu-enablement (Remove,
+ * Remove attachment) gates on this tag plus `notFound`/`noteRef` instead of on an API-specific
+ * check that wouldn't extend to Table rows. There is only one value because there is only one
+ * general kind — API and Table rows are never distinguished by it. */
+export const PLACEHOLDER_ROW_KIND = "placeholder" as const;
+export type PlaceholderRowKind = typeof PLACEHOLDER_ROW_KIND;
+
 /** One API row's durable, per-id state (G6c: status and note never change on refresh; label and
  * secondary text always follow the API). */
 export interface ApiItemState {
 	id: string;
 	label: string;
+	/** G29: always `PLACEHOLDER_ROW_KIND` — see its doc comment. */
+	kind: PlaceholderRowKind;
 	secondary?: string;
 	explicitStatusId?: string;
 	noteRef?: UnitRef;
