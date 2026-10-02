@@ -1,4 +1,4 @@
-import { App, ButtonComponent, Modal, Notice, Platform, Setting, TFolder, setTooltip } from "obsidian";
+import { App, ButtonComponent, Modal, Notice, Platform, Setting, TFile, TFolder, setTooltip } from "obsidian";
 import { canSaveApiSource, findArrayFields, isMapError, isValidExtraFieldName, mapResponseRows, sampleFieldsForArrayField } from "./api-mapping";
 import { generateJsFromMapping, runJsMapping, validateJsSource } from "./api-js-mapping";
 import { httpGetJson } from "./api-http";
@@ -7,16 +7,19 @@ import { MIN_REFRESH_MINUTES, validateRefreshMinutes } from "./api-refresh-timer
 import { resolveArgv, validateCommand } from "./command-argv";
 import { ConfirmModal } from "./modals";
 import { resolveOutsidePath } from "./folder-source-outside";
-import { ApiClickAction, ApiFieldMapping, ApiHeader, ApiSourceConfig, DataSourceType, FolderSourceConfig } from "./types";
+import { parseCsv } from "./csv-parsing";
+import { ApiClickAction, ApiFieldMapping, ApiHeader, ApiSourceConfig, CsvSourceConfig, DataSourceType, FolderSourceConfig } from "./types";
 
 /** PR-4 (G1): now a real discriminated union — a Folder result carries its own `FolderSourceConfig`
  * and no headers (it has none), instead of widening the "api" shape to cover both. PR-5: also
  * carries `outsidePath` — the modal's own device-local field, which (like headers) has no home in
- * `FolderSourceConfig` itself since it must never reach synced `data.json`. Always present (empty
- * string while Inside Vault, or after a clear) so the caller never has to guess. */
+ * `FolderSourceConfig` itself since it must never reach synced `data.json`. PR-7: a CSV result
+ * carries its own `CsvSourceConfig`, no headers and no `outsidePath` either (a CSV source is always
+ * vault-relative, G18). */
 export type ApiSourceModalResult =
 	| { type: "api"; source: ApiSourceConfig; headers: ApiHeader[] }
-	| { type: "folder"; source: FolderSourceConfig; outsidePath: string };
+	| { type: "folder"; source: FolderSourceConfig; outsidePath: string }
+	| { type: "csv"; source: CsvSourceConfig };
 
 const SOURCE_TYPE_OPTIONS: { value: DataSourceType; label: string }[] = [
 	{ value: "api", label: "API" },
@@ -25,11 +28,11 @@ const SOURCE_TYPE_OPTIONS: { value: DataSourceType; label: string }[] = [
 	{ value: "csv", label: "CSV" },
 ];
 
-/** PR-3 (G1) fence: Markdown table/CSV have no config of their own yet — shown while one of those two
- * is selected, in place of any real config section. Folder (PR-4) has its own real body instead. */
-const STUB_TYPE_LABEL: Record<Exclude<DataSourceType, "api" | "folder">, string> = {
+/** PR-3 (G1) fence: Markdown table has no config of its own yet — shown while it's selected, in
+ * place of any real config section. Folder (PR-4) and CSV (PR-7) each have their own real body
+ * instead. */
+const STUB_TYPE_LABEL: Record<Exclude<DataSourceType, "api" | "folder" | "csv">, string> = {
 	"markdown-table": "Markdown table",
-	csv: "CSV",
 };
 
 const MAPPING_TARGETS: { key: "idField" | "labelField" | "secondaryField"; label: string; required: boolean }[] = [
@@ -98,6 +101,9 @@ export class ApiSourceModal extends Modal {
 	 * saving after only changing a toggle or path must not forget them and let reconcile resurrect
 	 * rows the user deliberately removed. */
 	private removedRefs: string[] | undefined;
+	/** PR-7 (G18): CSV's own vault-relative file path — CSV otherwise reuses the API mapping/fill-mode/
+	 * guard/refresh fields verbatim below, since only one type is ever selected at a time. */
+	private csvPath: string;
 
 	constructor(
 		app: App,
@@ -105,12 +111,14 @@ export class ApiSourceModal extends Modal {
 		initialHeaders: ApiHeader[],
 		private onSave: (result: ApiSourceModalResult) => void,
 		initialFolderSource: FolderSourceConfig | null = null,
-		initialOutsidePath: string = ""
+		initialOutsidePath: string = "",
+		initialCsvSource: CsvSourceConfig | null = null
 	) {
 		super(app);
-		this.selectedType = initial ? "api" : initialFolderSource ? "folder" : null;
+		this.selectedType = initial ? "api" : initialFolderSource ? "folder" : initialCsvSource ? "csv" : null;
 		this.resetApiFieldsToBlank();
 		this.resetFolderFieldsToBlank();
+		this.resetCsvFieldsToBlank();
 		this.headers = initialHeaders.map((h) => ({ ...h }));
 		if (initial) {
 			this.url = initial.url ?? "";
@@ -142,6 +150,23 @@ export class ApiSourceModal extends Modal {
 				initialFolderSource.refreshEveryMinutes !== undefined ? String(initialFolderSource.refreshEveryMinutes) : "";
 			this.removedRefs = initialFolderSource.removedRefs;
 			this.mode = initialFolderSource.mode ?? "merge";
+		}
+		if (initialCsvSource) {
+			this.csvPath = initialCsvSource.path ?? "";
+			this.mapping = initialCsvSource.mapping ? { ...initialCsvSource.mapping } : this.mapping;
+			this.mode = initialCsvSource.mode ?? "merge";
+			this.refreshOnViewLoad = initialCsvSource.refreshOnViewLoad ?? false;
+			this.keepOnEmpty = initialCsvSource.keepOnEmpty ?? true;
+			this.confirmBeforeDelete = initialCsvSource.confirmBeforeDelete ?? true;
+			this.refreshEveryMinutesEnabled = initialCsvSource.refreshEveryMinutesEnabled ?? false;
+			this.refreshEveryMinutesRaw =
+				initialCsvSource.refreshEveryMinutes !== undefined ? String(initialCsvSource.refreshEveryMinutes) : "";
+			this.mappingMode = initialCsvSource.mappingMode === "js" ? "js" : "drag";
+			this.jsSource = initialCsvSource.jsSource ?? "";
+			const rawExtras = initialCsvSource.mapping?.extraFields;
+			if (rawExtras && typeof rawExtras === "object") {
+				this.extraFields = Object.entries(rawExtras).map(([name, field]) => ({ name, field }));
+			}
 		}
 	}
 
@@ -188,6 +213,25 @@ export class ApiSourceModal extends Modal {
 		this.resetSharedRefreshFields();
 	}
 
+	/** PR-7 (G18): CSV's blank starting state, mirroring `resetFolderFieldsToBlank` — CSV reuses the
+	 * API mapping/fill-mode/guard fields verbatim (only one type is ever selected at a time), so only
+	 * the file path and the mapping-related fields need resetting here. */
+	private resetCsvFieldsToBlank(): void {
+		this.csvPath = "";
+		this.mapping = { idField: "", labelField: "", secondaryField: undefined };
+		this.extraFields = [];
+		this.mappingMode = "drag";
+		this.jsSource = "";
+		this.sampleFields = [];
+		this.arrayFieldCandidates = [];
+		this.lastResponse = null;
+		this.testResult = null;
+		this.mode = "merge";
+		this.keepOnEmpty = true;
+		this.confirmBeforeDelete = true;
+		this.resetSharedRefreshFields();
+	}
+
 	onOpen(): void {
 		this.render();
 	}
@@ -230,11 +274,13 @@ export class ApiSourceModal extends Modal {
 					const next = (value || null) as DataSourceType | null;
 					if (next === this.selectedType) return;
 					this.selectedType = next;
-					// G2: switching the type — into "api", into "folder", or between the stub types — always
-					// discards whatever config existed for the type being left. "api" and "folder" each have
-					// their own config to reset in this PR; the remaining stub types have none.
+					// G2: switching the type — into "api", into "folder", into "csv", or into the remaining
+					// stub type — always discards whatever config existed for the type being left. "api",
+					// "folder", and "csv" each have their own config to reset; the remaining stub type has
+					// none.
 					if (next === "api") this.resetApiFieldsToBlank();
 					else if (next === "folder") this.resetFolderFieldsToBlank();
+					else if (next === "csv") this.resetCsvFieldsToBlank();
 					this.render();
 				});
 			});
@@ -243,6 +289,8 @@ export class ApiSourceModal extends Modal {
 			this.renderApiBody();
 		} else if (this.selectedType === "folder") {
 			this.renderFolderBody();
+		} else if (this.selectedType === "csv") {
+			this.renderCsvBody();
 		} else if (this.selectedType) {
 			contentEl.createEl("p", {
 				cls: "atlas-source-type-stub",
@@ -306,6 +354,66 @@ export class ApiSourceModal extends Modal {
 			btn.setButtonText("Fetch sample").onClick(() => void this.fetchSample())
 		);
 
+		this.renderMappingFieldsUI(contentEl);
+		this.renderFillModeAndGuardsUI(contentEl);
+		this.renderRefreshToggles(contentEl);
+
+		new Setting(contentEl).setName("Click action").setHeading();
+		new Setting(contentEl)
+			.setName("Action on click")
+			.setDesc("What happens when an API row is clicked.")
+			.addDropdown((dropdown) => {
+				dropdown.addOption("open-attachment", "Open attachment (default)");
+				dropdown.addOption("none", "None");
+				if (Platform.isMobile) {
+					// G13: Click-action commands are not available on mobile
+				} else {
+					dropdown.addOption("run-command", "Run terminal command in background");
+				}
+				dropdown.setValue(this.action);
+				dropdown.onChange((value) => {
+					this.action = value as ApiClickAction;
+					this.render();
+				});
+			});
+
+		if (this.action === "run-command" && !Platform.isMobile) {
+			contentEl.createEl("p", {
+				cls: "atlas-api-command-warning",
+				text: "Commands run with the user's trust. Shell features (pipes, redirects, &&, globbing, ~, env vars) are unsupported in v1.",
+			});
+
+			let commandErrorEl: HTMLElement | null = null;
+			const updateCommandValidity = () => {
+				const availableExtras = this.extraFields.map((e) => e.name);
+				const validation = validateCommand(this.command, availableExtras);
+				commandErrorEl?.setText(validation.ok ? "" : validation.error);
+				this.updateSaveButton();
+			};
+
+			new Setting(contentEl)
+				.setName("Command")
+				.setDesc("Command to execute in the background. Use {field} for extra mapped field values.")
+				.addText((text) =>
+					text
+						.setPlaceholder("open -a Docker")
+						.setValue(this.command)
+						.onChange((value) => {
+							this.command = value;
+							updateCommandValidity();
+						})
+				);
+			commandErrorEl = contentEl.createEl("p", { cls: "atlas-api-field-error" });
+			updateCommandValidity();
+		}
+	}
+
+	/** PR-3/PR-7: the mapping-mode dropdown, JS textarea, Test button, array-field dropdown, and
+	 * drag-chip/extra-field UI — shared verbatim between "api" and "csv" (PR-7), since both feed the
+	 * same `ApiFieldMapping` through the same mapping pipeline and differ only in how `lastResponse`
+	 * gets populated (`fetchSample` vs. `loadCsvSample`). Factored out of `renderApiBody` so CSV
+	 * reuses the exact existing mapping UI rather than a copy. */
+	private renderMappingFieldsUI(contentEl: HTMLElement): void {
 		new Setting(contentEl)
 			.setName("Mapping mode")
 			.addDropdown((dropdown) => {
@@ -476,7 +584,11 @@ export class ApiSourceModal extends Modal {
 				})
 			);
 		}
+	}
 
+	/** PR-3/PR-7: Fill mode + its two Overwrite-only guards — shared verbatim between "api" and "csv"
+	 * (PR-7). Factored out of `renderApiBody` for the same reason as `renderMappingFieldsUI` above. */
+	private renderFillModeAndGuardsUI(contentEl: HTMLElement): void {
 		new Setting(contentEl)
 			.setName("Fill mode")
 			.setDesc("Merge keeps items by id across refreshes; Append only ever adds new ones; Overwrite replaces every row each refresh.")
@@ -512,57 +624,103 @@ export class ApiSourceModal extends Modal {
 					.setDisabled(overwriteGuardsDisabled)
 					.onChange((value) => (this.confirmBeforeDelete = value))
 			);
+	}
 
+	/** PR-7 (G17-G19): the CSV source's modal body — a vault-file picker in place of the API's URL
+	 * field, a "Load sample" button in place of "Fetch sample" (reads+parses the file instead of
+	 * making a request), then the exact same mapping/fill-mode/guard/refresh UI an API source uses.
+	 * No headers, no click-action section — CSV has neither (see `CsvSourceConfig`'s own doc comment). */
+	private renderCsvBody(): void {
+		const { contentEl } = this;
+
+		this.renderCsvPathSuggester(contentEl);
+
+		new Setting(contentEl).addButton((btn) =>
+			btn.setButtonText("Load sample").onClick(() => void this.loadCsvSample())
+		);
+
+		this.renderMappingFieldsUI(contentEl);
+		this.renderFillModeAndGuardsUI(contentEl);
 		this.renderRefreshToggles(contentEl);
+	}
 
-		new Setting(contentEl).setName("Click action").setHeading();
-		new Setting(contentEl)
-			.setName("Action on click")
-			.setDesc("What happens when an API row is clicked.")
-			.addDropdown((dropdown) => {
-				dropdown.addOption("open-attachment", "Open attachment (default)");
-				dropdown.addOption("none", "None");
-				if (Platform.isMobile) {
-					// G13: Click-action commands are not available on mobile
-				} else {
-					dropdown.addOption("run-command", "Run terminal command in background");
-				}
-				dropdown.setValue(this.action);
-				dropdown.onChange((value) => {
-					this.action = value as ApiClickAction;
+	/** G18: a filterable list of every `.csv` file in the vault, vault-relative paths only — mirrors
+	 * `renderFolderPathSuggester` but lists files rather than folders, filtered to the `.csv`
+	 * extension. */
+	private renderCsvPathSuggester(contentEl: HTMLElement): void {
+		const allPaths = this.listVaultCsvFiles();
+		let listEl: HTMLElement | null = null;
+		const renderList = (filter: string) => {
+			if (!listEl) return;
+			listEl.empty();
+			const normalized = filter.trim().toLowerCase();
+			const matches = normalized ? allPaths.filter((p) => p.toLowerCase().includes(normalized)) : allPaths;
+			for (const path of matches.slice(0, 50)) {
+				const item = listEl.createEl("div", { cls: "atlas-folder-suggest-item", text: path });
+				item.onclick = () => {
+					this.csvPath = path;
 					this.render();
-				});
-			});
+				};
+			}
+		};
 
-		if (this.action === "run-command" && !Platform.isMobile) {
-			contentEl.createEl("p", {
-				cls: "atlas-api-command-warning",
-				text: "Commands run with the user's trust. Shell features (pipes, redirects, &&, globbing, ~, env vars) are unsupported in v1.",
-			});
+		new Setting(contentEl)
+			.setName("CSV file")
+			.setDesc("Vault-relative path to the .csv file. The first row is always treated as column headers.")
+			.addText((text) =>
+				text
+					.setPlaceholder("Search vault .csv files…")
+					.setValue(this.csvPath)
+					.onChange((value) => {
+						this.csvPath = value;
+						this.updateSaveButton();
+						renderList(value);
+					})
+			);
+		listEl = contentEl.createEl("div", { cls: "atlas-folder-suggest-list" });
+		renderList(this.csvPath);
+	}
 
-			let commandErrorEl: HTMLElement | null = null;
-			const updateCommandValidity = () => {
-				const availableExtras = this.extraFields.map((e) => e.name);
-				const validation = validateCommand(this.command, availableExtras);
-				commandErrorEl?.setText(validation.ok ? "" : validation.error);
-				this.updateSaveButton();
-			};
+	/** Recursively walks the vault root, mirroring `listVaultFolders`, but collects `.csv` files
+	 * instead of folders. */
+	private listVaultCsvFiles(): string[] {
+		const root = this.app.vault?.getRoot();
+		if (!root) return [];
+		const paths: string[] = [];
+		const walk = (folder: TFolder) => {
+			for (const child of folder.children) {
+				if (child instanceof TFolder) walk(child);
+				else if (child.path.toLowerCase().endsWith(".csv")) paths.push(child.path);
+			}
+		};
+		walk(root);
+		return paths;
+	}
 
-			new Setting(contentEl)
-				.setName("Command")
-				.setDesc("Command to execute in the background. Use {field} for extra mapped field values.")
-				.addText((text) =>
-					text
-						.setPlaceholder("open -a Docker")
-						.setValue(this.command)
-						.onChange((value) => {
-							this.command = value;
-							updateCommandValidity();
-						})
-				);
-			commandErrorEl = contentEl.createEl("p", { cls: "atlas-api-field-error" });
-			updateCommandValidity();
+	/** PR-7: mirrors `fetchSample`'s role for CSV — reads+parses the selected file (G19) and derives
+	 * `sampleFields` from the parsed rows' own keys via the existing `sampleFieldsForArrayField`
+	 * helper, exactly as a plain-array API response would (CSV rows are already flat, so there's never
+	 * an array field to pick). Never touches `apiCache` — same contract `fetchSample`/`runTest` have. */
+	private async loadCsvSample(): Promise<void> {
+		const file = this.app.vault.getAbstractFileByPath(this.csvPath.trim());
+		if (!(file instanceof TFile)) {
+			new Notice("Atlas: file not found.");
+			return;
 		}
+		const text = await this.app.vault.cachedRead(file);
+		const parsed = parseCsv(text);
+		if (!parsed.ok) {
+			new Notice(`Atlas: ${parsed.error}`);
+			return;
+		}
+		this.lastResponse = parsed.rows;
+		this.arrayFieldCandidates = [];
+		this.sampleFields = sampleFieldsForArrayField(parsed.rows, undefined);
+		this.testResult = null;
+		if (this.sampleFields.length === 0) {
+			new Notice("Atlas: the CSV file has no data rows to map yet.");
+		}
+		this.render();
 	}
 
 	/** G5a/G5b/G10: shared verbatim between "api" and "folder" — same two toggles, same fields, same
@@ -762,14 +920,29 @@ export class ApiSourceModal extends Modal {
 	}
 
 	private canSave(): boolean {
-		// G1/edge case: Save is blocked until a type is selected; Table/CSV have no config of their own
-		// to validate in this PR, so there's nothing for them to ever become savable against.
+		// G1/edge case: Save is blocked until a type is selected; Markdown table has no config of its
+		// own to validate in this PR, so there's nothing for it to ever become savable against.
 		if (this.selectedType === "folder") {
 			// E8: a path that doesn't currently resolve is still savable (it may start resolving later,
 			// e.g. a drive remounting) — only blank/whitespace-only is rejected outright, same contract
 			// Inside Vault already has for a path that doesn't currently resolve to a real folder.
 			if (this.folderLocation === "outside" ? !this.outsidePath.trim() : !this.folderPath.trim()) return false;
 			if (this.refreshEveryMinutesEnabled && !validateRefreshMinutes(this.refreshEveryMinutesRaw).ok) return false;
+			return true;
+		}
+		if (this.selectedType === "csv") {
+			if (this.mappingMode === "js") {
+				if (!this.csvPath.trim()) return false;
+				if (!validateJsSource(this.jsSource).ok) return false;
+			} else if (!canSaveApiSource(this.csvPath, this.mapping)) {
+				return false;
+			}
+			if (this.refreshEveryMinutesEnabled && !validateRefreshMinutes(this.refreshEveryMinutesRaw).ok) return false;
+			for (let i = 0; i < this.extraFields.length; i++) {
+				const extra = this.extraFields[i];
+				if (!isValidExtraFieldName(extra.name)) return false;
+				if (this.extraFields.findIndex((other) => other.name === extra.name) !== i) return false;
+			}
 			return true;
 		}
 		if (this.selectedType !== "api") return false;
@@ -897,6 +1070,29 @@ export class ApiSourceModal extends Modal {
 			};
 			this.close();
 			this.onSave({ type: "folder", source, outsidePath: this.folderLocation === "outside" ? this.outsidePath.trim() : "" });
+			return;
+		}
+		if (this.selectedType === "csv") {
+			const refreshEveryMinutesValidation = this.refreshEveryMinutesEnabled ? validateRefreshMinutes(this.refreshEveryMinutesRaw) : null;
+			const extraFieldsRecord = this.buildExtraFieldsRecord();
+			const source: CsvSourceConfig = {
+				type: "csv",
+				path: this.csvPath.trim(),
+				mapping: {
+					...this.mapping,
+					extraFields: Object.keys(extraFieldsRecord).length > 0 ? extraFieldsRecord : undefined,
+				},
+				mode: this.mode,
+				refreshOnViewLoad: this.refreshOnViewLoad,
+				refreshEveryMinutesEnabled: this.refreshEveryMinutesEnabled,
+				refreshEveryMinutes: refreshEveryMinutesValidation?.ok ? refreshEveryMinutesValidation.minutes : undefined,
+				keepOnEmpty: this.keepOnEmpty,
+				confirmBeforeDelete: this.confirmBeforeDelete,
+				mappingMode: this.mappingMode === "js" ? "js" : undefined,
+				jsSource: this.mappingMode === "js" ? this.jsSource : undefined,
+			};
+			this.close();
+			this.onSave({ type: "csv", source });
 			return;
 		}
 		// canSave() above guarantees selectedType === "api" by this point.
