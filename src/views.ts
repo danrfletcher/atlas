@@ -1,7 +1,7 @@
 import { App } from "obsidian";
 import type { UnitIndex } from "./unit-index";
 import { clampRefreshMinutes } from "./api-refresh-timer";
-import { buildFolderSourceChildren, reconcileFolderSourceChildDelete } from "./folder-source";
+import { basenameForDeletedRef, buildFolderSourceChildren, reconcileFolderSourceChildDelete } from "./folder-source";
 import {
 	ApiClickAction,
 	ApiFieldMapping,
@@ -868,21 +868,32 @@ export class ViewsManager {
 	/** PR-6: the "next reconciliation pass" half of the mode-switch edge cases — re-applies
 	 * `reconcileFolderSourceChildDelete` to every placeholder this Folder source previously demoted a
 	 * deleted child into, using the source's *current* `mode` rather than whatever mode was active at
-	 * the moment each one was created. A Folder source's `apiItemState` entries only ever come from
-	 * that demotion (Folder sources have no other producer of them, unlike `apiSource`), so sweeping
-	 * all of them here is safe and never touches an API source's own stale-item bookkeeping. Switching
-	 * to "overwrite" sweeps every one of them away with no warning (G14, read at reconciliation time);
-	 * switching between "merge"/"append" reshapes them in place. No `deletedRef` survives a prior call,
-	 * so this never re-populates a `noteRef` an earlier append-mode clear already removed. */
+	 * the moment each one was created. Switching to "overwrite" sweeps every one of them away with no
+	 * warning (G14, read at reconciliation time); switching between "merge"/"append" reshapes them in
+	 * place.
+	 *
+	 * R2 fix: only ever touches an entry already marked `folderSourceDeleted` — a node can carry
+	 * `apiItemState` rows that did NOT come from this demotion (e.g. it still has leftover entries
+	 * from when it was an `apiSource`, with `setApiSource`/`setFolderSource` each leaving the other's
+	 * state alone), and this sweep must never fold one of those into "not found"/append-link limbo
+	 * just because it happens to share the same node.
+	 *
+	 * R1 fix: passes every existing field (`secondary`, `noteRef`, `position`) through as `base`, not
+	 * just four of them, so a `noteRef`/`secondary` attached since the original delete (e.g. via "Add
+	 * note") survives this and every later sweep instead of being silently dropped. */
 	private sweepFolderSourceDeletedPlaceholders(node: ViewNode): void {
 		if (!node.folderSource || !node.apiItemState) return;
 		const mode = node.folderSource.mode ?? "merge";
 		for (const [id, item] of Object.entries(node.apiItemState)) {
+			if (!item.folderSourceDeleted) continue;
 			const base = {
 				id: item.id,
 				label: item.label,
 				lastSeenAt: item.lastSeenAt ?? new Date().toISOString(),
 				explicitStatusId: item.explicitStatusId,
+				secondary: item.secondary,
+				noteRef: item.noteRef,
+				position: item.position,
 			};
 			const reconciled = reconcileFolderSourceChildDelete(mode, base);
 			if (!reconciled) {
@@ -1116,8 +1127,14 @@ export class ViewsManager {
 			if (owner?.folderSource?.location === "outside") continue;
 			const ref = node.ref as UnitRef;
 			const mode = owner?.folderSource?.mode ?? "merge";
-			const label = ref.path.split("/").pop() ?? ref.path;
-			const base = { id: unitRefKey(ref), label, lastSeenAt: nowIso, explicitStatusId: node.explicitStatusId };
+			// R3 fix: strip the extension off a file's basename (matching what the row displayed while
+			// the file still existed), rather than the raw last path segment — "a.md" showing where "a"
+			// used to be was the bug.
+			const label = basenameForDeletedRef(ref);
+			// R3 fix: `index` is this node's slot among `owner`'s real children right now, before the
+			// splice below removes it — `renderNodeList` uses it to put the resulting row back in
+			// (approximately) that same slot instead of always appending it after every real child.
+			const base = { id: unitRefKey(ref), label, lastSeenAt: nowIso, explicitStatusId: node.explicitStatusId, position: index };
 			const placeholder = reconcileFolderSourceChildDelete(mode, base, ref);
 			list.splice(index, 1, ...node.children);
 			if (placeholder && owner) {
