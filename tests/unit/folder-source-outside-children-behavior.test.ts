@@ -1,4 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import { AtlasExplorerView } from "../../src/explorer-view";
 import { View, ViewNode } from "../../src/types";
 import { file, folder, meta, unit } from "../integration/create-from-meta-fixtures";
@@ -152,5 +155,117 @@ describe("status/sort/truncate-still-enabled rule — an Outside-Vault-managed r
 		const [, , , statusArg, , countArg] = renderTruncationGroupHeader.mock.calls[0];
 		expect((statusArg as { id: string }).id).toBe("todo");
 		expect(countArg).toBe(2);
+	});
+});
+
+describe("renderNodeList — R1/R2: render-time skip for an unresolved Outside-Vault source (real isOutsideManagedAndUnresolved)", () => {
+	it("skips an Outside-managed node entirely while its owning source's path doesn't resolve, rendering only the ordinary node", async () => {
+		const owner = meta("owner", "Folder", [], {
+			folderSource: { location: "outside", path: "", showFiles: true, showFolders: true, refreshOnViewLoad: false },
+		});
+		const outsideManaged = realNode("outside-a", { folderSourceManaged: true, folderSourceOwnerId: "owner" });
+		const ordinary = realNode("ordinary");
+
+		const getNode = vi.fn((_viewId: string, nodeId: string) => (nodeId === "owner" ? owner : null));
+		const sm = makeStatusesManager();
+		const fake = makeFakeExplorer(sm, { isOutsideManagedAndUnresolved: proto.isOutsideManagedAndUnresolved as never });
+		(fake as unknown as { plugin: Record<string, unknown> }).plugin = {
+			...fake.plugin,
+			viewsManager: { getNode },
+			folderSourcePathStore: { get: vi.fn(() => "") },
+		};
+
+		const container = document.createElement("div");
+		await callRenderNodeList(fake, [outsideManaged, ordinary], container, baseView, 0, []);
+
+		expect(fake.renderNode).toHaveBeenCalledTimes(1);
+		expect((fake.renderNode as ReturnType<typeof vi.fn>).mock.calls[0][0]).toBe(ordinary);
+	});
+
+	it("renders the Outside-managed node again once its source's device-local path resolves — same persisted node, no gap", async () => {
+		const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "atlas-outside-render-recover-test-"));
+		try {
+			const owner = meta("owner", "Folder", [], {
+				folderSource: { location: "outside", path: "", showFiles: true, showFolders: true, refreshOnViewLoad: false },
+			});
+			const outsideManaged = realNode("outside-a", { folderSourceManaged: true, folderSourceOwnerId: "owner" });
+			const ordinary = realNode("ordinary");
+
+			const getNode = vi.fn((_viewId: string, nodeId: string) => (nodeId === "owner" ? owner : null));
+			const sm = makeStatusesManager();
+			const fake = makeFakeExplorer(sm, { isOutsideManagedAndUnresolved: proto.isOutsideManagedAndUnresolved as never });
+			(fake as unknown as { plugin: Record<string, unknown> }).plugin = {
+				...fake.plugin,
+				viewsManager: { getNode },
+				folderSourcePathStore: { get: vi.fn(() => tmpDir) },
+			};
+
+			const container = document.createElement("div");
+			await callRenderNodeList(fake, [outsideManaged, ordinary], container, baseView, 0, []);
+
+			expect(fake.renderNode).toHaveBeenCalledTimes(2);
+			const renderedNodes = (fake.renderNode as ReturnType<typeof vi.fn>).mock.calls.map((call) => call[0]);
+			expect(renderedNodes).toContain(outsideManaged);
+			expect(renderedNodes).toContain(ordinary);
+		} finally {
+			fs.rmSync(tmpDir, { recursive: true, force: true });
+		}
+	});
+});
+
+describe("buildNodeDragPayload — R3: an Outside-Vault-managed node id never rides along in a drag payload (real isOutsideManagedNodeId)", () => {
+	function fakeDragThis(byId: Map<string, ViewNode>, selected: string[]) {
+		const getNode = vi.fn((_viewId: string, nodeId: string) => byId.get(nodeId) ?? null);
+		return {
+			plugin: { viewsManager: { getNode } },
+			selectedBucketNodeIds: new Set(selected),
+			selectedInboxRefKeys: new Set<string>(),
+			selectionAnchor: null as string | null,
+			selectionAnchorScope: null as string | null,
+			isOutsideManagedNodeId: proto.isOutsideManagedNodeId,
+		};
+	}
+
+	it("R3: dragging an ordinary row that's multi-selected alongside an Outside-managed row excludes the Outside-managed id from the payload", () => {
+		const owner = meta("owner", "Folder", [], {
+			folderSource: { location: "outside", path: "", showFiles: true, showFolders: true, refreshOnViewLoad: false },
+		});
+		const outsideChild = unit("outside-c", file("/Volumes/External/Notes/a.md"), { folderSourceManaged: true, folderSourceOwnerId: "owner" });
+		const ordinary = unit("ordinary-c", file("Notes/b.md"));
+		const byId = new Map<string, ViewNode>([
+			[owner.id, owner],
+			[outsideChild.id, outsideChild],
+			[ordinary.id, ordinary],
+		]);
+		const fake = fakeDragThis(byId, [outsideChild.id, ordinary.id]);
+
+		const payload = (proto.buildNodeDragPayload as (...a: unknown[]) => { kind: string; nodeIds: string[]; viewId: string }).call(
+			fake,
+			ordinary.id,
+			"v1"
+		);
+
+		expect(payload.nodeIds).toEqual([ordinary.id]);
+		expect(payload.nodeIds).not.toContain(outsideChild.id);
+		// The multi-select highlight itself is untouched — only the drag payload is filtered.
+		expect(fake.selectedBucketNodeIds.has(outsideChild.id)).toBe(true);
+	});
+
+	it("a multi-select with no Outside-managed member passes every id through unchanged (control case)", () => {
+		const a = unit("a", file("Notes/a.md"));
+		const b = unit("b", file("Notes/b.md"));
+		const byId = new Map<string, ViewNode>([
+			[a.id, a],
+			[b.id, b],
+		]);
+		const fake = fakeDragThis(byId, [a.id, b.id]);
+
+		const payload = (proto.buildNodeDragPayload as (...args: unknown[]) => { kind: string; nodeIds: string[]; viewId: string }).call(
+			fake,
+			a.id,
+			"v1"
+		);
+
+		expect([...payload.nodeIds].sort()).toEqual([a.id, b.id].sort());
 	});
 });
