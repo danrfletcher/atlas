@@ -4,6 +4,7 @@ import type { CachedMetadata } from "obsidian";
 import { DEFAULT_SETTINGS } from "../../src/settings";
 import type { AtlasSettings } from "../../src/settings";
 import { UnitIndex } from "../../src/unit-index";
+import { ViewsManager } from "../../src/views";
 import { seedRoot } from "../helpers";
 import type { AddedItem, UnitRef } from "../../src/types";
 
@@ -384,5 +385,33 @@ describe("UnitIndex.computePromotions — block references to module-less target
 			{ excludedFolders: ["_pool"] },
 		);
 		expect(promotedBlockPaths(index)).toEqual(["_pool/Def.md#^xyz"]);
+	});
+});
+
+describe("UnitIndex dismiss state vs. re-promotion — dismiss always wins (G10)", () => {
+	it("dismiss state survives a live link-cache recompute that newly promotes the dismissed ref (its outside-module link count going from zero to nonzero), and the plain inbox keeps excluding it", () => {
+		const caches: Record<string, CachedMetadata> = {};
+		const resolve: Record<string, string> = {};
+		const { app, index } = makeIndex(["ModuleA/Source.md", "ModuleB/Target.md"], ["ModuleA", "ModuleB"], caches, resolve);
+
+		// Nothing links to Target.md yet, so it has zero outside-module links and isn't promoted.
+		expect(promotedFilePaths(index)).toEqual([]);
+
+		const targetRef: UnitRef = { kind: "file", path: "ModuleB/Target.md" };
+		index.setDismissed(targetRef, "global", true);
+		expect(index.isDismissed(targetRef, "global")).toBe(true);
+
+		// A cross-module link now appears (e.g. the user edited Source.md) — Target.md's
+		// outside-module link count goes from zero to nonzero, which would promote it.
+		caches["ModuleA/Source.md"] = { links: [{ link: "Target", original: "[[Target]]" } as never] };
+		resolve["Target"] = "ModuleB/Target.md";
+		index.onMetadataResolved();
+
+		expect(promotedFilePaths(index)).toEqual(["ModuleB/Target.md"]);
+		expect(index.isDismissed(targetRef, "global")).toBe(true);
+
+		const views = new ViewsManager(app, [], "v1", () => {});
+		expect(views.getInboxUnits(index.getUnits(), "v1", "global", index).map((u) => u.path)).not.toContain("ModuleB/Target.md");
+		expect(views.getDismissedInboxUnits(index.getUnits(), "v1", "global", index).map((u) => u.path)).toContain("ModuleB/Target.md");
 	});
 });
