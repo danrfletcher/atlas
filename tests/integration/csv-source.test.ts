@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { App } from "obsidian";
 import { CsvSourceController } from "../../src/csv-source-controller";
 import { dotStateFor } from "../../src/api-source-controller";
-import { CsvSourceConfig, ViewNode } from "../../src/types";
+import { CsvSourceConfig, PLACEHOLDER_ROW_KIND, ViewNode } from "../../src/types";
 
 function makeNode(id: string): ViewNode {
 	return { id, type: "meta", label: "CSV folder", children: [] };
@@ -38,6 +38,33 @@ describe("CsvSourceController — integration: create, map, render-ready state",
 		expect(dotStateFor(node.apiCache)).toBe("green");
 		expect(node.apiItemOrder).toEqual(["1", "2"]);
 		expect(Object.keys(node.apiItemState ?? {})).toEqual(["1", "2"]);
+	});
+
+	it("R3(e)/G17: produced apiItemState rows carry the PLACEHOLDER_ROW_KIND tag, same as an API source's rows", async () => {
+		const app = new App();
+		await app.vault.create("data.csv", "id,name\n1,One\n2,Two\n");
+		const node = makeNode("n1");
+		const controller = new CsvSourceController();
+		await controller.refresh(node, baseSource("data.csv"), () => {}, { vault: app.vault, now: () => 1000 });
+
+		expect(node.apiItemState?.["1"].kind).toBe(PLACEHOLDER_ROW_KIND);
+		expect(node.apiItemState?.["2"].kind).toBe(PLACEHOLDER_ROW_KIND);
+	});
+
+	it("R3(f)/G22: node.apiCache.skippedCount is the sum of parse-level and mapping-level skips, not just one of the two", async () => {
+		const app = new App();
+		// Parse-level skip: the over-long row "2,Two,extra" (R2 fix). Mapping-level skip: the blank-id
+		// row "," never produces a valid id for `mapSampleRows` to keep (E2).
+		await app.vault.create("data.csv", "id,name\n1,One\n2,Two,extra\n,Blank\n3,Three\n");
+		const node = makeNode("n1");
+		const controller = new CsvSourceController();
+		await controller.refresh(node, baseSource("data.csv"), () => {}, { vault: app.vault, now: () => 1000 });
+
+		expect(node.apiCache?.rows).toEqual([
+			{ id: "1", label: "One" },
+			{ id: "3", label: "Three" },
+		]);
+		expect(node.apiCache?.skippedCount).toBe(2);
 	});
 
 	it("G23/E4: a missing source file is reported the same way a dead API URL would be, never throwing", async () => {

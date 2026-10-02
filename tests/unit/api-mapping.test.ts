@@ -231,4 +231,42 @@ describe("mapSampleRows — PR-7: CSV row-object compatibility", () => {
 		expect(result.rows).toEqual([{ id: "1", label: "One" }]);
 		expect(result.skippedCount).toBe(1);
 	});
+
+	it("R3(b): dedupes CSV rows by id exactly like any other source — first wins, later duplicates skipped (E2)", () => {
+		const parsed = parseCsv("id,name\n1,One\n1,Duplicate\n2,Two\n");
+		expect(parsed.ok).toBe(true);
+		if (!parsed.ok) return;
+		const result = mapSampleRows(parsed.rows, mapping);
+		expect(result.rows).toEqual([
+			{ id: "1", label: "One" },
+			{ id: "2", label: "Two" },
+		]);
+		expect(result.skippedCount).toBe(1);
+	});
+
+	it("R3(b): extraFields pull named CSV columns through onto each row's `extra`, same as any other source", () => {
+		const parsed = parseCsv("id,name,status,owner\n1,One,open,alice\n2,Two,closed,bob\n");
+		expect(parsed.ok).toBe(true);
+		if (!parsed.ok) return;
+		const result = mapSampleRows(parsed.rows, { idField: "id", labelField: "name", extraFields: { state: "status", who: "owner" } });
+		expect(result.rows).toEqual([
+			{ id: "1", label: "One", extra: { state: "open", who: "alice" } },
+			{ id: "2", label: "Two", extra: { state: "closed", who: "bob" } },
+		]);
+	});
+
+	it("R3(a): the 5,000-row cap and truncation behave identically for CSV input as for any other source (E4)", () => {
+		const header = "id,name\n";
+		const lines = Array.from({ length: API_ROW_CAP + 10 }, (_, i) => `${i},Row ${i}`).join("\n");
+		const parsed = parseCsv(header + lines + "\n");
+		expect(parsed.ok).toBe(true);
+		if (!parsed.ok) return;
+		expect(parsed.rows.length).toBe(API_ROW_CAP + 10);
+
+		const result = mapSampleRows(parsed.rows, mapping);
+		expect(result.rows.length).toBe(API_ROW_CAP);
+		expect(result.truncated).toBe(true);
+		expect(result.rows[0]).toEqual({ id: "0", label: "Row 0" });
+		expect(result.rows[API_ROW_CAP - 1]).toEqual({ id: `${API_ROW_CAP - 1}`, label: `Row ${API_ROW_CAP - 1}` });
+	});
 });
