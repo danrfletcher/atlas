@@ -99,14 +99,15 @@ export interface FolderSourceVaultLike {
 	getAbstractFileByPath(path: string): unknown;
 }
 
-/** PR-5 (G6/G11/E8): reconciles an Outside-Vault source's children against `outsidePath` (the
- * device-local absolute path — never `source.path`, which is meaningless while `location` is
- * "outside"). Deliberately NOT a mirror of Inside-Vault's "leave stale rows alone while
- * unresolved" (R2) behavior: the spec calls for Outside-Vault children to render empty, with no
- * sentinel row, the moment the path stops resolving, and to reappear automatically once it
- * resolves again — so an unresolved path here drops every managed child outright (lifting each
- * one's own children up a level, the same contract any other removal in this codebase uses)
- * rather than keeping them around for a later retry. */
+/** PR-5 (G6/G11/E8, R1/R2 fix): reconciles an Outside-Vault source's children against `outsidePath`
+ * (the device-local absolute path — never `source.path`, which is meaningless while `location` is
+ * "outside"). Same "leave stale rows alone while unresolved" contract Inside-Vault's R2 fix already
+ * uses below: the spec's "render empty... reappear on recovery" is an `ExplorerView` render-time
+ * concern (`isOutsideManagedAndUnresolved` skips these rows while the owning source doesn't resolve),
+ * never a reason to touch the persisted tree. An unresolved path here is a no-op — it must never
+ * delete a managed child (losing its `explicitStatusId`/collapsed state/manually-nested children and
+ * handing the slot a brand-new id on recovery, R1) or write that deletion to a synced `data.json`
+ * (R2: a missing local path on a second device must never change what device A already stored). */
 function buildOutsideFolderChildren(
 	outsidePath: string,
 	source: FolderSourceConfig,
@@ -114,17 +115,7 @@ function buildOutsideFolderChildren(
 	makeNode: (ref: UnitRef) => ViewNode,
 	context: { sourceNodeId: string; viewRoot: ViewNode[] }
 ): ViewNode[] {
-	if (!resolveOutsidePath(outsidePath)) {
-		const kept: ViewNode[] = [];
-		for (const child of existingChildren) {
-			if (child.folderSourceManaged && child.ref) {
-				kept.push(...child.children);
-				continue;
-			}
-			kept.push(child);
-		}
-		return kept;
-	}
+	if (!resolveOutsidePath(outsidePath)) return existingChildren;
 	const desiredRefs = listOutsideChildren(outsidePath, source);
 	const managedElsewhere = collectManagedRefKeys(context.viewRoot, context.sourceNodeId);
 	const removedRefs = new Set(source.removedRefs ?? []);
@@ -134,8 +125,9 @@ function buildOutsideFolderChildren(
 /** G16/E1: resolves `source.path` and reconciles `existingChildren` against it.
  *
  * - `location === "outside"` (PR-5): delegates to `buildOutsideFolderChildren` against the caller-
- *   supplied device-local `outsidePath` instead of `source.path` — see that function's own doc
- *   comment for why this behaves differently from the Inside-Vault unresolved-path case below.
+ *   supplied device-local `outsidePath` instead of `source.path` — same "leave existing managed rows
+ *   alone while unresolved" contract as the Inside-Vault case below, just against a device-local path
+ *   instead of a vault path; see that function's own doc comment for the R1/R2 reasoning.
  * - The target folder doesn't resolve (deleted/renamed away/never existed): if this source already
  *   has real managed rows from a previous, resolvable listing, they're left exactly as they are
  *   (R2 fix) — each one's own `ref` individually falls back to `resolveRef`'s existing generic
