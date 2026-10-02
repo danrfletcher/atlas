@@ -175,15 +175,19 @@ export function buildFolderSourceChildren(
  *   code path as a stale API item, Remove included.
  * - "append": the row stays, with no `notFound` (G13) — `deletedRef` becomes `noteRef` only at the
  *   initial call so the existing clear-on-delete mechanism has something to clear; a later call
- *   (switched *into* append, or re-confirmed while already in it) passes none and leaves no link to
- *   re-attach.
+ *   (switched *into* append, or re-confirmed while already in it) passes none, in which case
+ *   whatever `base.noteRef` already carries (e.g. manually re-attached via "Add note" since the
+ *   delete) survives untouched rather than being wiped back to nothing (R1 fix).
  *
- * `base.explicitStatusId` (the deleted unit's own status override, carried over from `ViewNode` to
- * `ApiItemState` — same field name, same meaning) survives in both shapes untouched, matching G13's
- * "retains all other row data ... nothing else mutates." */
+ * `base.explicitStatusId`/`secondary`/`position` (R1/R3 fixes: carried over from `ViewNode` or a
+ * prior call's own result, same field name and meaning throughout) survive in both shapes
+ * untouched, matching G13's "retains all other row data ... nothing else mutates." Every result
+ * this rule produces is stamped `folderSourceDeleted: true` (R2 fix) so the sweep that reprocesses
+ * it later can tell it apart from an unrelated, genuinely API/Table-sourced row that merely happens
+ * to live in the same `apiItemState`. */
 export function reconcileFolderSourceChildDelete(
 	mode: "append" | "merge" | "overwrite",
-	base: { id: string; label: string; lastSeenAt: string; explicitStatusId?: string },
+	base: { id: string; label: string; lastSeenAt: string; explicitStatusId?: string; secondary?: string; noteRef?: UnitRef; position?: number },
 	deletedRef?: UnitRef
 ): ApiItemState | undefined {
 	if (mode === "overwrite") return undefined;
@@ -195,14 +199,33 @@ export function reconcileFolderSourceChildDelete(
 			notFound: true,
 			lastSeenAt: base.lastSeenAt,
 			explicitStatusId: base.explicitStatusId,
+			secondary: base.secondary,
+			noteRef: base.noteRef,
+			position: base.position,
+			folderSourceDeleted: true,
 		};
 	}
 	return {
 		id: base.id,
 		label: base.label,
 		kind: PLACEHOLDER_ROW_KIND,
-		noteRef: deletedRef,
+		noteRef: deletedRef ?? base.noteRef,
 		lastSeenAt: base.lastSeenAt,
 		explicitStatusId: base.explicitStatusId,
+		secondary: base.secondary,
+		position: base.position,
+		folderSourceDeleted: true,
 	};
+}
+
+/** PR-6 (R3 fix): the display text a Folder-source child's row showed while its file still
+ * existed — a file's bare basename with its extension stripped (matching how a real `unit` row
+ * displays it before deletion), or the raw last path segment for a folder (nothing to strip).
+ * Computed from the path string alone, since by the time this runs the file is already gone —
+ * never from a live `TFile`/`TFolder`. */
+export function basenameForDeletedRef(ref: UnitRef): string {
+	const last = ref.path.split("/").pop() ?? ref.path;
+	if (ref.kind !== "file") return last;
+	const dot = last.lastIndexOf(".");
+	return dot > 0 ? last.slice(0, dot) : last;
 }
