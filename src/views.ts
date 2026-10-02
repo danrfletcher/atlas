@@ -848,21 +848,44 @@ export class ViewsManager {
 		this.save();
 	}
 
-	/** T1 fix: every ref currently managed by any Folder source, across every view. `main.ts` feeds
-	 * this straight into `UnitIndex.setFolderSourceRefs` after every change (`onChange`) so Folder-
-	 * source children resolve through `ExplorerView.resolveRef`'s normal `unitsByRefKey` lookup as
-	 * real units (G3), instead of only existing as `ViewNode`s the index never knew about and
-	 * falling through to the generic missing-ref fallback. Walks every view (not just the active
-	 * one) since the index is shared/global, not per-view. */
+	/** T1 fix: every ref currently managed by an Inside-Vault Folder source, across every view.
+	 * `main.ts` feeds this straight into `UnitIndex.setFolderSourceRefs` after every change
+	 * (`onChange`) so Folder-source children resolve through `ExplorerView.resolveRef`'s normal
+	 * `unitsByRefKey` lookup as real units (G3), instead of only existing as `ViewNode`s the index
+	 * never knew about and falling through to the generic missing-ref fallback. Walks every view (not
+	 * just the active one) since the index is shared/global, not per-view.
+	 *
+	 * R4 fix: an Outside-Vault-managed child's `ref.path` is now just an entry name relative to its
+	 * source's root (never the absolute device path — see `listOutsideChildrenWith`'s own doc
+	 * comment), which makes it exactly the kind of short, ordinary-looking string a real vault path
+	 * could also be, or that two different Outside sources could each produce. `UnitIndex`'s global
+	 * `unitsByRefKey`-shaped map has no notion of "which source owns this," so folding these in here
+	 * would risk colliding with a real vault unit, or with another Outside source's same-named child.
+	 * `ExplorerView.resolveOutsideManagedRowInfo` already bypasses the index entirely for these rows
+	 * (G8's own doc comment), so excluding them here costs nothing — they were never looked up through
+	 * this path. */
 	getFolderSourceManagedRefs(): UnitRef[] {
 		const refs: UnitRef[] = [];
-		const walk = (nodes: ViewNode[]): void => {
-			for (const node of nodes) {
-				if (node.type === "unit" && node.folderSourceManaged && node.ref) refs.push(node.ref);
-				walk(node.children);
-			}
-		};
-		for (const view of this.views) walk(view.root);
+		for (const view of this.views) {
+			const byId = new Map<string, ViewNode>();
+			const index = (nodes: ViewNode[]): void => {
+				for (const node of nodes) {
+					byId.set(node.id, node);
+					index(node.children);
+				}
+			};
+			index(view.root);
+			const walk = (nodes: ViewNode[]): void => {
+				for (const node of nodes) {
+					if (node.type === "unit" && node.folderSourceManaged && node.ref) {
+						const owner = node.folderSourceOwnerId ? byId.get(node.folderSourceOwnerId) : undefined;
+						if (owner?.folderSource?.location !== "outside") refs.push(node.ref);
+					}
+					walk(node.children);
+				}
+			};
+			walk(view.root);
+		}
 		return refs;
 	}
 
