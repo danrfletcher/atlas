@@ -1730,7 +1730,10 @@ export class AtlasExplorerView extends ItemView {
 		this.setPlacementTooltip(row, ref);
 		row.addEventListener("click", (evt) => {
 			const consumed = this.handleSelectionClick(evt, node.id, "bucket", this.bucketVisibleOrder());
-			if (!consumed) void this.openRef(ref);
+			// R9(c): `ref.path` here is a bare name relative to the Outside source's root, never a vault
+			// path — calling `openRef` would open (or create) a same-named vault-root file/module
+			// instead of doing nothing, which is what clicking an Outside row is supposed to do.
+			if (!consumed && !outsideManaged) void this.openRef(ref);
 		});
 		if (!outsideManaged) {
 			row.addEventListener("dragstart", () => (this.dragPayload = this.buildNodeDragPayload(node.id, view.id)));
@@ -2555,7 +2558,10 @@ export class AtlasExplorerView extends ItemView {
 	}
 
 	private handleRowKeydown(evt: KeyboardEvent, node: ViewNode, view: View): void {
-		if (evt.key === "Enter" && node.type === "unit" && node.ref) {
+		// R9(c): same reasoning as the row's click handler — an Outside-Vault-managed row's `ref.path`
+		// is root-relative, not a vault path, so Enter must no-op here too rather than opening (or
+		// creating) a same-named vault-root file/module.
+		if (evt.key === "Enter" && node.type === "unit" && node.ref && !this.isOutsideManagedUnit(view, node)) {
 			evt.preventDefault();
 			void this.openRef(node.ref);
 		} else if (evt.key === " " && (node.type === "meta" || node.children.length > 0)) {

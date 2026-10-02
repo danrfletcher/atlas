@@ -25,6 +25,7 @@ function makeFakeExplorerForRenderNode(overrides: Record<string, unknown> = {}) 
 		},
 		filterText: "",
 		selectedBucketNodeIds: new Set<string>(),
+		bucketVisibleOrder: vi.fn(() => []),
 		dragPayload: null as unknown,
 		resolveRef: vi.fn(async () => ({ text: "fallback", icon: "file", promoted: false, missing: false })),
 		isOutsideManagedUnit: proto.isOutsideManagedUnit,
@@ -267,5 +268,55 @@ describe("buildNodeDragPayload — R3: an Outside-Vault-managed node id never ri
 		);
 
 		expect([...payload.nodeIds].sort()).toEqual([a.id, b.id].sort());
+	});
+});
+
+describe("R9(c) — clicking or pressing Enter on an Outside-Vault-managed row never calls openRef: its ref.path is a bare name relative to the source's root, not a vault path, so opening it would open (or create) an unrelated same-named vault-root file/module instead of doing nothing", () => {
+	it("the row's click handler no-ops instead of calling openRef", async () => {
+		const owner = meta("owner", "Folder", [], { folderSource: { location: "outside", path: "", showFiles: true, showFolders: true, refreshOnViewLoad: false } });
+		const node = unit("c1", file("notes.md"), { folderSourceManaged: true, folderSourceOwnerId: "owner" });
+
+		const { row, fake } = await renderUnitRow(node, { ownerNode: owner });
+		row.dispatchEvent(new Event("click"));
+
+		expect((fake as { openRef: ReturnType<typeof vi.fn> }).openRef).not.toHaveBeenCalled();
+	});
+
+	it("an ordinary row's click handler DOES call openRef (control case)", async () => {
+		const node = unit("c2", file("Notes/a.md"));
+		const { row, fake } = await renderUnitRow(node);
+		row.dispatchEvent(new Event("click"));
+
+		expect((fake as { openRef: ReturnType<typeof vi.fn> }).openRef).toHaveBeenCalledWith({ kind: "file", path: "Notes/a.md" });
+	});
+
+	it("handleRowKeydown's real implementation no-ops Enter on an Outside-managed row instead of calling openRef", () => {
+		const owner = meta("owner", "Folder", [], { folderSource: { location: "outside", path: "", showFiles: true, showFolders: true, refreshOnViewLoad: false } });
+		const node = unit("c1", file("notes.md"), { folderSourceManaged: true, folderSourceOwnerId: "owner" });
+		const getNode = vi.fn((_viewId: string, nodeId: string) => (nodeId === "owner" ? owner : null));
+		const fake = {
+			plugin: { viewsManager: { getNode, setNodeCollapsed: vi.fn() } },
+			isOutsideManagedUnit: proto.isOutsideManagedUnit,
+			openRef: vi.fn(),
+		};
+		const evt = new KeyboardEvent("keydown", { key: "Enter" });
+
+		proto.handleRowKeydown.call(fake, evt, node, view);
+
+		expect(fake.openRef).not.toHaveBeenCalled();
+	});
+
+	it("handleRowKeydown DOES call openRef for an ordinary row on Enter (control case)", () => {
+		const node = unit("c2", file("Notes/a.md"));
+		const fake = {
+			plugin: { viewsManager: { getNode: vi.fn(() => null), setNodeCollapsed: vi.fn() } },
+			isOutsideManagedUnit: proto.isOutsideManagedUnit,
+			openRef: vi.fn(),
+		};
+		const evt = new KeyboardEvent("keydown", { key: "Enter" });
+
+		proto.handleRowKeydown.call(fake, evt, node, view);
+
+		expect(fake.openRef).toHaveBeenCalledWith({ kind: "file", path: "Notes/a.md" });
 	});
 });
