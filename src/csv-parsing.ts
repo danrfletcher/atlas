@@ -11,10 +11,12 @@
 export interface CsvParseOk {
 	ok: true;
 	rows: Record<string, string>[];
-	/** Rows dropped because they could never be tokenized (G22) — currently only the single trailing
-	 * row left behind by a quote that opens and is never closed, which consumes the rest of the file.
-	 * Ragged rows (too few/many fields) are NOT malformed and are never counted here — they are padded/
-	 * truncated instead (see `parseCsv`). */
+	/** R2 fix (G22/E3): rows dropped because they were unparseable or lost data — a quote that opens
+	 * and is never closed (every row it swallows, not just the trailing one — see
+	 * `countLostLineBreaks`), plus any data row with MORE fields than the header row (it can't be
+	 * mapped to a key without silently misaligning every field after the extra one, so it's dropped
+	 * rather than truncated). A row with FEWER fields than the header is not malformed — it is padded
+	 * with empty strings for the missing trailing fields and kept (documented leniency, not a loss). */
 	skippedCount: number;
 }
 
@@ -31,6 +33,28 @@ interface TokenizeResult {
 	/** True when the text ends while still inside an open quote — that row's fields (if any were
 	 * already completed on the current row) are NOT included in `rows`. */
 	unterminatedQuote: boolean;
+	/** R2 fix (G22): only meaningful when `unterminatedQuote` is true — how many rows the dangling
+	 * open quote swallowed, by the same counting rule `tokenize` itself uses for a well-formed tail:
+	 * every line break from the point the quote opened through end-of-file (each would otherwise
+	 * have ended a row), plus one more only if the file doesn't already end on a line break (the
+	 * final, never-terminated row still needs counting even with nothing after it). */
+	rowsLostToUnterminatedQuote: number;
+}
+
+/** Counts line breaks in `text[from..)`, treating a CRLF pair as a single break — the same rule
+ * `tokenize`'s own row-splitting uses, so this always agrees with how many rows the span would have
+ * produced had it been parsed normally. */
+function countLineBreaks(text: string, from: number): number {
+	let count = 0;
+	for (let i = from; i < text.length; i++) {
+		if (text[i] === "\r") {
+			if (text[i + 1] === "\n") i++;
+			count++;
+		} else if (text[i] === "\n") {
+			count++;
+		}
+	}
+	return count;
 }
 
 function tokenize(text: string): TokenizeResult {
@@ -38,6 +62,7 @@ function tokenize(text: string): TokenizeResult {
 	let row: string[] = [];
 	let field = "";
 	let inQuotes = false;
+	let quoteOpenIndex = -1;
 	let i = 0;
 	const n = text.length;
 
@@ -60,6 +85,7 @@ function tokenize(text: string): TokenizeResult {
 		}
 		if (c === '"') {
 			inQuotes = true;
+			quoteOpenIndex = i;
 			i++;
 			continue;
 		}
@@ -90,7 +116,12 @@ function tokenize(text: string): TokenizeResult {
 		i++;
 	}
 
-	if (inQuotes) return { rows, unterminatedQuote: true };
+	if (inQuotes) {
+		const lastChar = text[n - 1];
+		const endsOnLineBreak = lastChar === "\n" || lastChar === "\r";
+		const rowsLostToUnterminatedQuote = countLineBreaks(text, quoteOpenIndex) + (endsOnLineBreak ? 0 : 1);
+		return { rows, unterminatedQuote: true, rowsLostToUnterminatedQuote };
+	}
 
 	// Flush a final field/row with no trailing newline — skip entirely for a truly empty file so it
 	// stays a clean zero-row result rather than one phantom empty row.
@@ -98,7 +129,7 @@ function tokenize(text: string): TokenizeResult {
 		row.push(field);
 		rows.push(row);
 	}
-	return { rows, unterminatedQuote: false };
+	return { rows, unterminatedQuote: false, rowsLostToUnterminatedQuote: 0 };
 }
 
 /** Blank headers fall back to "column"; any header (blank-fallback or not) that collides with an
@@ -122,7 +153,7 @@ export function parseCsv(text: string): CsvParseOutcome {
 		return { ok: false, error: "This file doesn't look like a CSV text file (it contains binary data)." };
 	}
 
-	const { rows: rawRows, unterminatedQuote } = tokenize(stripped);
+	const { rows: rawRows, unterminatedQuote, rowsLostToUnterminatedQuote } = tokenize(stripped);
 
 	if (unterminatedQuote && rawRows.length === 0) {
 		return { ok: false, error: "Couldn't read a header row: a quoted field is opened but never closed." };
@@ -132,11 +163,20 @@ export function parseCsv(text: string): CsvParseOutcome {
 
 	const headers = dedupeHeaders(rawRows[0]);
 	const dataRows = rawRows.slice(1);
-	const rows: Record<string, string>[] = dataRows.map((raw) => {
+	let skippedCount = unterminatedQuote ? rowsLostToUnterminatedQuote : 0;
+	const rows: Record<string, string>[] = [];
+	for (const raw of dataRows) {
+		// R2 fix (G22/E3): a row with MORE fields than the header can't be mapped to a key without
+		// silently misaligning every field after the extra one — dropped and counted rather than
+		// truncated. A row with fewer fields is padded (see loop below) and kept, not malformed.
+		if (raw.length > headers.length) {
+			skippedCount++;
+			continue;
+		}
 		const obj: Record<string, string> = {};
 		for (let i = 0; i < headers.length; i++) obj[headers[i]] = raw[i] ?? "";
-		return obj;
-	});
+		rows.push(obj);
+	}
 
-	return { ok: true, rows, skippedCount: unterminatedQuote ? 1 : 0 };
+	return { ok: true, rows, skippedCount };
 }

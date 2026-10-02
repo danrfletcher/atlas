@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { parseCsv } from "../../src/csv-parsing";
+import { sampleFieldsForArrayField } from "../../src/api-mapping";
 
 describe("parseCsv — G19: header row, zero-row cases", () => {
 	it("treats a truly empty file as zero rows, not an error", () => {
@@ -64,12 +65,27 @@ describe("parseCsv — ragged rows (not malformed)", () => {
 		}
 	});
 
-	it("truncates a long row's extra fields beyond the header count", () => {
-		const result = parseCsv("id,name\n1,One,extra,more\n");
+});
+
+describe("parseCsv — R2 fix (G22/E3): over-long rows are skipped and counted, not truncated", () => {
+	it("skips a row with more fields than the header and counts it via skippedCount", () => {
+		const result = parseCsv("id,name\n1,One,extra,more\n2,Two\n");
 		expect(result.ok).toBe(true);
 		if (result.ok) {
-			expect(result.rows).toEqual([{ id: "1", name: "One" }]);
-			expect(result.skippedCount).toBe(0);
+			expect(result.rows).toEqual([{ id: "2", name: "Two" }]);
+			expect(result.skippedCount).toBe(1);
+		}
+	});
+
+	it("counts every over-long row in a multi-row file, keeping the well-formed ones", () => {
+		const result = parseCsv("id,name\n1,One\n2,Two,extra\n3,Three\n4,Four,extra,more\n");
+		expect(result.ok).toBe(true);
+		if (result.ok) {
+			expect(result.rows).toEqual([
+				{ id: "1", name: "One" },
+				{ id: "3", name: "Three" },
+			]);
+			expect(result.skippedCount).toBe(2);
 		}
 	});
 });
@@ -81,6 +97,17 @@ describe("parseCsv — G22: malformed-row skip vs. whole-parse failure", () => {
 		if (result.ok) {
 			expect(result.rows).toEqual([{ id: "1", name: "One" }]);
 			expect(result.skippedCount).toBe(1);
+		}
+	});
+
+	it("R2 fix: an unterminated quote that swallows several lines to EOF counts every row it lost, not just 1", () => {
+		// The quote opens on row 2 and never closes — rows 2, 3 and the trailing empty-looking
+		// line-break-only segment are all merged into one dangling field, losing 3 would-be rows.
+		const result = parseCsv('id,name\n2,"unterminated\nstill inside\nalso inside\n');
+		expect(result.ok).toBe(true);
+		if (result.ok) {
+			expect(result.rows).toEqual([]);
+			expect(result.skippedCount).toBe(3);
 		}
 	});
 
@@ -130,5 +157,30 @@ describe("parseCsv — encoding and header edge cases", () => {
 		const result = parseCsv("id,,\n1,a,b\n");
 		expect(result.ok).toBe(true);
 		if (result.ok) expect(result.rows).toEqual([{ id: "1", column: "a", column_2: "b" }]);
+	});
+});
+
+describe("parseCsv — R3(c): first-row-as-headers feeds the mapping UI's key candidates, same as an API sample", () => {
+	it("row-1 headers become the drag-mapping key candidates via sampleFieldsForArrayField, in header order", () => {
+		const result = parseCsv("id,name,secondary\n1,One,alpha\n2,Two,beta\n");
+		expect(result.ok).toBe(true);
+		if (!result.ok) return;
+		// CSV rows are already a flat array of row objects — no `arrayField` needed, exactly like an
+		// API response that's a top-level array.
+		expect(sampleFieldsForArrayField(result.rows)).toEqual(["id", "name", "secondary"]);
+	});
+
+	it("only row 1 supplies the header/key candidates — a later row with extra same-named-looking data never adds new keys", () => {
+		const result = parseCsv("id,name\n1,One\n2,Two\n");
+		expect(result.ok).toBe(true);
+		if (!result.ok) return;
+		expect(sampleFieldsForArrayField(result.rows)).toEqual(["id", "name"]);
+	});
+
+	it("a duplicate header's deduped key (e.g. name_2) surfaces as its own distinct mapping candidate", () => {
+		const result = parseCsv("id,name,name\n1,One,Uno\n");
+		expect(result.ok).toBe(true);
+		if (!result.ok) return;
+		expect(sampleFieldsForArrayField(result.rows)).toEqual(["id", "name", "name_2"]);
 	});
 });
