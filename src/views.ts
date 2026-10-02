@@ -17,6 +17,7 @@ import {
 	ViewNode,
 	createEmptyView,
 	rewritePathString,
+	rewriteRefKeyPath,
 	rewriteRefPath,
 	unitRefKey,
 	unitRefsEqual,
@@ -925,10 +926,17 @@ export class ViewsManager {
 			}
 			// PR-4 (G5): `folderSource.path` is a plain vault-relative string, not a `UnitRef` — same
 			// rename-integrity rule, via the same shared helper `rewriteRefPath` itself now delegates to.
+			// PR-4 (R8): `folderSource.removedRefs` is a set of `unitRefKey` strings, each embedding a
+			// path of its own — they go stale on the same rename unless rewritten the same way, or a
+			// removed row's key stops matching and the row comes back on the next refresh.
 			if (node.folderSource) {
-				const rewritten = rewritePathString(node.folderSource.path, oldPath, newPath);
-				if (rewritten !== node.folderSource.path) {
-					node.folderSource = { ...node.folderSource, path: rewritten };
+				const rewrittenPath = rewritePathString(node.folderSource.path, oldPath, newPath);
+				const removedRefs = node.folderSource.removedRefs;
+				const rewrittenRemovedRefs = removedRefs?.map((key) => rewriteRefKeyPath(key, oldPath, newPath));
+				const removedRefsChanged =
+					!!removedRefs && !!rewrittenRemovedRefs && removedRefs.some((key, i) => key !== rewrittenRemovedRefs[i]);
+				if (rewrittenPath !== node.folderSource.path || removedRefsChanged) {
+					node.folderSource = { ...node.folderSource, path: rewrittenPath, removedRefs: rewrittenRemovedRefs };
 					changed = true;
 				}
 			}

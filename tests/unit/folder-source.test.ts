@@ -278,6 +278,87 @@ describe("ref-rewrite-on-rename — G5", () => {
 	});
 });
 
+describe("removedRefs-rewrite-on-rename — R8", () => {
+	it("onVaultRename rewrites a removedRefs key when the source's own target folder is renamed/moved", () => {
+		const vm = makeViewsManager();
+		const view = vm.getViews()[0];
+		const folder = vm.addMetaFolder(view.id, null, "Folder source")!;
+		vm.setFolderSource(view.id, folder.id, source({ path: "Projects", removedRefs: ["file:Projects/a.md"] }));
+
+		vm.onVaultRename("Projects", "Renamed");
+
+		const rewritten = vm.getNode(view.id, folder.id)!.folderSource!;
+		expect(rewritten.path).toBe("Renamed");
+		expect(rewritten.removedRefs).toEqual(["file:Renamed/a.md"]);
+	});
+
+	it("onVaultRename rewrites a removedRefs key when the individually removed child itself is renamed", () => {
+		const vm = makeViewsManager();
+		const view = vm.getViews()[0];
+		const folder = vm.addMetaFolder(view.id, null, "Folder source")!;
+		vm.setFolderSource(view.id, folder.id, source({ path: "Projects", removedRefs: ["file:Projects/a.md"] }));
+
+		vm.onVaultRename("Projects/a.md", "Projects/renamed.md");
+
+		const rewritten = vm.getNode(view.id, folder.id)!.folderSource!;
+		expect(rewritten.path).toBe("Projects");
+		expect(rewritten.removedRefs).toEqual(["file:Projects/renamed.md"]);
+	});
+
+	it("onVaultRename rewrites a removedRefs key for a folder- or block-kind ref the same way", () => {
+		const vm = makeViewsManager();
+		const view = vm.getViews()[0];
+		const folder = vm.addMetaFolder(view.id, null, "Folder source")!;
+		vm.setFolderSource(
+			view.id,
+			folder.id,
+			source({ path: "Projects", removedRefs: ["folder:Projects/Sub", "block:Projects/a.md#^abc"] })
+		);
+
+		vm.onVaultRename("Projects", "Renamed");
+
+		const rewritten = vm.getNode(view.id, folder.id)!.folderSource!;
+		expect(rewritten.removedRefs).toEqual(["folder:Renamed/Sub", "block:Renamed/a.md#^abc"]);
+	});
+
+	it("onVaultRename leaves an unrelated removedRefs key untouched", () => {
+		const vm = makeViewsManager();
+		const view = vm.getViews()[0];
+		const folder = vm.addMetaFolder(view.id, null, "Folder source")!;
+		vm.setFolderSource(view.id, folder.id, source({ path: "Projects", removedRefs: ["file:Unrelated/a.md"] }));
+
+		vm.onVaultRename("Projects", "Renamed");
+
+		const rewritten = vm.getNode(view.id, folder.id)!.folderSource!;
+		expect(rewritten.removedRefs).toEqual(["file:Unrelated/a.md"]);
+	});
+
+	it("end-to-end: removing a managed child, then renaming it, then refreshing, does not resurrect it under its new name", () => {
+		const app = new MockApp();
+		app.vault.seedFolder("Proj");
+		const aFile = app.vault.seedFile("Proj/a.md");
+		const vm = new ViewsManager(app as unknown as App, [], "", () => {});
+		const view = vm.getViews()[0];
+		const folder = vm.addMetaFolder(view.id, null, "Folder source")!;
+		vm.setFolderSource(view.id, folder.id, source({ path: "Proj" }));
+		vm.refreshFolderSource(view.id, folder.id);
+
+		const aNode = vm.getNode(view.id, folder.id)!.children.find((n) => n.ref && n.ref.path === "Proj/a.md")!;
+		vm.unplaceNode(view.id, aNode.id);
+		expect(vm.getNode(view.id, folder.id)!.folderSource!.removedRefs).toEqual(["file:Proj/a.md"]);
+
+		return app.vault.rename(aFile, "Proj/renamed.md").then(() => {
+			vm.onVaultRename("Proj/a.md", "Proj/renamed.md");
+			expect(vm.getNode(view.id, folder.id)!.folderSource!.removedRefs).toEqual(["file:Proj/renamed.md"]);
+
+			vm.refreshFolderSource(view.id, folder.id);
+
+			const renamedRef: UnitRef = { kind: "file", path: "Proj/renamed.md" };
+			expect(countRef(view.root, renamedRef)).toBe(0);
+		});
+	});
+});
+
 /** Counts how many nodes anywhere in the tree (recursively, not just direct children) carry `ref`. */
 function countRef(nodes: ViewNode[], ref: UnitRef): number {
 	let count = 0;

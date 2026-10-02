@@ -31,6 +31,30 @@ export function rewriteRefPath(ref: UnitRef, oldPath: string, newPath: string): 
 	return rewritten === ref.path ? ref : { ...ref, path: rewritten };
 }
 
+/** PR-4 (R8): rewrites the path embedded in a `unitRefKey` string (`'file:Proj/a.md'`,
+ * `'folder:Proj'`, `'block:Proj/a.md#^abc'`) using the same rename-integrity rule as
+ * `rewritePathString`. `FolderSourceConfig.removedRefs` stores these keys rather than `UnitRef`s
+ * (it only needs to test membership), but still needs to stay in sync on rename like every other
+ * ref in the view — otherwise a removed row's key stops matching the renamed path and the row comes
+ * back on the next refresh. Returns the same string instance, unchanged, if the embedded path
+ * doesn't match `oldPath`. */
+export function rewriteRefKeyPath(key: string, oldPath: string, newPath: string): string {
+	const colon = key.indexOf(":");
+	if (colon < 0) return key;
+	const kind = key.slice(0, colon);
+	const rest = key.slice(colon + 1);
+	if (kind === "block") {
+		const hash = rest.indexOf("#");
+		if (hash < 0) return key;
+		const path = rest.slice(0, hash);
+		const subpath = rest.slice(hash + 1);
+		const rewritten = rewritePathString(path, oldPath, newPath);
+		return rewritten === path ? key : `block:${rewritten}#${subpath}`;
+	}
+	const rewritten = rewritePathString(rest, oldPath, newPath);
+	return rewritten === rest ? key : `${kind}:${rewritten}`;
+}
+
 /** A unit as classified by the index — the computed shape the explorer (F8) will render. */
 export type Unit =
 	| { type: "root-file"; path: string }
