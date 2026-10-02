@@ -80,9 +80,11 @@ interface Fake {
 	collectApiSourceNodes: (...args: unknown[]) => unknown;
 	collectFolderSourceNodes: (...args: unknown[]) => unknown;
 	collectCsvSourceNodes: (...args: unknown[]) => unknown;
+	collectMarkdownTableSourceNodes: (...args: unknown[]) => unknown;
 	refreshApiSource: ReturnType<typeof vi.fn>;
 	refreshFolderSource: ReturnType<typeof vi.fn>;
 	refreshCsvSource: ReturnType<typeof vi.fn>;
+	refreshMarkdownTableSource: ReturnType<typeof vi.fn>;
 }
 
 function makeFake(view: View, clock: FakeClock): Fake {
@@ -92,9 +94,11 @@ function makeFake(view: View, clock: FakeClock): Fake {
 		collectApiSourceNodes: proto.collectApiSourceNodes,
 		collectFolderSourceNodes: proto.collectFolderSourceNodes,
 		collectCsvSourceNodes: proto.collectCsvSourceNodes,
+		collectMarkdownTableSourceNodes: proto.collectMarkdownTableSourceNodes,
 		refreshApiSource: vi.fn(),
 		refreshFolderSource: vi.fn(),
 		refreshCsvSource: vi.fn(),
+		refreshMarkdownTableSource: vi.fn(),
 	};
 }
 
