@@ -424,11 +424,15 @@ export class AtlasExplorerView extends ItemView {
 
 	// --- G1/G5/G6/G11: API-backed Folders ---------------------------------------------------------
 
-	/** G5a: refreshes every Folder in the active view that has "refresh when Atlas view loads" on. */
+	/** G5a/PR-4 (G10): refreshes every Folder in the active view that has "refresh when Atlas view
+	 * loads" on — both API and (Inside-Vault) Folder sources, reusing this same trigger/toggle. */
 	private refreshApiSourcesOnViewLoad(): void {
 		const view = this.plugin.viewsManager.getActiveView();
 		for (const node of this.collectApiSourceNodes(view.root)) {
 			if (node.apiSource?.refreshOnViewLoad) this.refreshApiSource(view, node, "automatic");
+		}
+		for (const node of this.collectFolderSourceNodes(view.root)) {
+			if (node.folderSource?.refreshOnViewLoad) this.refreshFolderSource(view, node);
 		}
 	}
 
@@ -443,12 +447,28 @@ export class AtlasExplorerView extends ItemView {
 		return out;
 	}
 
-	/** G5b/F3: (re)schedules this Atlas view's "Refresh every X minutes" timers against the active
-	 * View's current set of eligible Folders — called after every render, so a saved config change
-	 * (interval edited, toggle flipped, source removed) reschedules cleanly on the very next render
-	 * rather than needing a dedicated call site of its own for each way that can happen. */
+	/** PR-4 (G10): same walk as `collectApiSourceNodes`, for Folder sources — kept as its own
+	 * function rather than merged into one, since the two are gated/dispatched on different fields
+	 * (`apiSource` vs `folderSource`) at every call site anyway. */
+	private collectFolderSourceNodes(nodes: ViewNode[]): ViewNode[] {
+		const out: ViewNode[] = [];
+		for (const node of nodes) {
+			if (node.type === "meta") {
+				if (node.folderSource) out.push(node);
+				out.push(...this.collectFolderSourceNodes(node.children));
+			}
+		}
+		return out;
+	}
+
+	/** G5b/F3/PR-4 (G10): (re)schedules this Atlas view's "Refresh every X minutes" timers against
+	 * the active View's current set of eligible Folders — both API and Folder sources feed the same
+	 * scheduler (`RefreshEveryTimers` is already source-type-agnostic), so no new scheduler is
+	 * introduced for Folder sources. Called after every render, so a saved config change (interval
+	 * edited, toggle flipped, source removed) reschedules cleanly on the very next render rather than
+	 * needing a dedicated call site of its own for each way that can happen. */
 	private syncRefreshTimers(view: View): void {
-		const nodes = this.collectApiSourceNodes(view.root)
+		const apiNodes = this.collectApiSourceNodes(view.root)
 			.filter((node) => node.apiSource?.refreshEveryMinutesEnabled)
 			.map((node) => ({
 				id: node.id,
@@ -456,10 +476,26 @@ export class AtlasExplorerView extends ItemView {
 				minutes: node.apiSource?.refreshEveryMinutes ?? MIN_REFRESH_MINUTES,
 				lastFetchedAt: node.apiCache?.fetchedAt ?? null,
 			}));
-		this.refreshEveryTimers.sync(nodes, (nodeId) => {
+		const folderNodes = this.collectFolderSourceNodes(view.root)
+			.filter((node) => node.folderSource?.refreshEveryMinutesEnabled)
+			.map((node) => ({
+				id: node.id,
+				enabled: true,
+				minutes: node.folderSource?.refreshEveryMinutes ?? MIN_REFRESH_MINUTES,
+				// PR-4: a Folder source has no fetch-timestamp cache of its own (its "cache" is just the
+				// real children it manages) — always `null`, so a never-refreshed Folder fires one
+				// immediate catch-up refresh the same way a never-fetched API source does.
+				lastFetchedAt: null,
+			}));
+		this.refreshEveryTimers.sync([...apiNodes, ...folderNodes], (nodeId) => {
 			const activeView = this.plugin.viewsManager.getActiveView();
-			const target = this.collectApiSourceNodes(activeView.root).find((n) => n.id === nodeId);
-			if (target) this.refreshApiSource(activeView, target, "automatic");
+			const apiTarget = this.collectApiSourceNodes(activeView.root).find((n) => n.id === nodeId);
+			if (apiTarget) {
+				this.refreshApiSource(activeView, apiTarget, "automatic");
+				return;
+			}
+			const folderTarget = this.collectFolderSourceNodes(activeView.root).find((n) => n.id === nodeId);
+			if (folderTarget) this.refreshFolderSource(activeView, folderTarget);
 		});
 	}
 
@@ -485,13 +521,32 @@ export class AtlasExplorerView extends ItemView {
 		});
 	}
 
+	/** PR-4 (G3/G10/F5): resolves and reconciles an Inside-Vault Folder source's children against its
+	 * target folder. Purely a data-layer operation (`ViewsManager.refreshFolderSource` only reads the
+	 * vault, never writes it) — the resulting real unit children render for free through the normal
+	 * tree, with no Folder-source-specific rendering path. */
+	private refreshFolderSource(view: View, node: ViewNode): void {
+		this.plugin.viewsManager.refreshFolderSource(view.id, node.id);
+	}
+
 	private openApiSourceModal(view: View, node: ViewNode): void {
 		const headers = this.plugin.apiHeadersStore.get(node.id);
-		new ApiSourceModal(this.plugin.app, node.apiSource ?? null, headers, (result) => {
-			this.plugin.apiHeadersStore.set(node.id, result.headers);
-			this.plugin.viewsManager.setApiSource(view.id, node.id, result.source);
-			this.refreshApiSource(view, node, "manual");
-		}).open();
+		new ApiSourceModal(
+			this.plugin.app,
+			node.apiSource ?? null,
+			headers,
+			(result) => {
+				if (result.type === "folder") {
+					this.plugin.viewsManager.setFolderSource(view.id, node.id, result.source);
+					this.refreshFolderSource(view, node);
+					return;
+				}
+				this.plugin.apiHeadersStore.set(node.id, result.headers);
+				this.plugin.viewsManager.setApiSource(view.id, node.id, result.source);
+				this.refreshApiSource(view, node, "manual");
+			},
+			node.folderSource ?? null
+		).open();
 	}
 
 	/** R3/G7: `duplicateNode` deep-copies `apiSource` itself, but the device-local headers for it (and
@@ -2114,6 +2169,29 @@ export class AtlasExplorerView extends ItemView {
 								// if a source is added back to this Folder later.
 								this.plugin.apiHeadersStore.delete(node.id);
 							}
+						).open();
+					})
+			);
+		} else if (node.folderSource) {
+			// PR-4 (G10): reuses the exact same menu actions as an API source — "Refresh now" re-runs
+			// the (synchronous, disk-read-only) reconciliation; "Remove data source" just stops it,
+			// since the children it already placed are ordinary real units with nowhere else to go.
+			menu.addItem((item) =>
+				item
+					.setTitle("Refresh now")
+					.setIcon("refresh-cw")
+					.onClick(() => this.refreshFolderSource(view, node))
+			);
+			menu.addItem((item) =>
+				item
+					.setTitle("Remove data source")
+					.setIcon("unplug")
+					.onClick(() => {
+						new ConfirmModal(
+							this.plugin.app,
+							`Remove the data source from "${node.label}"? Its current children stay in place as plain units — it just stops refreshing.`,
+							"Remove",
+							() => this.plugin.viewsManager.setFolderSource(view.id, node.id, undefined)
 						).open();
 					})
 			);

@@ -1,7 +1,28 @@
 import { App } from "obsidian";
 import type { UnitIndex } from "./unit-index";
 import { clampRefreshMinutes } from "./api-refresh-timer";
-import { ApiClickAction, ApiFieldMapping, ApiItemState, ApiSourceConfig, DEFAULT_VIEW_NAME, PLACEHOLDER_ROW_KIND, StatusGovernance, Unit, UnitRef, View, ViewNode, createEmptyView, rewriteRefPath, unitRefsEqual, unitToRef } from "./types";
+import { buildFolderSourceChildren } from "./folder-source";
+import {
+	ApiClickAction,
+	ApiFieldMapping,
+	ApiItemState,
+	ApiSourceConfig,
+	DEFAULT_VIEW_NAME,
+	FolderSourceConfig,
+	PLACEHOLDER_ROW_KIND,
+	StatusGovernance,
+	Unit,
+	UnitRef,
+	View,
+	ViewNode,
+	createEmptyView,
+	rewritePathString,
+	rewriteRefKeyPath,
+	rewriteRefPath,
+	unitRefKey,
+	unitRefsEqual,
+	unitToRef,
+} from "./types";
 
 function generateNodeId(): string {
 	return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
@@ -154,7 +175,40 @@ function sanitizeApiFields(node: ViewNode): void {
 		node.apiAwaitingConfirmation = undefined;
 	}
 
+	sanitizeFolderSource(node);
+
 	for (const child of node.children) sanitizeApiFields(child);
+}
+
+/** PR-4 (G5/G16): `data.json` is free-form JSON — hand-edited or corrupted, `folderSource.path` can
+ * be missing/non-string, and `location`/`showFiles`/`showFolders`/the refresh fields can be any shape
+ * at all. A `folderSource` missing a usable `path` is dropped entirely (mirrors `apiSource`'s own
+ * "no usable mapping" rule — there's no safe path to invent); every other field falls back to its own
+ * spec'd default (G4: `location` "inside", both show-toggles on) rather than being rejected outright. */
+function sanitizeFolderSource(node: ViewNode): void {
+	if (!node.folderSource) return;
+	const raw = node.folderSource as Partial<FolderSourceConfig>;
+	if (typeof raw.path !== "string") {
+		node.folderSource = undefined;
+		return;
+	}
+	const rawMinutes = raw.refreshEveryMinutes;
+	const validMinutes = typeof rawMinutes === "number" && Number.isFinite(rawMinutes);
+	const refreshEveryMinutes = validMinutes ? clampRefreshMinutes(rawMinutes) : undefined;
+	const rawRemoved = raw.removedRefs;
+	node.folderSource = {
+		type: "folder",
+		location: raw.location === "outside" ? "outside" : "inside",
+		path: raw.path,
+		showFiles: typeof raw.showFiles === "boolean" ? raw.showFiles : true,
+		showFolders: typeof raw.showFolders === "boolean" ? raw.showFolders : true,
+		refreshOnViewLoad: !!raw.refreshOnViewLoad,
+		refreshEveryMinutesEnabled: !!raw.refreshEveryMinutesEnabled && refreshEveryMinutes !== undefined,
+		refreshEveryMinutes,
+		// R1 fix: `unitRefKey` strings the user has removed from this source's managed set — any
+		// non-string entry (hand-edited `data.json`) is dropped rather than rejecting the whole list.
+		removedRefs: Array.isArray(rawRemoved) ? rawRemoved.filter((key): key is string => typeof key === "string") : undefined,
+	};
 }
 
 /** G9b: resolves the effective click action for a source, defaulting to "open-attachment". */
@@ -450,10 +504,28 @@ export class ViewsManager {
 	 * `unplaceUnit`/`deleteMetaFolder`. */
 	unplaceNode(viewId: string, nodeId: string): void {
 		const view = this.getView(viewId);
-		const found = view && this.findNode(view.root, nodeId);
+		if (!view) return;
+		const found = this.findNode(view.root, nodeId);
 		if (!found) return;
+		this.rememberFolderSourceRemoval(view, found.node);
 		found.siblings.splice(found.index, 1, ...found.node.children);
 		this.save();
+	}
+
+	/** R1 fix: when a Folder-source-managed row is removed from the view entirely (not moved or
+	 * renested elsewhere, which `refreshFolderSource`'s whole-view search already tolerates without
+	 * this), remembers its ref on the owning source's `removedRefs` so the next refresh treats it as
+	 * "the user removed this," not "never resolved yet," and doesn't recreate it — the same permanence
+	 * any other removal in this codebase already has. No-op for a node that isn't Folder-source-managed,
+	 * or whose owning node no longer carries a Folder source. */
+	private rememberFolderSourceRemoval(view: View, node: ViewNode): void {
+		if (!node.folderSourceManaged || !node.ref || !node.folderSourceOwnerId) return;
+		const owner = this.findNode(view.root, node.folderSourceOwnerId);
+		const source = owner?.node.folderSource;
+		if (!source) return;
+		const key = unitRefKey(node.ref);
+		if (!source.removedRefs) source.removedRefs = [key];
+		else if (!source.removedRefs.includes(key)) source.removedRefs.push(key);
 	}
 
 	addMetaFolder(viewId: string, parentId: string | null, label: string): ViewNode | null {
@@ -539,6 +611,10 @@ export class ViewsManager {
 		}
 		clone.apiCache = undefined;
 		clone.apiAwaitingConfirmation = undefined;
+
+		// PR-4: same reference-sharing hazard as `apiSource` above — a shallow `{...node}` spread
+		// would leave both nodes' `folderSource` pointing at the very same object.
+		clone.folderSource = node.folderSource ? { ...node.folderSource } : node.folderSource;
 
 		return clone;
 	}
@@ -717,6 +793,66 @@ export class ViewsManager {
 		this.save();
 	}
 
+	/** PR-4 (G4/G5/G10): sets a Folder's Folder data source, or removes it (passing `undefined` —
+	 * "Remove data source"). Unlike `setApiSource`, removal needs no special-case cleanup: Folder-
+	 * source children are ordinary real `ViewNode` units (not placeholder rows tied to a live source),
+	 * so they simply stop being managed/refreshed and stay exactly where they are, like any other
+	 * manually-placed unit. */
+	setFolderSource(viewId: string, nodeId: string, source: FolderSourceConfig | undefined): void {
+		const view = this.getView(viewId);
+		const found = view && this.findNode(view.root, nodeId);
+		if (!found || found.node.type !== "meta") return;
+		found.node.folderSource = source;
+		this.save();
+	}
+
+	/** PR-4 (G3/G5/G10/G16): resolves the Folder source's target and reconciles this node's children
+	 * against it (adds newly-appeared children, drops any whose kind got toggled off, leaves
+	 * everything else — including a since-deleted managed child's now-missing ref — exactly as it
+	 * is; see `buildFolderSourceChildren`'s own doc comment for the full reconciliation contract). A
+	 * no-op if the node isn't a meta node with a Folder source. Read-only against the vault: this
+	 * never creates/moves/deletes anything on disk (F5). */
+	refreshFolderSource(viewId: string, nodeId: string): void {
+		const view = this.getView(viewId);
+		if (!view) return;
+		const found = this.findNode(view.root, nodeId);
+		if (!found || found.node.type !== "meta" || !found.node.folderSource) return;
+		const ownerId = found.node.id;
+		found.node.children = buildFolderSourceChildren(
+			this.app.vault,
+			found.node.folderSource,
+			found.node.children,
+			(ref) => ({
+				id: generateNodeId(),
+				type: "unit",
+				ref,
+				children: [],
+				folderSourceManaged: true,
+				folderSourceOwnerId: ownerId,
+			}),
+			{ sourceNodeId: ownerId, viewRoot: view.root }
+		);
+		this.save();
+	}
+
+	/** T1 fix: every ref currently managed by any Folder source, across every view. `main.ts` feeds
+	 * this straight into `UnitIndex.setFolderSourceRefs` after every change (`onChange`) so Folder-
+	 * source children resolve through `ExplorerView.resolveRef`'s normal `unitsByRefKey` lookup as
+	 * real units (G3), instead of only existing as `ViewNode`s the index never knew about and
+	 * falling through to the generic missing-ref fallback. Walks every view (not just the active
+	 * one) since the index is shared/global, not per-view. */
+	getFolderSourceManagedRefs(): UnitRef[] {
+		const refs: UnitRef[] = [];
+		const walk = (nodes: ViewNode[]): void => {
+			for (const node of nodes) {
+				if (node.type === "unit" && node.folderSourceManaged && node.ref) refs.push(node.ref);
+				walk(node.children);
+			}
+		};
+		for (const view of this.views) walk(view.root);
+		return refs;
+	}
+
 	/** G8: sets one API item's own explicit status — the item has no real `ViewNode`, so
 	 * `setExplicitStatus` (which addresses a node by id) can't be reused directly. */
 	setApiItemStatus(viewId: string, nodeId: string, itemId: string, statusId: string): void {
@@ -804,6 +940,22 @@ export class ViewsManager {
 						item.noteRef = rewritten;
 						changed = true;
 					}
+				}
+			}
+			// PR-4 (G5): `folderSource.path` is a plain vault-relative string, not a `UnitRef` — same
+			// rename-integrity rule, via the same shared helper `rewriteRefPath` itself now delegates to.
+			// PR-4 (R8): `folderSource.removedRefs` is a set of `unitRefKey` strings, each embedding a
+			// path of its own — they go stale on the same rename unless rewritten the same way, or a
+			// removed row's key stops matching and the row comes back on the next refresh.
+			if (node.folderSource) {
+				const rewrittenPath = rewritePathString(node.folderSource.path, oldPath, newPath);
+				const removedRefs = node.folderSource.removedRefs;
+				const rewrittenRemovedRefs = removedRefs?.map((key) => rewriteRefKeyPath(key, oldPath, newPath));
+				const removedRefsChanged =
+					!!removedRefs && !!rewrittenRemovedRefs && removedRefs.some((key, i) => key !== rewrittenRemovedRefs[i]);
+				if (rewrittenPath !== node.folderSource.path || removedRefsChanged) {
+					node.folderSource = { ...node.folderSource, path: rewrittenPath, removedRefs: rewrittenRemovedRefs };
+					changed = true;
 				}
 			}
 			if (this.rewriteTree(node.children, oldPath, newPath)) changed = true;

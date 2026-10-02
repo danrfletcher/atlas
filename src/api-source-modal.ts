@@ -1,4 +1,4 @@
-import { App, ButtonComponent, Modal, Notice, Platform, Setting } from "obsidian";
+import { App, ButtonComponent, Modal, Notice, Platform, Setting, TFolder } from "obsidian";
 import { canSaveApiSource, findArrayFields, isMapError, isValidExtraFieldName, mapResponseRows, sampleFieldsForArrayField } from "./api-mapping";
 import { generateJsFromMapping, runJsMapping, validateJsSource } from "./api-js-mapping";
 import { httpGetJson } from "./api-http";
@@ -6,16 +6,13 @@ import { obsidianRequestImpl } from "./api-request-obsidian";
 import { MIN_REFRESH_MINUTES, validateRefreshMinutes } from "./api-refresh-timer";
 import { resolveArgv, validateCommand } from "./command-argv";
 import { ConfirmModal } from "./modals";
-import { ApiClickAction, ApiFieldMapping, ApiHeader, ApiSourceConfig, DataSourceType } from "./types";
+import { ApiClickAction, ApiFieldMapping, ApiHeader, ApiSourceConfig, DataSourceType, FolderSourceConfig } from "./types";
 
-export interface ApiSourceModalResult {
-	/** PR-3 (G1): the selected source type, so callers can persist which type was configured — always
-	 * "api" today since Save is only reachable once an "api" config is valid (see `canSave`); the field
-	 * exists now so PR-4 onward don't need to change this result shape again. */
-	type: DataSourceType;
-	source: ApiSourceConfig;
-	headers: ApiHeader[];
-}
+/** PR-4 (G1): now a real discriminated union — a Folder result carries its own `FolderSourceConfig`
+ * and no headers (it has none), instead of widening the "api" shape to cover both. */
+export type ApiSourceModalResult =
+	| { type: "api"; source: ApiSourceConfig; headers: ApiHeader[] }
+	| { type: "folder"; source: FolderSourceConfig };
 
 const SOURCE_TYPE_OPTIONS: { value: DataSourceType; label: string }[] = [
 	{ value: "api", label: "API" },
@@ -24,10 +21,9 @@ const SOURCE_TYPE_OPTIONS: { value: DataSourceType; label: string }[] = [
 	{ value: "csv", label: "CSV" },
 ];
 
-/** PR-3 (G1) fence: Folder/Markdown table/CSV have no config of their own in this PR — shown while
- * one of those three is selected, in place of any real config section. */
-const STUB_TYPE_LABEL: Record<Exclude<DataSourceType, "api">, string> = {
-	folder: "Folder",
+/** PR-3 (G1) fence: Markdown table/CSV have no config of their own yet — shown while one of those two
+ * is selected, in place of any real config section. Folder (PR-4) has its own real body instead. */
+const STUB_TYPE_LABEL: Record<Exclude<DataSourceType, "api" | "folder">, string> = {
 	"markdown-table": "Markdown table",
 	csv: "CSV",
 };
@@ -84,11 +80,28 @@ export class ApiSourceModal extends Modal {
 	 * fresh Fetch sample. */
 	private testResult: string | null = null;
 	private testResultEl: HTMLElement | null = null;
+	/** PR-4: Folder source's own fields — "inside" only is functional this PR (G1/E7); "outside" renders
+	 * a deferred-to-PR-5 stub instead of a real config section. */
+	private folderLocation: "inside" | "outside";
+	private folderPath: string;
+	private showFiles: boolean;
+	private showFolders: boolean;
+	/** R1 fix: refs the user has removed from this source's managed set, carried through unedited —
+	 * saving after only changing a toggle or path must not forget them and let reconcile resurrect
+	 * rows the user deliberately removed. */
+	private removedRefs: string[] | undefined;
 
-	constructor(app: App, initial: ApiSourceConfig | null, initialHeaders: ApiHeader[], private onSave: (result: ApiSourceModalResult) => void) {
+	constructor(
+		app: App,
+		initial: ApiSourceConfig | null,
+		initialHeaders: ApiHeader[],
+		private onSave: (result: ApiSourceModalResult) => void,
+		initialFolderSource: FolderSourceConfig | null = null
+	) {
 		super(app);
-		this.selectedType = initial ? "api" : null;
+		this.selectedType = initial ? "api" : initialFolderSource ? "folder" : null;
 		this.resetApiFieldsToBlank();
+		this.resetFolderFieldsToBlank();
 		this.headers = initialHeaders.map((h) => ({ ...h }));
 		if (initial) {
 			this.url = initial.url ?? "";
@@ -108,6 +121,17 @@ export class ApiSourceModal extends Modal {
 				this.extraFields = Object.entries(rawExtras).map(([name, field]) => ({ name, field }));
 			}
 		}
+		if (initialFolderSource) {
+			this.folderLocation = initialFolderSource.location;
+			this.folderPath = initialFolderSource.path ?? "";
+			this.showFiles = initialFolderSource.showFiles ?? true;
+			this.showFolders = initialFolderSource.showFolders ?? true;
+			this.refreshOnViewLoad = initialFolderSource.refreshOnViewLoad ?? false;
+			this.refreshEveryMinutesEnabled = initialFolderSource.refreshEveryMinutesEnabled ?? false;
+			this.refreshEveryMinutesRaw =
+				initialFolderSource.refreshEveryMinutes !== undefined ? String(initialFolderSource.refreshEveryMinutes) : "";
+			this.removedRefs = initialFolderSource.removedRefs;
+		}
 	}
 
 	/** PR-3 (G2): the "api" config's blank starting state — shared by the constructor (brand-new
@@ -117,11 +141,8 @@ export class ApiSourceModal extends Modal {
 		this.url = "";
 		this.headers = [];
 		this.mode = "merge";
-		this.refreshOnViewLoad = false;
 		this.keepOnEmpty = true;
 		this.confirmBeforeDelete = true;
-		this.refreshEveryMinutesEnabled = false;
-		this.refreshEveryMinutesRaw = "";
 		this.mapping = { idField: "", labelField: "", secondaryField: undefined };
 		this.extraFields = [];
 		this.mappingMode = "drag";
@@ -132,6 +153,26 @@ export class ApiSourceModal extends Modal {
 		this.arrayFieldCandidates = [];
 		this.lastResponse = null;
 		this.testResult = null;
+		this.resetSharedRefreshFields();
+	}
+
+	/** G5a/G5b/G10: the two refresh toggles are shared, field-for-field, between "api" and "folder" —
+	 * factored out so both `resetApiFieldsToBlank`/`resetFolderFieldsToBlank` reset them identically. */
+	private resetSharedRefreshFields(): void {
+		this.refreshOnViewLoad = false;
+		this.refreshEveryMinutesEnabled = false;
+		this.refreshEveryMinutesRaw = "";
+	}
+
+	/** PR-4 (G2/GP1): the Folder config's blank starting state, mirroring `resetApiFieldsToBlank` —
+	 * "Inside Vault" and both Show-toggles default on, the path selector starts empty. */
+	private resetFolderFieldsToBlank(): void {
+		this.folderLocation = "inside";
+		this.folderPath = "";
+		this.showFiles = true;
+		this.showFolders = true;
+		this.removedRefs = undefined;
+		this.resetSharedRefreshFields();
 	}
 
 	onOpen(): void {
@@ -176,16 +217,19 @@ export class ApiSourceModal extends Modal {
 					const next = (value || null) as DataSourceType | null;
 					if (next === this.selectedType) return;
 					this.selectedType = next;
-					// G2: switching the type — into "api", out of "api", or between the two stub types —
-					// always discards whatever config existed for the type being left. Only "api" has any
-					// config to reset in this PR; the stub types have none.
+					// G2: switching the type — into "api", into "folder", or between the stub types — always
+					// discards whatever config existed for the type being left. "api" and "folder" each have
+					// their own config to reset in this PR; the remaining stub types have none.
 					if (next === "api") this.resetApiFieldsToBlank();
+					else if (next === "folder") this.resetFolderFieldsToBlank();
 					this.render();
 				});
 			});
 
 		if (this.selectedType === "api") {
 			this.renderApiBody();
+		} else if (this.selectedType === "folder") {
+			this.renderFolderBody();
 		} else if (this.selectedType) {
 			contentEl.createEl("p", {
 				cls: "atlas-source-type-stub",
@@ -456,45 +500,7 @@ export class ApiSourceModal extends Modal {
 					.onChange((value) => (this.confirmBeforeDelete = value))
 			);
 
-		new Setting(contentEl)
-			.setName("Refresh when Atlas view loads")
-			.addToggle((toggle) => toggle.setValue(this.refreshOnViewLoad).onChange((value) => (this.refreshOnViewLoad = value)));
-
-		let refreshErrorEl: HTMLElement | null = null;
-		const updateRefreshMinutesValidity = () => {
-			const validation = this.refreshEveryMinutesEnabled ? validateRefreshMinutes(this.refreshEveryMinutesRaw) : null;
-			refreshErrorEl?.setText(validation && !validation.ok ? validation.error : "");
-			this.updateSaveButton();
-		};
-		new Setting(contentEl)
-			.setName("Refresh every")
-			.setDesc("Minutes between automatic refreshes while this Atlas view is open. Minimum 5 — off by default.")
-			.addToggle((toggle) =>
-				toggle.setValue(this.refreshEveryMinutesEnabled).onChange((value) => {
-					this.refreshEveryMinutesEnabled = value;
-					// Turning it on with nothing typed yet pre-fills the floor rather than leaving the
-					// field blank — a blank field on a freshly-enabled toggle isn't an invalid entry the
-					// user made, so it shouldn't show the "minimum 5" error before they've touched it.
-					if (value && !this.refreshEveryMinutesRaw.trim()) {
-						this.refreshEveryMinutesRaw = String(MIN_REFRESH_MINUTES);
-					}
-					// Enabling/disabling the field's own editability — a discrete click, not a keystroke,
-					// so a full re-render here doesn't cost focus the way it would mid-typing.
-					this.render();
-				})
-			)
-			.addText((text) =>
-				text
-					.setPlaceholder("minutes")
-					.setValue(this.refreshEveryMinutesRaw)
-					.setDisabled(!this.refreshEveryMinutesEnabled)
-					.onChange((value) => {
-						this.refreshEveryMinutesRaw = value;
-						updateRefreshMinutesValidity();
-					})
-			);
-		refreshErrorEl = contentEl.createEl("p", { cls: "atlas-api-field-error" });
-		updateRefreshMinutesValidity();
+		this.renderRefreshToggles(contentEl);
 
 		new Setting(contentEl).setName("Click action").setHeading();
 		new Setting(contentEl)
@@ -546,6 +552,139 @@ export class ApiSourceModal extends Modal {
 		}
 	}
 
+	/** G5a/G5b/G10: shared verbatim between "api" and "folder" — same two toggles, same fields, same
+	 * validation. Factored out so Folder reuses the exact existing refresh machinery rather than a copy. */
+	private renderRefreshToggles(contentEl: HTMLElement): void {
+		new Setting(contentEl)
+			.setName("Refresh when Atlas view loads")
+			.addToggle((toggle) => toggle.setValue(this.refreshOnViewLoad).onChange((value) => (this.refreshOnViewLoad = value)));
+
+		let refreshErrorEl: HTMLElement | null = null;
+		const updateRefreshMinutesValidity = () => {
+			const validation = this.refreshEveryMinutesEnabled ? validateRefreshMinutes(this.refreshEveryMinutesRaw) : null;
+			refreshErrorEl?.setText(validation && !validation.ok ? validation.error : "");
+			this.updateSaveButton();
+		};
+		new Setting(contentEl)
+			.setName("Refresh every")
+			.setDesc("Minutes between automatic refreshes while this Atlas view is open. Minimum 5 — off by default.")
+			.addToggle((toggle) =>
+				toggle.setValue(this.refreshEveryMinutesEnabled).onChange((value) => {
+					this.refreshEveryMinutesEnabled = value;
+					// Turning it on with nothing typed yet pre-fills the floor rather than leaving the
+					// field blank — a blank field on a freshly-enabled toggle isn't an invalid entry the
+					// user made, so it shouldn't show the "minimum 5" error before they've touched it.
+					if (value && !this.refreshEveryMinutesRaw.trim()) {
+						this.refreshEveryMinutesRaw = String(MIN_REFRESH_MINUTES);
+					}
+					// Enabling/disabling the field's own editability — a discrete click, not a keystroke,
+					// so a full re-render here doesn't cost focus the way it would mid-typing.
+					this.render();
+				})
+			)
+			.addText((text) =>
+				text
+					.setPlaceholder("minutes")
+					.setValue(this.refreshEveryMinutesRaw)
+					.setDisabled(!this.refreshEveryMinutesEnabled)
+					.onChange((value) => {
+						this.refreshEveryMinutesRaw = value;
+						updateRefreshMinutesValidity();
+					})
+			);
+		refreshErrorEl = contentEl.createEl("p", { cls: "atlas-api-field-error" });
+		updateRefreshMinutesValidity();
+	}
+
+	/** PR-4: the Folder source's modal body. Inside Vault only is functional this PR (E7) — Outside
+	 * Vault renders a deferred-to-PR-5 stub and returns early, matching the existing stub-type pattern. */
+	private renderFolderBody(): void {
+		const { contentEl } = this;
+
+		new Setting(contentEl)
+			.setName("Location")
+			.addDropdown((dropdown) => {
+				dropdown.addOption("inside", "Inside vault");
+				dropdown.addOption("outside", "Outside vault");
+				dropdown.setValue(this.folderLocation);
+				dropdown.onChange((value) => {
+					this.folderLocation = value === "outside" ? "outside" : "inside";
+					this.render();
+				});
+			});
+
+		if (this.folderLocation !== "inside") {
+			contentEl.createEl("p", {
+				cls: "atlas-source-type-stub",
+				text: "Outside vault folders aren't configurable in this version yet.",
+			});
+			return;
+		}
+
+		this.renderFolderPathSuggester(contentEl);
+
+		new Setting(contentEl)
+			.setName("Show files")
+			.addToggle((toggle) => toggle.setValue(this.showFiles).onChange((value) => (this.showFiles = value)));
+		new Setting(contentEl)
+			.setName("Show folders")
+			.addToggle((toggle) => toggle.setValue(this.showFolders).onChange((value) => (this.showFolders = value)));
+
+		this.renderRefreshToggles(contentEl);
+	}
+
+	/** G3/GP1: a filterable list of every vault folder, vault-relative paths only — the selector starts
+	 * empty (no default folder), matching the PR-3 contract that nothing is pre-selected until chosen. */
+	private renderFolderPathSuggester(contentEl: HTMLElement): void {
+		const allPaths = this.listVaultFolders();
+		let listEl: HTMLElement | null = null;
+		const renderList = (filter: string) => {
+			if (!listEl) return;
+			listEl.empty();
+			const normalized = filter.trim().toLowerCase();
+			const matches = normalized ? allPaths.filter((p) => p.toLowerCase().includes(normalized)) : allPaths;
+			for (const path of matches.slice(0, 50)) {
+				const item = listEl.createEl("div", { cls: "atlas-folder-suggest-item", text: path || "/" });
+				item.onclick = () => {
+					this.folderPath = path;
+					this.render();
+				};
+			}
+		};
+
+		new Setting(contentEl)
+			.setName("Folder")
+			.setDesc("Vault-relative path to the folder whose contents should populate this source.")
+			.addText((text) =>
+				text
+					.setPlaceholder("Search vault folders…")
+					.setValue(this.folderPath)
+					.onChange((value) => {
+						this.folderPath = value;
+						this.updateSaveButton();
+						renderList(value);
+					})
+			);
+		listEl = contentEl.createEl("div", { cls: "atlas-folder-suggest-list" });
+		renderList(this.folderPath);
+	}
+
+	/** Recursively walks the vault root so the suggester can offer every folder, not just top-level
+	 * ones — narrow `TFolder`/`children` surface only, kept simple since this is UI-only plumbing. */
+	private listVaultFolders(): string[] {
+		const root = this.app.vault?.getRoot();
+		if (!root) return [];
+		const paths: string[] = [];
+		const walk = (folder: TFolder) => {
+			paths.push(folder.path);
+			for (const child of folder.children) {
+				if (child instanceof TFolder) walk(child);
+			}
+		};
+		walk(root);
+		return paths.filter((p) => p !== "/");
+	}
+
 	private buildExtraFieldsRecord(): Record<string, string> {
 		const out: Record<string, string> = {};
 		for (const e of this.extraFields) {
@@ -557,8 +696,14 @@ export class ApiSourceModal extends Modal {
 	}
 
 	private canSave(): boolean {
-		// G1/edge case: Save is blocked until a type is selected; Folder/Table/CSV have no config of
-		// their own to validate in this PR, so there's nothing for them to ever become savable against.
+		// G1/edge case: Save is blocked until a type is selected; Table/CSV have no config of their own
+		// to validate in this PR, so there's nothing for them to ever become savable against.
+		if (this.selectedType === "folder") {
+			if (this.folderLocation !== "inside") return false;
+			if (!this.folderPath.trim()) return false;
+			if (this.refreshEveryMinutesEnabled && !validateRefreshMinutes(this.refreshEveryMinutesRaw).ok) return false;
+			return true;
+		}
 		if (this.selectedType !== "api") return false;
 		if (this.mappingMode === "js") {
 			if (!this.url.trim()) return false;
@@ -664,6 +809,25 @@ export class ApiSourceModal extends Modal {
 
 	private save(): void {
 		if (!this.canSave()) return;
+		if (this.selectedType === "folder") {
+			const refreshEveryMinutesValidation = this.refreshEveryMinutesEnabled
+				? validateRefreshMinutes(this.refreshEveryMinutesRaw)
+				: null;
+			const source: FolderSourceConfig = {
+				type: "folder",
+				location: "inside",
+				path: this.folderPath.trim(),
+				showFiles: this.showFiles,
+				showFolders: this.showFolders,
+				refreshOnViewLoad: this.refreshOnViewLoad,
+				refreshEveryMinutesEnabled: this.refreshEveryMinutesEnabled,
+				refreshEveryMinutes: refreshEveryMinutesValidation?.ok ? refreshEveryMinutesValidation.minutes : undefined,
+				removedRefs: this.removedRefs,
+			};
+			this.close();
+			this.onSave({ type: "folder", source });
+			return;
+		}
 		// canSave() above guarantees selectedType === "api" by this point.
 		const refreshEveryMinutesValidation = this.refreshEveryMinutesEnabled ? validateRefreshMinutes(this.refreshEveryMinutesRaw) : null;
 		const extraFieldsRecord = this.buildExtraFieldsRecord();

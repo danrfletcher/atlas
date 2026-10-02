@@ -64,6 +64,14 @@ export default class AtlasPlugin extends Plugin {
 			data?.activeViewId ?? "",
 			() => this.persistDebounced()
 		);
+		// PR-4 (T1): keeps `UnitIndex` in sync with every Folder source's currently-managed refs, so
+		// those children resolve as real units (G3) instead of the generic missing-ref fallback. Runs
+		// once now for whatever's already in `data.json` from a prior session, then again on every
+		// `ViewsManager` change (refresh, save, rename-rewrite) — not gated on either refresh toggle,
+		// since already-placed managed children need to resolve on load even if neither is on.
+		const syncFolderSourceUnits = () => this.unitIndex.setFolderSourceRefs(this.viewsManager.getFolderSourceManagedRefs());
+		this.viewsManager.onChange(syncFolderSourceUnits);
+		syncFolderSourceUnits();
 		this.statusesManager = new StatusesManager(
 			data?.statusSets ?? [],
 			data?.colorPalette ?? [...DEFAULT_COLOR_PALETTE],

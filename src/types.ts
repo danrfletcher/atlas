@@ -12,13 +12,47 @@ export function unitRefsEqual(a: UnitRef, b: UnitRef): boolean {
 	return unitRefKey(a) === unitRefKey(b);
 }
 
+/** F9 rename integrity: rewrite `path` if it's an exact match for `oldPath`, or a descendant of it
+ * (`oldPath/...`) — the same rule Obsidian applies to link paths on rename. Returns the same string
+ * instance, unchanged, if neither applies (so callers can cheaply detect "did this change"). Shared
+ * by `rewriteRefPath` (below) and PR-4's `folderSource.path`, a plain vault-relative string with the
+ * same rename-integrity requirement but no surrounding `UnitRef` to rewrite. */
+export function rewritePathString(path: string, oldPath: string, newPath: string): string {
+	if (path === oldPath) return newPath;
+	if (path.startsWith(`${oldPath}/`)) return `${newPath}${path.slice(oldPath.length)}`;
+	return path;
+}
+
 /** F9 rename integrity: rewrite `ref.path` if it's an exact match for `oldPath`, or a descendant
  * of it (`oldPath/...`) — the same rule Obsidian applies to link paths on rename. Returns the same
  * `ref` instance, unchanged, if neither applies (so callers can cheaply detect "did this change"). */
 export function rewriteRefPath(ref: UnitRef, oldPath: string, newPath: string): UnitRef {
-	if (ref.path === oldPath) return { ...ref, path: newPath };
-	if (ref.path.startsWith(`${oldPath}/`)) return { ...ref, path: `${newPath}${ref.path.slice(oldPath.length)}` };
-	return ref;
+	const rewritten = rewritePathString(ref.path, oldPath, newPath);
+	return rewritten === ref.path ? ref : { ...ref, path: rewritten };
+}
+
+/** PR-4 (R8): rewrites the path embedded in a `unitRefKey` string (`'file:Proj/a.md'`,
+ * `'folder:Proj'`, `'block:Proj/a.md#^abc'`) using the same rename-integrity rule as
+ * `rewritePathString`. `FolderSourceConfig.removedRefs` stores these keys rather than `UnitRef`s
+ * (it only needs to test membership), but still needs to stay in sync on rename like every other
+ * ref in the view — otherwise a removed row's key stops matching the renamed path and the row comes
+ * back on the next refresh. Returns the same string instance, unchanged, if the embedded path
+ * doesn't match `oldPath`. */
+export function rewriteRefKeyPath(key: string, oldPath: string, newPath: string): string {
+	const colon = key.indexOf(":");
+	if (colon < 0) return key;
+	const kind = key.slice(0, colon);
+	const rest = key.slice(colon + 1);
+	if (kind === "block") {
+		const hash = rest.indexOf("#");
+		if (hash < 0) return key;
+		const path = rest.slice(0, hash);
+		const subpath = rest.slice(hash + 1);
+		const rewritten = rewritePathString(path, oldPath, newPath);
+		return rewritten === path ? key : `block:${rewritten}#${subpath}`;
+	}
+	const rewritten = rewritePathString(rest, oldPath, newPath);
+	return rewritten === rest ? key : `${kind}:${rewritten}`;
 }
 
 /** A unit as classified by the index — the computed shape the explorer (F8) will render. */
@@ -140,6 +174,22 @@ export interface ViewNode extends StatusGovernance {
 	 * (confirmed or cancelled), including a later manual "Refresh now", which always asks again
 	 * regardless of this flag. Meaningless (and always cleared) once `apiSource` itself is absent. */
 	apiAwaitingConfirmation?: boolean;
+	/** PR-4 (G3-G5/G10/G16): an Inside-Vault "Folder" source — unlike `apiSource`, this never produces
+	 * placeholder/API-item rows; it only decides which real `ViewNode` unit children belong under this
+	 * meta node (via `buildFolderSourceChildren`/`reconcileManagedChildren` in `folder-source.ts`), so
+	 * those children go through the exact same place/nest/reorder/status/missing-ref machinery as any
+	 * other unit (G7/G9/G16). Only ever set on a `type: "meta"` node. */
+	folderSource?: FolderSourceConfig;
+	/** PR-4: true only on a `type: "unit"` child this Folder's own reconciliation created/owns, so a
+	 * later refresh can tell its managed rows apart from anything the user separately nested in here by
+	 * hand, without needing new dedup logic (E2 is handled entirely by existing multi-placement
+	 * support). Absent/false means "not mine" — never cleared or removed by reconciliation. */
+	folderSourceManaged?: boolean;
+	/** PR-4 (R1 fix): the id of the meta node whose `folderSource` created this row, set alongside
+	 * `folderSourceManaged` and never cleared by moving/nesting it elsewhere in the view (G7) — this is
+	 * what lets a refresh find a managed row again no matter where the user dragged or nested it,
+	 * instead of only looking at the source's own direct children. */
+	folderSourceOwnerId?: string;
 }
 
 /** A single request header, e.g. `Authorization: Bearer …`. Never persisted in `data.json` — see
@@ -215,13 +265,32 @@ export interface ApiSourceConfig {
 	command?: string;
 }
 
-/** PR-3 (G1) stubs: no fields of their own yet — PR-4 (Folder), PR-7 (Markdown Table) and PR-8 (CSV)
- * replace each with its real config shape. They exist only so `DataSourceConfig` below is already a
- * real discriminated union by the time those PRs land, instead of each one having to introduce the
- * union mechanism itself. */
-export interface FolderSourceConfigStub {
-	type: "folder";
+/** PR-4 (G3-G5/G10/G16): the Inside-Vault "Folder" source's config. Outside Vault (external
+ * filesystem) is PR-5's job — `location` already carries that discriminant so this PR's code can
+ * stub it out (the modal blocks Save while it's selected) without a later PR having to widen this
+ * shape's own fields. */
+export interface FolderSourceConfig {
+	type?: "folder";
+	/** G4: defaults to "inside". "outside" is accepted/persisted but not yet acted on (PR-5). */
+	location: "inside" | "outside";
+	/** G5: vault-relative path to the target folder — never absolute. Only meaningful while
+	 * `location` is "inside". */
+	path: string;
+	/** G4: both default true, independent of each other. */
+	showFiles: boolean;
+	showFolders: boolean;
+	/** G10: reuses the exact same refresh-toggle fields/semantics as `ApiSourceConfig` — no new
+	 * refresh UI or scheduler for Folder sources. */
+	refreshOnViewLoad: boolean;
+	refreshEveryMinutesEnabled?: boolean;
+	refreshEveryMinutes?: number;
+	/** PR-4 (R1 fix): `unitRefKey`-keyed refs the user has explicitly removed from this source's
+	 * managed set (via "Remove from view", the Delete key, or dragging to the inbox) — reconcile never
+	 * recreates one of these, the same way any other removed ref stays gone rather than being
+	 * resurrected on the next refresh. */
+	removedRefs?: string[];
 }
+
 export interface MarkdownTableSourceConfigStub {
 	type: "markdown-table";
 }
@@ -230,9 +299,9 @@ export interface CsvSourceConfigStub {
 }
 
 /** PR-3 (G1): the sibling-shapes union `ApiSourceConfig`'s new `type` field exists to support —
- * `ViewNode.apiSource` itself stays `ApiSourceConfig`-typed until a later PR actually implements
- * Folder/Table/CSV persistence; this union is exercised today only inside `ApiSourceModal`. */
-export type DataSourceConfig = ApiSourceConfig | FolderSourceConfigStub | MarkdownTableSourceConfigStub | CsvSourceConfigStub;
+ * `ViewNode.apiSource`/`ViewNode.folderSource` stay their own concretely-typed fields rather than
+ * this union, which is exercised today only inside `ApiSourceModal`. */
+export type DataSourceConfig = ApiSourceConfig | FolderSourceConfig | MarkdownTableSourceConfigStub | CsvSourceConfigStub;
 
 /** A row exactly as mapped from a response — this is all the cache ever holds, never the raw
  * response (G13, E9). */
