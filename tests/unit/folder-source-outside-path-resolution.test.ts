@@ -101,20 +101,20 @@ describe("resolveOutsidePath/listOutsideChildren — real filesystem, against a 
 		expect(resolveOutsidePath(childDir)).toBe(true);
 	});
 
-	it("lists direct files and folders, filtered by showFiles/showFolders, as absolute-path refs", () => {
+	it("R4: lists direct files and folders, filtered by showFiles/showFolders, as refs relative to the Outside root (never the absolute device path)", () => {
 		fs.writeFileSync(path.join(tmpDir, "note.md"), "x");
 		fs.mkdirSync(path.join(tmpDir, "Sub"));
 
 		const both = listOutsideChildren(tmpDir, { showFiles: true, showFolders: true });
 		expect(both).toHaveLength(2);
-		expect(both).toContainEqual({ kind: "file", path: path.join(tmpDir, "note.md") });
-		expect(both).toContainEqual({ kind: "folder", path: path.join(tmpDir, "Sub") });
+		expect(both).toContainEqual({ kind: "file", path: "note.md" });
+		expect(both).toContainEqual({ kind: "folder", path: "Sub" });
 
 		const filesOnly = listOutsideChildren(tmpDir, { showFiles: true, showFolders: false });
-		expect(filesOnly).toEqual([{ kind: "file", path: path.join(tmpDir, "note.md") }]);
+		expect(filesOnly).toEqual([{ kind: "file", path: "note.md" }]);
 
 		const foldersOnly = listOutsideChildren(tmpDir, { showFiles: false, showFolders: true });
-		expect(foldersOnly).toEqual([{ kind: "folder", path: path.join(tmpDir, "Sub") }]);
+		expect(foldersOnly).toEqual([{ kind: "folder", path: "Sub" }]);
 	});
 
 	it("an unresolved path lists no children instead of throwing", () => {
@@ -149,6 +149,6 @@ describe("resolveOutsidePath/listOutsideChildren — real filesystem, against a 
 		fs.mkdirSync(mountDir);
 		fs.writeFileSync(path.join(mountDir, "file.md"), "x");
 		expect(resolveOutsidePath(mountDir)).toBe(true);
-		expect(listOutsideChildren(mountDir, { showFiles: true, showFolders: true })).toEqual([{ kind: "file", path: path.join(mountDir, "file.md") }]);
+		expect(listOutsideChildren(mountDir, { showFiles: true, showFolders: true })).toEqual([{ kind: "file", path: "file.md" }]);
 	});
 });
