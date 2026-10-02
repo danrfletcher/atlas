@@ -261,6 +261,18 @@ export function collectApiSourceNodeIdPairs(original: ViewNode, clone: ViewNode)
 	return pairs;
 }
 
+/** PR-5 (G6/F6 mirror of R3/G7 above): an Outside-Vault Folder source's device-local absolute path
+ * (`FolderSourcePathStore`, keyed by node id) has no home in `duplicateNode`'s return value either —
+ * same id-pairing approach, scoped to `folderSource?.location === "outside"` instead of `apiSource`. */
+export function collectOutsideFolderSourceNodeIdPairs(original: ViewNode, clone: ViewNode): ApiSourceIdPair[] {
+	const pairs: ApiSourceIdPair[] = [];
+	if (original.folderSource?.location === "outside") pairs.push({ originalId: original.id, cloneId: clone.id });
+	for (let i = 0; i < original.children.length; i++) {
+		pairs.push(...collectOutsideFolderSourceNodeIdPairs(original.children[i], clone.children[i]));
+	}
+	return pairs;
+}
+
 /** G7 (extended to G4's static rows): a deep copy of a Folder's per-id row state — `noteRef` is itself
  * an object, so a shallow copy of the map would still leave both copies' rows pointing at (and able to
  * mutate) the very same `UnitRef`. */
@@ -396,12 +408,26 @@ export class ViewsManager {
 		return null;
 	}
 
-	private findUnitNode(nodes: ViewNode[], ref: UnitRef): FoundNode | null {
+	/** R9(b): an Outside-Vault-managed child's `ref.path` is a bare name relative to its source's
+	 * root (see `listOutsideChildrenWith`), not a vault path — it can collide with a real vault-root
+	 * unit of the same name. Every ref-identity walk below (`findUnitNode`/`allPathsToRef`) must skip
+	 * these nodes, or a real vault unit wrongly counts as "placed" (and vanishes from the Inbox)
+	 * whenever some Outside source happens to have a same-named child. `root` is the whole view's
+	 * tree, not just the subtree currently being walked, since a managed child can be dragged/nested
+	 * anywhere in the view (R1 fix) — its owner is looked up by id across the full tree, never assumed
+	 * to be an ancestor. */
+	private isOutsideOwned(root: ViewNode[], node: ViewNode): boolean {
+		if (!node.folderSourceManaged || !node.folderSourceOwnerId) return false;
+		const owner = this.findNode(root, node.folderSourceOwnerId);
+		return owner?.node.folderSource?.location === "outside";
+	}
+
+	private findUnitNode(nodes: ViewNode[], ref: UnitRef, root: ViewNode[] = nodes): FoundNode | null {
 		for (let i = 0; i < nodes.length; i++) {
-			if (nodes[i].type === "unit" && nodes[i].ref && unitRefsEqual(nodes[i].ref as UnitRef, ref)) {
+			if (nodes[i].type === "unit" && nodes[i].ref && unitRefsEqual(nodes[i].ref as UnitRef, ref) && !this.isOutsideOwned(root, nodes[i])) {
 				return { node: nodes[i], siblings: nodes, index: i };
 			}
-			const found = this.findUnitNode(nodes[i].children, ref);
+			const found = this.findUnitNode(nodes[i].children, ref, root);
 			if (found) return found;
 		}
 		return null;
@@ -438,15 +464,15 @@ export class ViewsManager {
 	 * PR 13: collects *every* match in the subtree instead of stopping at the first — a duplicated
 	 * unit can now legitimately appear more than once in the same view, including nested inside a
 	 * different placement of itself. */
-	private allPathsToRef(nodes: ViewNode[], ref: UnitRef, trail: string[]): string[][] {
+	private allPathsToRef(nodes: ViewNode[], ref: UnitRef, trail: string[], root: ViewNode[] = nodes): string[][] {
 		const out: string[][] = [];
 		for (const node of nodes) {
-			if (node.type === "unit" && node.ref && unitRefsEqual(node.ref, ref)) out.push(trail);
+			if (node.type === "unit" && node.ref && unitRefsEqual(node.ref, ref) && !this.isOutsideOwned(root, node)) out.push(trail);
 			if (node.type === "meta") {
-				out.push(...this.allPathsToRef(node.children, ref, [...trail, node.label ?? ""]));
+				out.push(...this.allPathsToRef(node.children, ref, [...trail, node.label ?? ""], root));
 			} else if (node.type === "unit" && node.ref && node.children.length > 0) {
 				const basename = node.ref.path.split("/").pop() ?? node.ref.path;
-				out.push(...this.allPathsToRef(node.children, ref, [...trail, basename]));
+				out.push(...this.allPathsToRef(node.children, ref, [...trail, basename], root));
 			}
 		}
 		return out;
@@ -812,7 +838,7 @@ export class ViewsManager {
 	 * is; see `buildFolderSourceChildren`'s own doc comment for the full reconciliation contract). A
 	 * no-op if the node isn't a meta node with a Folder source. Read-only against the vault: this
 	 * never creates/moves/deletes anything on disk (F5). */
-	refreshFolderSource(viewId: string, nodeId: string): void {
+	refreshFolderSource(viewId: string, nodeId: string, outsidePath?: string): void {
 		const view = this.getView(viewId);
 		if (!view) return;
 		const found = this.findNode(view.root, nodeId);
@@ -830,26 +856,50 @@ export class ViewsManager {
 				folderSourceManaged: true,
 				folderSourceOwnerId: ownerId,
 			}),
-			{ sourceNodeId: ownerId, viewRoot: view.root }
+			{ sourceNodeId: ownerId, viewRoot: view.root },
+			outsidePath
 		);
 		this.save();
 	}
 
-	/** T1 fix: every ref currently managed by any Folder source, across every view. `main.ts` feeds
-	 * this straight into `UnitIndex.setFolderSourceRefs` after every change (`onChange`) so Folder-
-	 * source children resolve through `ExplorerView.resolveRef`'s normal `unitsByRefKey` lookup as
-	 * real units (G3), instead of only existing as `ViewNode`s the index never knew about and
-	 * falling through to the generic missing-ref fallback. Walks every view (not just the active
-	 * one) since the index is shared/global, not per-view. */
+	/** T1 fix: every ref currently managed by an Inside-Vault Folder source, across every view.
+	 * `main.ts` feeds this straight into `UnitIndex.setFolderSourceRefs` after every change
+	 * (`onChange`) so Folder-source children resolve through `ExplorerView.resolveRef`'s normal
+	 * `unitsByRefKey` lookup as real units (G3), instead of only existing as `ViewNode`s the index
+	 * never knew about and falling through to the generic missing-ref fallback. Walks every view (not
+	 * just the active one) since the index is shared/global, not per-view.
+	 *
+	 * R4 fix: an Outside-Vault-managed child's `ref.path` is now just an entry name relative to its
+	 * source's root (never the absolute device path — see `listOutsideChildrenWith`'s own doc
+	 * comment), which makes it exactly the kind of short, ordinary-looking string a real vault path
+	 * could also be, or that two different Outside sources could each produce. `UnitIndex`'s global
+	 * `unitsByRefKey`-shaped map has no notion of "which source owns this," so folding these in here
+	 * would risk colliding with a real vault unit, or with another Outside source's same-named child.
+	 * `ExplorerView.resolveOutsideManagedRowInfo` already bypasses the index entirely for these rows
+	 * (G8's own doc comment), so excluding them here costs nothing — they were never looked up through
+	 * this path. */
 	getFolderSourceManagedRefs(): UnitRef[] {
 		const refs: UnitRef[] = [];
-		const walk = (nodes: ViewNode[]): void => {
-			for (const node of nodes) {
-				if (node.type === "unit" && node.folderSourceManaged && node.ref) refs.push(node.ref);
-				walk(node.children);
-			}
-		};
-		for (const view of this.views) walk(view.root);
+		for (const view of this.views) {
+			const byId = new Map<string, ViewNode>();
+			const index = (nodes: ViewNode[]): void => {
+				for (const node of nodes) {
+					byId.set(node.id, node);
+					index(node.children);
+				}
+			};
+			index(view.root);
+			const walk = (nodes: ViewNode[]): void => {
+				for (const node of nodes) {
+					if (node.type === "unit" && node.folderSourceManaged && node.ref) {
+						const owner = node.folderSourceOwnerId ? byId.get(node.folderSourceOwnerId) : undefined;
+						if (owner?.folderSource?.location !== "outside") refs.push(node.ref);
+					}
+					walk(node.children);
+				}
+			};
+			walk(view.root);
+		}
 		return refs;
 	}
 
@@ -914,15 +964,18 @@ export class ViewsManager {
 	onVaultRename(oldPath: string, newPath: string): void {
 		let changed = false;
 		for (const view of this.views) {
-			if (this.rewriteTree(view.root, oldPath, newPath)) changed = true;
+			if (this.rewriteTree(view.root, oldPath, newPath, view.root)) changed = true;
 		}
 		if (changed) this.save();
 	}
 
-	private rewriteTree(nodes: ViewNode[], oldPath: string, newPath: string): boolean {
+	private rewriteTree(nodes: ViewNode[], oldPath: string, newPath: string, root: ViewNode[]): boolean {
 		let changed = false;
 		for (const node of nodes) {
-			if (node.type === "unit" && node.ref) {
+			// R9(a): an Outside-Vault-managed child's `ref.path` is a bare name relative to its source's
+			// root, not a vault path — it must never be rewritten just because it happens to collide
+			// with a renamed vault-root path (see `isOutsideOwned`'s own doc comment).
+			if (node.type === "unit" && node.ref && !this.isOutsideOwned(root, node)) {
 				const rewritten = rewriteRefPath(node.ref, oldPath, newPath);
 				if (rewritten !== node.ref) {
 					node.ref = rewritten;
@@ -947,7 +1000,10 @@ export class ViewsManager {
 			// PR-4 (R8): `folderSource.removedRefs` is a set of `unitRefKey` strings, each embedding a
 			// path of its own — they go stale on the same rename unless rewritten the same way, or a
 			// removed row's key stops matching and the row comes back on the next refresh.
-			if (node.folderSource) {
+			// R9(a): both fields are meaningless while `location` is "outside" (the device-local path
+			// lives in `FolderSourcePathStore`, and `removedRefs` keys are root-relative Outside names,
+			// never vault paths) — rewriting either on a rename would corrupt them for no reason.
+			if (node.folderSource && node.folderSource.location !== "outside") {
 				const rewrittenPath = rewritePathString(node.folderSource.path, oldPath, newPath);
 				const removedRefs = node.folderSource.removedRefs;
 				const rewrittenRemovedRefs = removedRefs?.map((key) => rewriteRefKeyPath(key, oldPath, newPath));
@@ -958,7 +1014,7 @@ export class ViewsManager {
 					changed = true;
 				}
 			}
-			if (this.rewriteTree(node.children, oldPath, newPath)) changed = true;
+			if (this.rewriteTree(node.children, oldPath, newPath, root)) changed = true;
 		}
 		return changed;
 	}

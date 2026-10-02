@@ -115,4 +115,32 @@ describe("T1 — Folder-source-managed refs resolve as real units via UnitIndex"
 		expect(refs).not.toContainEqual({ kind: "file", path: "A/hand-nested.md" });
 		expect(refs).toHaveLength(2);
 	});
+
+	it("R4: excludes refs managed by an Outside-Vault-location source, since their root-relative path (e.g. 'note.md') is no longer globally unique and could collide with a real vault path or another Outside source's same-named child", () => {
+		const app = new App();
+		const vm = new ViewsManager(app, [], "", () => {});
+		const view1 = vm.getViews()[0];
+
+		vm.addMetaFolder(view1.id, null, "Outside Source");
+		const outsideOwner = vm.getViews().find((v) => v.id === view1.id)!.root[0];
+		vm.setFolderSource(view1.id, outsideOwner.id, { location: "outside", path: "", showFiles: true, showFolders: true, refreshOnViewLoad: false });
+
+		vm.placeUnit(view1.id, { kind: "file", path: "note.md" }, outsideOwner.id);
+		const outsideManaged = vm.getNode(view1.id, outsideOwner.id)!.children[0];
+		outsideManaged.folderSourceManaged = true;
+		outsideManaged.folderSourceOwnerId = outsideOwner.id;
+
+		// An ordinary Inside-Vault managed ref, for contrast — still included.
+		vm.addMetaFolder(view1.id, null, "Inside Source");
+		const insideOwner = vm.getViews().find((v) => v.id === view1.id)!.root[1];
+		vm.placeUnit(view1.id, { kind: "file", path: "Projects/a.md" }, insideOwner.id);
+		const insideManaged = vm.getNode(view1.id, insideOwner.id)!.children[0];
+		insideManaged.folderSourceManaged = true;
+		insideManaged.folderSourceOwnerId = insideOwner.id;
+
+		const refs = vm.getFolderSourceManagedRefs();
+		expect(refs).not.toContainEqual({ kind: "file", path: "note.md" });
+		expect(refs).toContainEqual({ kind: "file", path: "Projects/a.md" });
+		expect(refs).toHaveLength(1);
+	});
 });

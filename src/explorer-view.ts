@@ -1,7 +1,15 @@
 import { App, FuzzySuggestModal, ItemView, MarkdownView, Menu, Modal, Notice, Platform, TFile, TFolder, WorkspaceLeaf, setIcon, setTooltip } from "obsidian";
 import type AtlasPlugin from "./main";
 import { ApiItemState, PLACEHOLDER_ROW_KIND, StatusGovernance, TruncatedStatusConfig, Unit, UnitRef, View, ViewNode, unitRefKey, unitToRef } from "./types";
-import { ApiSourceIdPair, MetaTarget, collectApiSourceNodeIdPairs, flattenMetaFolders, nodeHasApiRows } from "./views";
+import {
+	ApiSourceIdPair,
+	MetaTarget,
+	collectApiSourceNodeIdPairs,
+	collectOutsideFolderSourceNodeIdPairs,
+	flattenMetaFolders,
+	nodeHasApiRows,
+} from "./views";
+import { resolveOutsidePath } from "./folder-source-outside";
 import { resolveUnit } from "./unit-display";
 import { TextPromptModal, ConfirmModal, ConfirmDeleteRowsModal, StatusesModal } from "./modals";
 import { StatusDefinition, pluralizeStatusLabel } from "./statuses";
@@ -364,6 +372,9 @@ export class AtlasExplorerView extends ItemView {
 		);
 		if (this.viewLoadTrigger.activate()) this.refreshApiSourcesOnViewLoad();
 		this.registerEvent(this.plugin.app.workspace.on("file-open", () => this.updateActiveHighlight()));
+		// G11/F10: Outside-Vault connection/children recheck on focus-regain — fires only from this
+		// real browser event, never a self-scheduling timer/interval/poll (F10's own fence).
+		this.registerDomEvent(window, "focus", () => this.refreshOutsideFolderSourcesOnFocus());
 		// Review follow-up (retroactive PR 9 finding): `dragPayload` was only ever cleared by a
 		// specific row's own `drop` handler or a Module Contents modal closing — never by a drag
 		// ending abnormally (dropped outside the window, over an uninstrumented area, cancelled via
@@ -432,7 +443,24 @@ export class AtlasExplorerView extends ItemView {
 			if (node.apiSource?.refreshOnViewLoad) this.refreshApiSource(view, node, "automatic");
 		}
 		for (const node of this.collectFolderSourceNodes(view.root)) {
-			if (node.folderSource?.refreshOnViewLoad) this.refreshFolderSource(view, node);
+			// G11: Outside-Vault's connection/children check on load is mandatory, independent of the
+			// optional "refresh on view load" toggle (G10) — Inside-Vault keeps the toggle-gated
+			// behavior unchanged, exactly as before this PR.
+			if (node.folderSource?.refreshOnViewLoad || node.folderSource?.location === "outside") {
+				this.refreshFolderSource(view, node);
+			}
+		}
+	}
+
+	/** G11/F10: re-checks every Outside-Vault Folder source in the active view on focus-regain —
+	 * recomputes its children (via `refreshFolderSource`, which looks the current device-local path up
+	 * fresh) so a since-resolved or since-unresolved path's managed children reappear/clear
+	 * automatically; the indicator dot itself needs no separate refresh call since it already
+	 * recomputes `resolveOutsidePath` live on every render. */
+	private refreshOutsideFolderSourcesOnFocus(): void {
+		const view = this.plugin.viewsManager.getActiveView();
+		for (const node of this.collectFolderSourceNodes(view.root)) {
+			if (node.folderSource?.location === "outside") this.refreshFolderSource(view, node);
 		}
 	}
 
@@ -526,11 +554,16 @@ export class AtlasExplorerView extends ItemView {
 	 * vault, never writes it) — the resulting real unit children render for free through the normal
 	 * tree, with no Folder-source-specific rendering path. */
 	private refreshFolderSource(view: View, node: ViewNode): void {
-		this.plugin.viewsManager.refreshFolderSource(view.id, node.id);
+		// PR-5: Outside-Vault reconciliation needs the device-local path, which `ViewsManager` itself
+		// never holds (same reason `apiHeadersStore` lookups live here, not in `ViewsManager`, for API
+		// sources) — looked up fresh on every call so a since-changed path is always current.
+		const outsidePath = node.folderSource?.location === "outside" ? this.plugin.folderSourcePathStore.get(node.id) : undefined;
+		this.plugin.viewsManager.refreshFolderSource(view.id, node.id, outsidePath);
 	}
 
 	private openApiSourceModal(view: View, node: ViewNode): void {
 		const headers = this.plugin.apiHeadersStore.get(node.id);
+		const outsidePath = this.plugin.folderSourcePathStore.get(node.id);
 		new ApiSourceModal(
 			this.plugin.app,
 			node.apiSource ?? null,
@@ -538,6 +571,13 @@ export class AtlasExplorerView extends ItemView {
 			(result) => {
 				if (result.type === "folder") {
 					this.plugin.viewsManager.setFolderSource(view.id, node.id, result.source);
+					// G6/acceptance: Inside<->Outside toggling (or clearing the field outright) clears
+					// the previously stored path rather than leaving a stale device-local entry behind.
+					if (result.source.location === "outside" && result.outsidePath) {
+						this.plugin.folderSourcePathStore.set(node.id, result.outsidePath);
+					} else {
+						this.plugin.folderSourcePathStore.delete(node.id);
+					}
 					this.refreshFolderSource(view, node);
 					return;
 				}
@@ -545,7 +585,8 @@ export class AtlasExplorerView extends ItemView {
 				this.plugin.viewsManager.setApiSource(view.id, node.id, result.source);
 				this.refreshApiSource(view, node, "manual");
 			},
-			node.folderSource ?? null
+			node.folderSource ?? null,
+			outsidePath
 		).open();
 	}
 
@@ -560,6 +601,14 @@ export class AtlasExplorerView extends ItemView {
 		for (const pair of pairs) {
 			const headers = this.plugin.apiHeadersStore.get(pair.originalId);
 			if (headers.length > 0) this.plugin.apiHeadersStore.set(pair.cloneId, headers);
+		}
+		// PR-5 (G6/F6 mirror of the headers copy above): an Outside-Vault Folder source's device-local
+		// path has the same "lives outside the synced tree" problem `duplicateNode` can't solve on its
+		// own — copied across the same way, scoped to Outside-Vault sourced nodes in the subtree.
+		const outsidePairs = collectOutsideFolderSourceNodeIdPairs(node, clone);
+		for (const pair of outsidePairs) {
+			const path = this.plugin.folderSourcePathStore.get(pair.originalId);
+			if (path) this.plugin.folderSourcePathStore.set(pair.cloneId, path);
 		}
 	}
 
@@ -751,6 +800,53 @@ export class AtlasExplorerView extends ItemView {
 		// F9: refs are never deleted automatically — render greyed as missing rather than crash.
 		const fallbackText = ref.kind === "block" ? ref.subpath : (ref.path.split("/").pop() ?? ref.path);
 		return { text: fallbackText, icon: ref.kind === "folder" ? "folder" : ref.kind === "block" ? "quote" : "file", promoted: false, missing: true };
+	}
+
+	/** PR-5 (G8): an Outside-Vault-managed child's `ref.path` is an absolute filesystem path, never
+	 * indexed by `UnitIndex` (which only ever knows about vault paths) — `resolveRef`'s normal
+	 * `unitsByRefKey` lookup can never find it, and its generic missing-ref fallback would otherwise
+	 * wrongly show a "(missing)" badge/remove button for a child whose source currently resolves fine.
+	 * Bypasses `resolveRef` entirely for exactly these rows: basename-derived text/icon, never
+	 * `missing` — `renderNodeList`'s `isOutsideManagedAndUnresolved` check is what actually keeps an
+	 * Outside-Vault child out of view while its source doesn't resolve (R1/R2 fix: the node itself stays
+	 * in the persisted tree throughout), so a rendered row here is always one its source currently
+	 * vouches for. */
+	private resolveOutsideManagedRowInfo(ref: UnitRef): RowInfo {
+		const text = ref.kind === "block" ? ref.subpath : (ref.path.split("/").pop() ?? ref.path);
+		return { text, icon: ref.kind === "folder" ? "folder" : "file", promoted: false, missing: false };
+	}
+
+	/** PR-5 (G8/F7): true only for a `type: "unit"` node that a specifically Outside-Vault Folder
+	 * source manages — the one distinction `renderNode` needs to gate drag/nest/rename off for exactly
+	 * these rows while leaving Inside-Vault-managed (and any hand-placed) rows completely unaffected. */
+	private isOutsideManagedUnit(view: View, node: ViewNode): boolean {
+		if (!node.folderSourceManaged || !node.folderSourceOwnerId) return false;
+		const owner = this.plugin.viewsManager.getNode(view.id, node.folderSourceOwnerId);
+		return owner?.folderSource?.location === "outside";
+	}
+
+	/** PR-5 (R1/R2 fix): true for an Outside-Vault-managed child whose owning source does not
+	 * currently resolve on this device. `buildFolderSourceChildren` (`folder-source.ts`) now leaves
+	 * these rows exactly as they are in the persisted tree while unresolved — restoring the right
+	 * explicit status/collapsed state/manually-nested children once the path resolves again, instead
+	 * of deleting and recreating them (R1), and never writing a wiped tree to a synced `data.json`
+	 * (R2) — so this is the one place that actually keeps them out of view while unresolved, per the
+	 * spec's "render empty... reappear on recovery" (never a deletion). */
+	private isOutsideManagedAndUnresolved(view: View, node: ViewNode): boolean {
+		if (!node.folderSourceManaged || !node.folderSourceOwnerId) return false;
+		const owner = this.plugin.viewsManager.getNode(view.id, node.folderSourceOwnerId);
+		if (owner?.folderSource?.location !== "outside") return false;
+		return !resolveOutsidePath(this.plugin.folderSourcePathStore.get(owner.id));
+	}
+
+	/** PR-5 (R3 fix): true for any node (not just the one the caller already has in hand) that an
+	 * Outside-Vault Folder source manages — looked up by id so `buildNodeDragPayload` can filter the
+	 * rest of a multi-select by id without needing each `ViewNode` object already in scope. */
+	private isOutsideManagedNodeId(viewId: string, nodeId: string): boolean {
+		const node = this.plugin.viewsManager.getNode(viewId, nodeId);
+		if (!node || !node.folderSourceManaged || !node.folderSourceOwnerId) return false;
+		const owner = this.plugin.viewsManager.getNode(viewId, node.folderSourceOwnerId);
+		return owner?.folderSource?.location === "outside";
 	}
 
 	// --- top-level render --------------------------------------------------------------------------
@@ -1096,6 +1192,11 @@ export class AtlasExplorerView extends ItemView {
 		}
 		const resolved: Resolved[] = [];
 		for (const node of nodes) {
+			// R1/R2 fix: an Outside-Vault-managed child whose source doesn't currently resolve on this
+			// device renders as if it doesn't exist — the persisted tree keeps it intact (see
+			// `isOutsideManagedAndUnresolved`'s own doc comment) so it reappears exactly as it was the
+			// moment the path resolves again, with no separate "missing" row or hole in this list.
+			if (this.isOutsideManagedAndUnresolved(view, node)) continue;
 			const governor = sm.findGoverningAncestor(ancestors, node);
 			const status = governor ? sm.resolveNodeStatus(ancestors, node) : null;
 			let bypass = false;
@@ -1345,7 +1446,13 @@ export class AtlasExplorerView extends ItemView {
 			this.selectionAnchor = nodeId;
 			this.selectionAnchorScope = "bucket";
 		}
-		return { kind: "node", nodeIds: [...this.selectedBucketNodeIds], viewId };
+		// R3 fix: an Outside-Vault-managed child can still be part of a shift/cmd-click multi-select
+		// (its own row never starts a drag — `renderNode`'s `outsideManaged` gate — but it can tag along
+		// in someone else's selection), so it must never ride along in the payload an ordinary row's drag
+		// actually moves. Filtered out of the payload, not the selection itself, so the highlight is
+		// unaffected and only the drop/move/nest behavior changes.
+		const nodeIds = [...this.selectedBucketNodeIds].filter((id) => !this.isOutsideManagedNodeId(viewId, id));
+		return { kind: "node", nodeIds, viewId };
 	}
 
 	/** PR 20: same idea as `buildNodeDragPayload`, for an inbox row — see its own doc comment for why
@@ -1547,6 +1654,15 @@ export class AtlasExplorerView extends ItemView {
 				});
 				setTooltip(dot, dotTooltip(node.apiCache, Date.now(), node.apiAwaitingConfirmation));
 			}
+			if (node.folderSource?.location === "outside") {
+				// PR-5 (G6/G11): recomputed fresh on every render (same "no cached connection state
+				// anywhere" design as the modal's own dot) — load and focus-regain both already trigger a
+				// render via `queueRender`, so this alone satisfies the recheck-on-load/focus-regain
+				// requirement with no separate timer/poll (F10).
+				const resolved = resolveOutsidePath(this.plugin.folderSourcePathStore.get(node.id));
+				const dot = row.createSpan({ cls: `atlas-api-connection-dot atlas-api-dot-${resolved ? "green" : "red"}` });
+				setTooltip(dot, resolved ? "Path resolves on this device" : "Path does not resolve on this device");
+			}
 
 			// PR 20: a meta row's plain click never did anything before this (no open target) — safe
 			// to bind unconditionally, since the previous behavior ("nothing happens") is preserved
@@ -1567,7 +1683,8 @@ export class AtlasExplorerView extends ItemView {
 
 		const ref = node.ref;
 		if (!ref) return;
-		const info = await this.resolveRef(ref);
+		const outsideManaged = this.isOutsideManagedUnit(view, node);
+		const info = outsideManaged ? this.resolveOutsideManagedRowInfo(ref) : await this.resolveRef(ref);
 		if (!this.matchesFilter(info.text)) return;
 
 		const row = container.createDiv({ cls: "atlas-row atlas-row-unit" });
@@ -1576,7 +1693,9 @@ export class AtlasExplorerView extends ItemView {
 		row.dataset.selectKey = node.id;
 		row.toggleClass("is-selected", this.selectedBucketNodeIds.has(node.id));
 		row.style.paddingLeft = `${depth * 16}px`;
-		row.setAttr("draggable", "true");
+		// G8/F7: an Outside-Vault-managed child never drags (there is no real move/rename for it to
+		// perform — Obsidian's rename/move APIs only operate on vault paths).
+		row.setAttr("draggable", outsideManaged ? "false" : "true");
 
 		// PR 12: every row now gets a chevron slot, matching meta rows and the Module Contents modal
 		// (PR 10) — real content only if this unit has meta-nested children (a chevron appears only
@@ -1603,16 +1722,23 @@ export class AtlasExplorerView extends ItemView {
 		}
 		// PR 9 (issue 2): modules never expand inline anymore, in the bucket or the inbox — the icon
 		// opens the Module Contents modal instead. `ref.kind === "folder"` covers both folder-unit and
-		// promoted-folder (both are real folders on disk, per `unitToRef`).
-		if (!info.missing && ref.kind === "folder") this.wireModuleRow(row, iconEl, ref.path);
+		// promoted-folder (both are real folders on disk, per `unitToRef`). G8/F7: never wired for an
+		// Outside-Vault-managed child — its icon drop target would otherwise call `renameFile` with an
+		// absolute external path, which is exactly the "rename affordance" the spec requires absent.
+		if (!info.missing && !outsideManaged && ref.kind === "folder") this.wireModuleRow(row, iconEl, ref.path);
 
 		this.setPlacementTooltip(row, ref);
 		row.addEventListener("click", (evt) => {
 			const consumed = this.handleSelectionClick(evt, node.id, "bucket", this.bucketVisibleOrder());
-			if (!consumed) void this.openRef(ref);
+			// R9(c): `ref.path` here is a bare name relative to the Outside source's root, never a vault
+			// path — calling `openRef` would open (or create) a same-named vault-root file/module
+			// instead of doing nothing, which is what clicking an Outside row is supposed to do.
+			if (!consumed && !outsideManaged) void this.openRef(ref);
 		});
-		row.addEventListener("dragstart", () => (this.dragPayload = this.buildNodeDragPayload(node.id, view.id)));
-		this.makeDropZone(row, { kind: "node", nodeId: node.id, viewId: view.id });
+		if (!outsideManaged) {
+			row.addEventListener("dragstart", () => (this.dragPayload = this.buildNodeDragPayload(node.id, view.id)));
+			this.makeDropZone(row, { kind: "node", nodeId: node.id, viewId: view.id });
+		}
 		row.tabIndex = 0;
 		row.addEventListener("keydown", (evt) => this.handleRowKeydown(evt, node, view));
 		row.addEventListener("contextmenu", (evt) => {
@@ -2432,7 +2558,10 @@ export class AtlasExplorerView extends ItemView {
 	}
 
 	private handleRowKeydown(evt: KeyboardEvent, node: ViewNode, view: View): void {
-		if (evt.key === "Enter" && node.type === "unit" && node.ref) {
+		// R9(c): same reasoning as the row's click handler — an Outside-Vault-managed row's `ref.path`
+		// is root-relative, not a vault path, so Enter must no-op here too rather than opening (or
+		// creating) a same-named vault-root file/module.
+		if (evt.key === "Enter" && node.type === "unit" && node.ref && !this.isOutsideManagedUnit(view, node)) {
 			evt.preventDefault();
 			void this.openRef(node.ref);
 		} else if (evt.key === " " && (node.type === "meta" || node.children.length > 0)) {

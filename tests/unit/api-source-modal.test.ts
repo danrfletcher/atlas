@@ -258,6 +258,7 @@ vi.mock("obsidian", () => {
 		Platform: { isMobile: false },
 		Setting: FakeSetting,
 		requestUrl: async () => mockHttpResponse,
+		setTooltip: vi.fn(),
 	};
 });
 
@@ -613,7 +614,7 @@ describe("PR-4 — Folder source config section", () => {
 		expect(settingNamed(modal, "Refresh every").components[0].value).toBe(false);
 	});
 
-	it("selecting Outside vault shows a deferred-to-PR-5 stub instead of the folder config", () => {
+	it("PR-5: selecting Outside vault shows a raw path field instead of the vault-folder suggester, but keeps the shared Show toggles", () => {
 		const modal = new ApiSourceModal({} as any, null, [], vi.fn());
 		(modal as any).onOpen();
 
@@ -621,7 +622,9 @@ describe("PR-4 — Folder source config section", () => {
 		settingNamed(modal, "Location").components[0].select("outside");
 
 		expect(settingNamed(modal, "Folder")).toBeUndefined();
-		expect(settingNamed(modal, "Show files")).toBeUndefined();
+		expect(settingNamed(modal, "Path")).toBeTruthy();
+		expect(settingNamed(modal, "Show files")).toBeTruthy();
+		expect(settingNamed(modal, "Show folders")).toBeTruthy();
 	});
 
 	it("Save stays disabled until a folder path is entered, then saves a FolderSourceConfig", () => {
@@ -645,6 +648,7 @@ describe("PR-4 — Folder source config section", () => {
 				showFiles: true,
 				showFolders: true,
 			}),
+			outsidePath: "",
 		});
 	});
 

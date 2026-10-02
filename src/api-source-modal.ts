@@ -1,4 +1,4 @@
-import { App, ButtonComponent, Modal, Notice, Platform, Setting, TFolder } from "obsidian";
+import { App, ButtonComponent, Modal, Notice, Platform, Setting, TFolder, setTooltip } from "obsidian";
 import { canSaveApiSource, findArrayFields, isMapError, isValidExtraFieldName, mapResponseRows, sampleFieldsForArrayField } from "./api-mapping";
 import { generateJsFromMapping, runJsMapping, validateJsSource } from "./api-js-mapping";
 import { httpGetJson } from "./api-http";
@@ -6,13 +6,17 @@ import { obsidianRequestImpl } from "./api-request-obsidian";
 import { MIN_REFRESH_MINUTES, validateRefreshMinutes } from "./api-refresh-timer";
 import { resolveArgv, validateCommand } from "./command-argv";
 import { ConfirmModal } from "./modals";
+import { resolveOutsidePath } from "./folder-source-outside";
 import { ApiClickAction, ApiFieldMapping, ApiHeader, ApiSourceConfig, DataSourceType, FolderSourceConfig } from "./types";
 
 /** PR-4 (G1): now a real discriminated union — a Folder result carries its own `FolderSourceConfig`
- * and no headers (it has none), instead of widening the "api" shape to cover both. */
+ * and no headers (it has none), instead of widening the "api" shape to cover both. PR-5: also
+ * carries `outsidePath` — the modal's own device-local field, which (like headers) has no home in
+ * `FolderSourceConfig` itself since it must never reach synced `data.json`. Always present (empty
+ * string while Inside Vault, or after a clear) so the caller never has to guess. */
 export type ApiSourceModalResult =
 	| { type: "api"; source: ApiSourceConfig; headers: ApiHeader[] }
-	| { type: "folder"; source: FolderSourceConfig };
+	| { type: "folder"; source: FolderSourceConfig; outsidePath: string };
 
 const SOURCE_TYPE_OPTIONS: { value: DataSourceType; label: string }[] = [
 	{ value: "api", label: "API" },
@@ -84,6 +88,10 @@ export class ApiSourceModal extends Modal {
 	 * a deferred-to-PR-5 stub instead of a real config section. */
 	private folderLocation: "inside" | "outside";
 	private folderPath: string;
+	/** PR-5 (G6): the Outside-Vault raw filesystem path field's own value — kept separate from
+	 * `folderPath` (Inside-Vault only) so switching `folderLocation` can clear exactly one without
+	 * ever mixing a vault-relative and an absolute path together. */
+	private outsidePath: string;
 	private showFiles: boolean;
 	private showFolders: boolean;
 	/** R1 fix: refs the user has removed from this source's managed set, carried through unedited —
@@ -96,7 +104,8 @@ export class ApiSourceModal extends Modal {
 		initial: ApiSourceConfig | null,
 		initialHeaders: ApiHeader[],
 		private onSave: (result: ApiSourceModalResult) => void,
-		initialFolderSource: FolderSourceConfig | null = null
+		initialFolderSource: FolderSourceConfig | null = null,
+		initialOutsidePath: string = ""
 	) {
 		super(app);
 		this.selectedType = initial ? "api" : initialFolderSource ? "folder" : null;
@@ -124,6 +133,7 @@ export class ApiSourceModal extends Modal {
 		if (initialFolderSource) {
 			this.folderLocation = initialFolderSource.location;
 			this.folderPath = initialFolderSource.path ?? "";
+			this.outsidePath = initialFolderSource.location === "outside" ? initialOutsidePath : "";
 			this.showFiles = initialFolderSource.showFiles ?? true;
 			this.showFolders = initialFolderSource.showFolders ?? true;
 			this.refreshOnViewLoad = initialFolderSource.refreshOnViewLoad ?? false;
@@ -169,6 +179,7 @@ export class ApiSourceModal extends Modal {
 	private resetFolderFieldsToBlank(): void {
 		this.folderLocation = "inside";
 		this.folderPath = "";
+		this.outsidePath = "";
 		this.showFiles = true;
 		this.showFolders = true;
 		this.removedRefs = undefined;
@@ -596,8 +607,9 @@ export class ApiSourceModal extends Modal {
 		updateRefreshMinutesValidity();
 	}
 
-	/** PR-4: the Folder source's modal body. Inside Vault only is functional this PR (E7) — Outside
-	 * Vault renders a deferred-to-PR-5 stub and returns early, matching the existing stub-type pattern. */
+	/** PR-4/PR-5: the Folder source's modal body — Inside Vault keeps its vault-folder suggester (E7);
+	 * Outside Vault (G6) now renders a real raw filesystem path field with its own live connection
+	 * indicator instead of PR-4's deferred stub. */
 	private renderFolderBody(): void {
 		const { contentEl } = this;
 
@@ -608,20 +620,23 @@ export class ApiSourceModal extends Modal {
 				dropdown.addOption("outside", "Outside vault");
 				dropdown.setValue(this.folderLocation);
 				dropdown.onChange((value) => {
-					this.folderLocation = value === "outside" ? "outside" : "inside";
+					const next = value === "outside" ? "outside" : "inside";
+					if (next === this.folderLocation) return;
+					// Acceptance: toggling Inside<->Outside clears the previously stored path (relative
+					// or absolute) rather than attempting to convert it — never carry one over as the
+					// other's starting value.
+					this.folderLocation = next;
+					this.folderPath = "";
+					this.outsidePath = "";
 					this.render();
 				});
 			});
 
-		if (this.folderLocation !== "inside") {
-			contentEl.createEl("p", {
-				cls: "atlas-source-type-stub",
-				text: "Outside vault folders aren't configurable in this version yet.",
-			});
-			return;
+		if (this.folderLocation === "outside") {
+			this.renderOutsidePathField(contentEl);
+		} else {
+			this.renderFolderPathSuggester(contentEl);
 		}
-
-		this.renderFolderPathSuggester(contentEl);
 
 		new Setting(contentEl)
 			.setName("Show files")
@@ -631,6 +646,36 @@ export class ApiSourceModal extends Modal {
 			.addToggle((toggle) => toggle.setValue(this.showFolders).onChange((value) => (this.showFolders = value)));
 
 		this.renderRefreshToggles(contentEl);
+	}
+
+	/** PR-5 (G6/G11): the Outside-Vault raw path field — no vault-folder suggester (there is nothing
+	 * vault-relative to suggest), plus a red/green connection dot that recomputes `resolveOutsidePath`
+	 * fresh on every keystroke, matching the explorer row's own dot (both read live, neither caches a
+	 * connection state anywhere — satisfies F10's "no timer" fence by construction, not by omission). */
+	private renderOutsidePathField(contentEl: HTMLElement): void {
+		let indicatorEl: HTMLElement | null = null;
+		const updateIndicator = () => {
+			if (!indicatorEl) return;
+			const resolved = resolveOutsidePath(this.outsidePath);
+			indicatorEl.className = `atlas-api-connection-dot atlas-api-dot-${resolved ? "green" : "red"}`;
+			setTooltip(indicatorEl, resolved ? "Path resolves on this device" : "Path does not resolve on this device");
+		};
+
+		const setting = new Setting(contentEl)
+			.setName("Path")
+			.setDesc("Absolute filesystem path on this device. Stored device-local only — never synced.")
+			.addText((text) =>
+				text
+					.setPlaceholder("/Users/you/External Drive/Notes")
+					.setValue(this.outsidePath)
+					.onChange((value) => {
+						this.outsidePath = value;
+						updateIndicator();
+						this.updateSaveButton();
+					})
+			);
+		indicatorEl = setting.controlEl.createSpan();
+		updateIndicator();
 	}
 
 	/** G3/GP1: a filterable list of every vault folder, vault-relative paths only — the selector starts
@@ -699,8 +744,10 @@ export class ApiSourceModal extends Modal {
 		// G1/edge case: Save is blocked until a type is selected; Table/CSV have no config of their own
 		// to validate in this PR, so there's nothing for them to ever become savable against.
 		if (this.selectedType === "folder") {
-			if (this.folderLocation !== "inside") return false;
-			if (!this.folderPath.trim()) return false;
+			// E8: a path that doesn't currently resolve is still savable (it may start resolving later,
+			// e.g. a drive remounting) — only blank/whitespace-only is rejected outright, same contract
+			// Inside Vault already has for a path that doesn't currently resolve to a real folder.
+			if (this.folderLocation === "outside" ? !this.outsidePath.trim() : !this.folderPath.trim()) return false;
 			if (this.refreshEveryMinutesEnabled && !validateRefreshMinutes(this.refreshEveryMinutesRaw).ok) return false;
 			return true;
 		}
@@ -815,8 +862,10 @@ export class ApiSourceModal extends Modal {
 				: null;
 			const source: FolderSourceConfig = {
 				type: "folder",
-				location: "inside",
-				path: this.folderPath.trim(),
+				location: this.folderLocation,
+				// G6: `path` stays vault-relative-only — the Outside-Vault absolute path never reaches
+				// this (synced) shape at all, only the modal result's own `outsidePath` field.
+				path: this.folderLocation === "inside" ? this.folderPath.trim() : "",
 				showFiles: this.showFiles,
 				showFolders: this.showFolders,
 				refreshOnViewLoad: this.refreshOnViewLoad,
@@ -825,7 +874,7 @@ export class ApiSourceModal extends Modal {
 				removedRefs: this.removedRefs,
 			};
 			this.close();
-			this.onSave({ type: "folder", source });
+			this.onSave({ type: "folder", source, outsidePath: this.folderLocation === "outside" ? this.outsidePath.trim() : "" });
 			return;
 		}
 		// canSave() above guarantees selectedType === "api" by this point.

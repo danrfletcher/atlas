@@ -67,7 +67,8 @@ describe("PR-3 — explorer-view.ts call sites keep working with the new ApiSour
 		const headers = [{ key: "X", value: "Y" }];
 		const apiHeadersStore = { get: vi.fn(() => headers), set: vi.fn() };
 		const viewsManager = { setApiSource: vi.fn() };
-		const plugin = { app: {}, apiHeadersStore, viewsManager };
+		const folderSourcePathStore = { get: vi.fn(() => ""), set: vi.fn(), delete: vi.fn() };
+		const plugin = { app: {}, apiHeadersStore, viewsManager, folderSourcePathStore };
 		const refreshApiSource = openApiSourceModal(node, plugin);
 
 		expect(FakeApiSourceModal.instances).toHaveLength(1);
