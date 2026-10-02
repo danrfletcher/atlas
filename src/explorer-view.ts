@@ -654,22 +654,6 @@ export class AtlasExplorerView extends ItemView {
 		});
 	}
 
-	/** Renders a Folder's live API items, in `apiItemOrder`, right after its real children — separate
-	 * from `renderNodeList` since these have no `ViewNode` of their own to iterate (G10). */
-	private renderApiItems(node: ViewNode, container: HTMLElement, view: View, depth: number, ancestors: StatusGovernance[]): void {
-		// G4: a Folder can have rows with no live source at all (source removed, rows kept as static) —
-		// gated on the rows themselves, not on `apiSource` being present.
-		if (!node.apiItemOrder) return;
-		for (const itemId of node.apiItemOrder) {
-			const item = node.apiItemState?.[itemId];
-			if (!item) continue;
-			// R18: API rows must respect the explorer filter, same as any unit row (G12 — a Folder with
-			// API rows behaves "like any Folder with its own children").
-			if (!apiItemMatchesFilter(this.filterText, item.label, item.secondary)) continue;
-			this.renderApiItemRow(item, container, view, node, depth, ancestors);
-		}
-	}
-
 	/** R18: does this Folder's own API rows (not its real `children`) contain a filter match? Used
 	 * alongside `subtreeHasMatch` everywhere a collapsed Folder needs to be force-revealed, or bypass
 	 * truncation grouping, for a matching descendant — API rows are a Folder's rows too, just not
@@ -1025,7 +1009,7 @@ export class AtlasExplorerView extends ItemView {
 	 * renders individually — same "never let a filter match hide behind something else" principle
 	 * `renderFoldableChildren` already applies to collapsed folders (PR 9 issue 6), extended to cover
 	 * hide/truncate the same way. */
-	private async renderNodeList(nodes: ViewNode[], container: HTMLElement, view: View, depth: number, ancestors: StatusGovernance[]): Promise<void> {
+	private async renderNodeList(nodes: ViewNode[], container: HTMLElement, view: View, depth: number, ancestors: StatusGovernance[], apiOwner?: ViewNode): Promise<void> {
 		const sm = this.plugin.statusesManager;
 		const filterActive = !!this.filterText.trim();
 
@@ -1034,6 +1018,7 @@ export class AtlasExplorerView extends ItemView {
 			status: StatusDefinition | null;
 			governor: StatusGovernance | null;
 			bypass: boolean;
+			apiItem?: ApiItemState;
 		}
 		const resolved: Resolved[] = [];
 		for (const node of nodes) {
@@ -1049,6 +1034,28 @@ export class AtlasExplorerView extends ItemView {
 				if (!bypass && node.children.length > 0 && (await this.subtreeHasMatch(node.children))) bypass = true;
 			}
 			resolved.push({ node, status, governor, bypass });
+		}
+
+		// G25: a Folder's own API item rows (`apiItemOrder`/`apiItemState`) are folded into this same
+		// `resolved` list, right behind its real children in build order — so the one sort-by-status
+		// pass and one hide/truncate/count pass below apply identically to both row kinds, instead of
+		// `renderApiItems` walking `apiItemOrder` on its own with no sort/truncate logic at all (the
+		// bug this closes). A stale/unmatched id in `apiItemOrder` (source renamed/removed from under
+		// it) is simply skipped here, same graceful degrade `renderApiItems` already did. Filter
+		// exclusion mirrors a real unit's own (`renderNode`'s `matchesFilter` early-return): a
+		// non-matching item is skipped entirely, before it can ever be sorted, counted, or truncated —
+		// a surviving match instead bypasses hide/truncate outright, same "a filter match is never
+		// folded away" rule real nodes already get.
+		if (apiOwner?.apiItemOrder) {
+			for (const itemId of apiOwner.apiItemOrder) {
+				const item = apiOwner.apiItemState?.[itemId];
+				if (!item) continue;
+				if (filterActive && !apiItemMatchesFilter(this.filterText, item.label, item.secondary)) continue;
+				const pseudo = this.pseudoNodeForApiItem(item);
+				const governor = sm.findGoverningAncestor(ancestors, pseudo);
+				const status = governor ? sm.resolveNodeStatus(ancestors, pseudo) : null;
+				resolved.push({ node: pseudo, status, governor, bypass: filterActive, apiItem: item });
+			}
 		}
 
 		// PR 22: sort-by-status — the nearest governor that reaches this list (same ancestor-walk
@@ -1087,7 +1094,7 @@ export class AtlasExplorerView extends ItemView {
 
 		const groupRowShown = new Set<string>();
 		for (const r of resolved) {
-			const { node, status, governor, bypass } = r;
+			const { node, status, governor, bypass, apiItem } = r;
 			if (!bypass && status && governor && isHidden(status, governor)) continue; // hide wins outright
 
 			if (!bypass && status && governor) {
@@ -1103,7 +1110,14 @@ export class AtlasExplorerView extends ItemView {
 				}
 			}
 
-			await this.renderNode(node, container, view, depth, ancestors);
+			if (apiItem) {
+				// G25: same row content/icon/click wiring as before the fix — only its position within
+				// the now-shared ordering/truncation pass is new (`apiOwner` is only set when this list
+				// has API rows to merge, so it's always defined here).
+				this.renderApiItemRow(apiItem, container, view, apiOwner as ViewNode, depth, ancestors);
+			} else {
+				await this.renderNode(node, container, view, depth, ancestors);
+			}
 		}
 	}
 
@@ -1338,12 +1352,12 @@ export class AtlasExplorerView extends ItemView {
 		// PR 17: `node` becomes the nearest ancestor for its own children — prepended, not replacing
 		// the chain, so a grandparent's `inheritToSubfolders` can still reach past `node` if `node`
 		// itself isn't a governor (or is, but doesn't itself reach — same walk either way).
-		await this.renderNodeList(node.children, childrenInner, view, depth + 1, [node, ...ancestors]);
-		// T2: was gated on `node.apiSource` alone, so "Remove data source" (which clears `apiSource`
-		// but deliberately keeps `apiItemState`/`apiItemOrder`, per G4) made this permanently false and
-		// hid the surviving static rows from the tree entirely, even though `renderApiItems` itself is
-		// already correctly gated on the rows, not the source (see its own comment above).
-		if (node.type === "meta" && nodeHasApiRows(node)) this.renderApiItems(node, childrenInner, view, depth + 1, [node, ...ancestors]);
+		// T2/G25: `node`'s own API item rows (gated on the rows existing, not on `apiSource` surviving
+		// — see `nodeHasApiRows`'s own doc comment) are passed in as `apiOwner` so they're merged into
+		// this same list's sort/truncate pass, right behind the real children, instead of a second
+		// `renderApiItems` pass with no sort/truncate logic of its own.
+		const apiOwner = node.type === "meta" && nodeHasApiRows(node) ? node : undefined;
+		await this.renderNodeList(node.children, childrenInner, view, depth + 1, [node, ...ancestors], apiOwner);
 
 		// Local optimistic state, not `node.collapsed` — real bug caught in review: `node.collapsed`
 		// only updates once the delayed `setNodeCollapsed` below actually runs, so a second click
