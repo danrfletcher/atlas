@@ -819,7 +819,7 @@ export class AtlasExplorerView extends ItemView {
 		const bucketEl = container.createDiv({ cls: "atlas-section atlas-bucket" });
 		await this.renderBucketSection(bucketEl, view);
 
-		const inboxUnits = this.plugin.viewsManager.getInboxUnits(allUnits, view.id, view.inboxMode);
+		const inboxUnits = this.plugin.viewsManager.getInboxUnits(allUnits, view.id, view.inboxMode, this.plugin.unitIndex);
 		const inboxEl = container.createDiv({ cls: "atlas-section atlas-inbox" });
 		await this.renderInboxSection(inboxEl, view, inboxUnits, inboxViewportScrollTop);
 
@@ -1660,7 +1660,7 @@ export class AtlasExplorerView extends ItemView {
 		// The non-virtualized fallback this used to need for expanded folder-unit internals is gone —
 		// PR 9 (issue 2) replaced inline inbox expansion with the Module Contents modal, so every
 		// inbox row is now fixed-height and the virtualized path always applies.
-		this.renderVirtualizedInboxRows(listEl, sorted, viewportScrollTop);
+		this.renderVirtualizedInboxRows(listEl, sorted, viewportScrollTop, view);
 
 		let localCollapsed = this.inboxCollapsed;
 		let pendingPersist: number | undefined;
@@ -1693,7 +1693,7 @@ export class AtlasExplorerView extends ItemView {
 		}).open();
 	}
 
-	private renderInboxRow(container: HTMLElement, ref: UnitRef, info: RowInfo): HTMLElement {
+	private renderInboxRow(container: HTMLElement, ref: UnitRef, info: RowInfo, view: View): HTMLElement {
 		const row = container.createDiv({ cls: "atlas-row atlas-row-unit" });
 		const key = unitRefKey(ref);
 		row.dataset.refKey = key;
@@ -1719,7 +1719,7 @@ export class AtlasExplorerView extends ItemView {
 		row.tabIndex = 0;
 		row.addEventListener("contextmenu", (evt) => {
 			evt.preventDefault();
-			this.showInboxUnitMenu(evt, ref);
+			this.showInboxUnitMenu(evt, ref, view);
 		});
 		return row;
 	}
@@ -1732,7 +1732,8 @@ export class AtlasExplorerView extends ItemView {
 	private renderVirtualizedInboxRows(
 		listEl: HTMLElement,
 		sorted: { ref: UnitRef; info: RowInfo; unit: Unit }[],
-		viewportScrollTop: number
+		viewportScrollTop: number,
+		view: View
 	): void {
 		const viewport = listEl.createDiv({ cls: "atlas-inbox-viewport" });
 		const spacer = viewport.createDiv({ cls: "atlas-inbox-spacer" });
@@ -1754,7 +1755,7 @@ export class AtlasExplorerView extends ItemView {
 			const end = Math.min(sorted.length, start + count);
 			for (let i = start; i < end; i++) {
 				const { ref, info } = sorted[i];
-				const row = this.renderInboxRow(spacer, ref, info);
+				const row = this.renderInboxRow(spacer, ref, info, view);
 				row.addClass("atlas-row-virtual");
 				row.style.top = `${i * INBOX_ROW_HEIGHT}px`;
 			}
@@ -2068,7 +2069,7 @@ export class AtlasExplorerView extends ItemView {
 		).open();
 	}
 
-	private showInboxUnitMenu(evt: MouseEvent, ref: UnitRef): void {
+	private showInboxUnitMenu(evt: MouseEvent, ref: UnitRef, view: View): void {
 		const menu = new Menu();
 		menu.addItem((item) => item.setTitle("Open").setIcon("file").onClick(() => void this.openRef(ref)));
 		menu.addItem((item) => item.setTitle("Open in new tab").setIcon("file-plus").onClick(() => void this.openRef(ref, true)));
@@ -2092,6 +2093,26 @@ export class AtlasExplorerView extends ItemView {
 		menu.addItem((item) => item.setTitle("Copy link").setIcon("link").onClick(() => void this.copyLink(ref)));
 		menu.addSeparator();
 		menu.addItem((item) => item.setTitle("Place in view…").setIcon("arrow-right-left").onClick(() => this.placeInViewFlow(ref)));
+		// PR-4 (G4-G6): the only removal mechanism for any inbox row, auto-promoted or manually-added
+		// (PR-3) alike — there is no separate "remove"/"un-add" item anywhere in this menu (F1). Outside
+		// Global view this only ever touches the current view's own dismiss set; invoked while the
+		// explorer is showing Global view it writes the single global-scope entry instead (G5), which
+		// `getInboxUnits`' dismissed-OR-check (view-scope reads global-or-own-view, global-scope reads
+		// only the global set) then applies at render time for every view, including ones never opened.
+		menu.addItem((item) =>
+			item
+				.setTitle("Dismiss")
+				.setIcon("x")
+				.onClick(() => {
+					if (view.inboxMode === "global") {
+						this.plugin.unitIndex.setDismissed(ref, "global", true);
+					} else {
+						this.plugin.unitIndex.setDismissed(ref, "view", true, view.id);
+					}
+					void this.plugin.flushSave();
+					void this.render();
+				})
+		);
 		menu.showAtMouseEvent(evt);
 	}
 
