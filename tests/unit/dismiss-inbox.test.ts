@@ -48,6 +48,26 @@ function callShowInboxUnitMenu(fake: FakeMenuThis, ref: UnitRef, view: View): Me
 	return builtMenu!;
 }
 
+/** Same wiring as `callShowInboxUnitMenu`, but against a real `UnitIndex` instead of a mocked
+ * `setDismissed` — needed for R2's G6 regression, which has to assert on real `isAdded`/
+ * `getAddedItems`/`getManualPromotions` state after the click, not just on call shape. */
+function callShowInboxUnitMenuWithRealIndex(index: UnitIndex, ref: UnitRef, view: View): Menu {
+	const fake = {
+		plugin: { unitIndex: index, flushSave: vi.fn(async () => {}) },
+		render: vi.fn(async () => {}),
+	};
+	let builtMenu: Menu | undefined;
+	vi.spyOn(Menu.prototype, "showAtMouseEvent").mockImplementation(function (this: Menu) {
+		builtMenu = this;
+	});
+	(
+		AtlasExplorerView.prototype as unknown as {
+			showInboxUnitMenu: (this: typeof fake, evt: MouseEvent, ref: UnitRef, view: View) => void;
+		}
+	).showInboxUnitMenu.call(fake, new MouseEvent("contextmenu"), ref, view);
+	return builtMenu!;
+}
+
 describe("showInboxUnitMenu — Dismiss item (G4)", () => {
 	it("registers a 'Dismiss' item alongside the existing items, using the same Menu/addItem pattern", () => {
 		const fake = fakeMenuThis();
@@ -106,6 +126,25 @@ describe("showInboxUnitMenu — Dismiss item (G4)", () => {
 		// one, this test would throw rather than silently pass.
 	});
 
+	it("R2/G6 (real UnitIndex): dismissing an added + manually-promoted row clears neither marker and removes it from the inbox", () => {
+		const app = new App();
+		seedRoot(app, ["Foo.md"]);
+		const ref = file("Foo.md");
+		const index = new UnitIndex(app, DEFAULT_SETTINGS, [ref]); // seeded manual promotion
+		index.markAdded(ref);
+		const view = createEmptyView("v1", "Default"); // inboxMode defaults to "view"
+
+		const menu = callShowInboxUnitMenuWithRealIndex(index, ref, view);
+		menu.items.find((i) => i.title === "Dismiss")!.clickHandler!();
+
+		expect(index.isAdded(ref)).toBe(true);
+		expect(index.getAddedItems()).toEqual([{ ref, tag: "added" }]);
+		expect(index.getManualPromotions()).toEqual([ref]);
+
+		const views = new ViewsManager(app, [], "v1", () => {});
+		expect(views.getInboxUnits(makeUnits(["Foo.md"]), "v1", "view", index)).toEqual([]);
+	});
+
 	it("idempotency: invoking the Dismiss click handler twice issues two identical writes, matching UnitIndex.setDismissed's own no-op-on-repeat contract (no throw)", () => {
 		const fake = fakeMenuThis();
 		const view = createEmptyView("v1", "Default");
@@ -120,6 +159,21 @@ describe("showInboxUnitMenu — Dismiss item (G4)", () => {
 		expect(fake.plugin.unitIndex.setDismissed).toHaveBeenCalledTimes(2);
 		expect(fake.plugin.unitIndex.setDismissed).toHaveBeenNthCalledWith(1, ref, "view", true, "v1");
 		expect(fake.plugin.unitIndex.setDismissed).toHaveBeenNthCalledWith(2, ref, "view", true, "v1");
+	});
+
+	it("R1: on a real UnitIndex, a repeated per-view and a repeated global dismiss write each leave state unchanged (no duplicate entries)", () => {
+		const app = new App();
+		seedRoot(app, ["Foo.md"]);
+		const index = new UnitIndex(app, DEFAULT_SETTINGS, []);
+		const ref = file("Foo.md");
+
+		index.setDismissed(ref, "view", true, "v1");
+		index.setDismissed(ref, "view", true, "v1");
+		expect(index.getDismissedByView()).toEqual({ v1: [ref] });
+
+		index.setDismissed(ref, "global", true);
+		index.setDismissed(ref, "global", true);
+		expect(index.getDismissedGlobal()).toEqual([ref]);
 	});
 });
 
