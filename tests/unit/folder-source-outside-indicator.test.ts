@@ -41,8 +41,10 @@ describe("G11/F10 — recheck-on-load rule: Outside-Vault's check is uncondition
 			plugin: { viewsManager: { getActiveView: () => view } },
 			collectApiSourceNodes: proto.collectApiSourceNodes,
 			collectFolderSourceNodes: proto.collectFolderSourceNodes,
+			collectCsvSourceNodes: proto.collectCsvSourceNodes,
 			refreshApiSource: vi.fn(),
 			refreshFolderSource,
+			refreshCsvSource: vi.fn(),
 		};
 
 		proto.refreshApiSourcesOnViewLoad.call(fake);
@@ -58,8 +60,10 @@ describe("G11/F10 — recheck-on-load rule: Outside-Vault's check is uncondition
 			plugin: { viewsManager: { getActiveView: () => view } },
 			collectApiSourceNodes: proto.collectApiSourceNodes,
 			collectFolderSourceNodes: proto.collectFolderSourceNodes,
+			collectCsvSourceNodes: proto.collectCsvSourceNodes,
 			refreshApiSource: vi.fn(),
 			refreshFolderSource,
+			refreshCsvSource: vi.fn(),
 		};
 
 		proto.refreshApiSourcesOnViewLoad.call(fake);
@@ -75,8 +79,10 @@ describe("G11/F10 — recheck-on-load rule: Outside-Vault's check is uncondition
 			plugin: { viewsManager: { getActiveView: () => view } },
 			collectApiSourceNodes: proto.collectApiSourceNodes,
 			collectFolderSourceNodes: proto.collectFolderSourceNodes,
+			collectCsvSourceNodes: proto.collectCsvSourceNodes,
 			refreshApiSource: vi.fn(),
 			refreshFolderSource,
+			refreshCsvSource: vi.fn(),
 		};
 
 		proto.refreshApiSourcesOnViewLoad.call(fake);
