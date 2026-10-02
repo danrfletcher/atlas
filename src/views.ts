@@ -835,6 +835,24 @@ export class ViewsManager {
 		this.save();
 	}
 
+	/** T1 fix: every ref currently managed by any Folder source, across every view. `main.ts` feeds
+	 * this straight into `UnitIndex.setFolderSourceRefs` after every change (`onChange`) so Folder-
+	 * source children resolve through `ExplorerView.resolveRef`'s normal `unitsByRefKey` lookup as
+	 * real units (G3), instead of only existing as `ViewNode`s the index never knew about and
+	 * falling through to the generic missing-ref fallback. Walks every view (not just the active
+	 * one) since the index is shared/global, not per-view. */
+	getFolderSourceManagedRefs(): UnitRef[] {
+		const refs: UnitRef[] = [];
+		const walk = (nodes: ViewNode[]): void => {
+			for (const node of nodes) {
+				if (node.type === "unit" && node.folderSourceManaged && node.ref) refs.push(node.ref);
+				walk(node.children);
+			}
+		};
+		for (const view of this.views) walk(view.root);
+		return refs;
+	}
+
 	/** G8: sets one API item's own explicit status — the item has no real `ViewNode`, so
 	 * `setExplicitStatus` (which addresses a node by id) can't be reused directly. */
 	setApiItemStatus(viewId: string, nodeId: string, itemId: string, statusId: string): void {
