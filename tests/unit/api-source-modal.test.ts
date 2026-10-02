@@ -597,6 +597,63 @@ describe("PR-3 — source type dropdown and modal-body switching", () => {
 	});
 });
 
+describe("R1 — Markdown Table: no auto-pick of the first table when there's a genuine choice", () => {
+	function twoTables() {
+		return [
+			{ headers: ["id", "name"], rows: [{ id: "1", name: "One" }], skippedCount: 0 },
+			{ headers: ["id", "name"], rows: [{ id: "2", name: "Two" }], skippedCount: 0 },
+		];
+	}
+
+	it("a file with more than one table starts with no table selected, hides the mapping UI, and blocks Save until one is explicitly chosen", () => {
+		const onSave = vi.fn();
+		const modal = new ApiSourceModal({} as any, null, [], onSave);
+		(modal as any).onOpen();
+		settingNamed(modal, "Source type").components[0].select("markdown-table");
+
+		// Simulates the state right after "Load sample" detects two tables (R1 fix: index starts unset,
+		// not auto-picked).
+		(modal as any).mdTablePath = "notes/table.md";
+		(modal as any).mdTables = twoTables();
+		(modal as any).mdTableIndex = null;
+		(modal as any).render();
+
+		const tableDropdown = settingNamed(modal, "Table").components[0];
+		expect(tableDropdown.value).toBe("");
+		expect(tableDropdown.options[0]).toEqual({ value: "", label: "Choose a table…" });
+
+		// Mapping stays hidden until a table is picked.
+		expect(settingNamed(modal, "Mapping mode")).toBeUndefined();
+
+		// Save stays blocked even once the mapping fields a user could otherwise reach are filled in
+		// directly, since there's no table chosen for them to belong to.
+		(modal as any).mapping = { idField: "id", labelField: "name" };
+		expect((modal as any).canSave()).toBe(false);
+		expect((modal as any).saveButton.disabled).toBe(true);
+		(modal as any).saveButton.simulateClick();
+		expect(onSave).not.toHaveBeenCalled();
+
+		// Picking a table reveals the mapping UI and unblocks Save once mapped.
+		tableDropdown.select("1");
+		expect((modal as any).mdTableIndex).toBe(1);
+		expect(settingNamed(modal, "Mapping mode")).toBeTruthy();
+		expect((modal as any).saveButton.disabled).toBe(false);
+	});
+
+	it("a file with zero or exactly one table never shows the picker and the mapping UI renders immediately", () => {
+		const modal = new ApiSourceModal({} as any, null, [], vi.fn());
+		(modal as any).onOpen();
+		settingNamed(modal, "Source type").components[0].select("markdown-table");
+
+		(modal as any).mdTables = [twoTables()[0]];
+		(modal as any).mdTableIndex = 0;
+		(modal as any).render();
+
+		expect(settingNamed(modal, "Table")).toBeUndefined();
+		expect(settingNamed(modal, "Mapping mode")).toBeTruthy();
+	});
+});
+
 describe("PR-4 — Folder source config section", () => {
 	it("selecting Folder + Inside vault renders the folder path field and both Show toggles, path starting empty", () => {
 		const modal = new ApiSourceModal({} as any, null, [], vi.fn());

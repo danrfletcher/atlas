@@ -196,6 +196,11 @@ export interface ViewNode extends StatusGovernance {
 	 * triggered by a file-change/view-load/timer instead of a network fetch. Only ever set on a
 	 * `type: "meta"` node, and never set at the same time as `apiSource` on the same node. */
 	csvSource?: CsvSourceConfig;
+	/** PR-8 (G17-G20/G22-G24): a markdown pipe-table source — same `apiCache`/`apiItemState`/
+	 * `apiItemOrder`/`apiAwaitingConfirmation` fields shared with `apiSource`/`csvSource` above. Only
+	 * ever set on a `type: "meta"` node, and never set at the same time as `apiSource`/`csvSource` on
+	 * the same node. */
+	markdownTableSource?: MarkdownTableSourceConfig;
 }
 
 /** A single request header, e.g. `Authorization: Bearer …`. Never persisted in `data.json` — see
@@ -304,8 +309,31 @@ export interface FolderSourceConfig {
 	mode?: "append" | "merge" | "overwrite";
 }
 
-export interface MarkdownTableSourceConfigStub {
-	type: "markdown-table";
+/** PR-8 (G17-G20/G22-G24): a markdown pipe-table inside a vault `.md` file, parsed from scratch
+ * (`markdown-table-mapping.ts`) and fed through the exact same `mapResponseRows`/`runJsMapping` +
+ * `planApiRefresh` pipeline as an API/CSV source, producing the same `PLACEHOLDER_ROW_KIND` rows —
+ * so Remove/Remove-attachment and every other placeholder-row affordance work unmodified. */
+export interface MarkdownTableSourceConfig {
+	type?: "markdown-table";
+	/** G18: vault-relative path to the `.md` file — never absolute. */
+	path: string;
+	/** G20: 0-based index into the file's detected tables, chosen once at setup time (prompted only
+	 * when the file has more than one table) and never re-validated afterwards. G24/F9: deliberately
+	 * NOT re-checked against the file's current tables on every refresh — if a later edit changes
+	 * which table sits at this index (or removes it), the source just keeps reading whatever (if
+	 * anything) is now there, with no drift detection, warning, or re-prompt. */
+	tableIndex: number;
+	mapping: ApiFieldMapping;
+	mode: "append" | "merge" | "overwrite";
+	/** Refreshes automatically whenever the file at `path` is modified, in addition to reusing the
+	 * same view-load/every-N-minutes triggers as an API/CSV source — no new refresh UI. */
+	refreshOnViewLoad: boolean;
+	refreshEveryMinutesEnabled?: boolean;
+	refreshEveryMinutes?: number;
+	keepOnEmpty?: boolean;
+	confirmBeforeDelete?: boolean;
+	mappingMode?: "drag" | "js";
+	jsSource?: string;
 }
 
 /** PR-7 (G17-G19/G22-G23): a CSV file inside the vault, parsed from scratch (`csv-parsing.ts`) and
@@ -338,7 +366,7 @@ export interface CsvSourceConfig {
 /** PR-3 (G1): the sibling-shapes union `ApiSourceConfig`'s new `type` field exists to support —
  * `ViewNode.apiSource`/`ViewNode.folderSource`/`ViewNode.csvSource` stay their own concretely-typed
  * fields rather than this union, which is exercised today only inside `ApiSourceModal`. */
-export type DataSourceConfig = ApiSourceConfig | FolderSourceConfig | MarkdownTableSourceConfigStub | CsvSourceConfig;
+export type DataSourceConfig = ApiSourceConfig | FolderSourceConfig | MarkdownTableSourceConfig | CsvSourceConfig;
 
 /** A row exactly as mapped from a response — this is all the cache ever holds, never the raw
  * response (G13, E9). */

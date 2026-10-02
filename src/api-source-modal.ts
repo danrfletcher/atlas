@@ -8,18 +8,21 @@ import { resolveArgv, validateCommand } from "./command-argv";
 import { ConfirmModal } from "./modals";
 import { resolveOutsidePath } from "./folder-source-outside";
 import { parseCsv } from "./csv-parsing";
-import { ApiClickAction, ApiFieldMapping, ApiHeader, ApiSourceConfig, CsvSourceConfig, DataSourceType, FolderSourceConfig } from "./types";
+import { detectMarkdownTables, needsTableIndexPrompt, MarkdownTable } from "./markdown-table-mapping";
+import { ApiClickAction, ApiFieldMapping, ApiHeader, ApiSourceConfig, CsvSourceConfig, DataSourceType, FolderSourceConfig, MarkdownTableSourceConfig } from "./types";
 
 /** PR-4 (G1): now a real discriminated union — a Folder result carries its own `FolderSourceConfig`
  * and no headers (it has none), instead of widening the "api" shape to cover both. PR-5: also
  * carries `outsidePath` — the modal's own device-local field, which (like headers) has no home in
  * `FolderSourceConfig` itself since it must never reach synced `data.json`. PR-7: a CSV result
  * carries its own `CsvSourceConfig`, no headers and no `outsidePath` either (a CSV source is always
- * vault-relative, G18). */
+ * vault-relative, G18). PR-8: a Markdown Table result carries its own `MarkdownTableSourceConfig`,
+ * same no-headers/no-outsidePath shape as CSV. */
 export type ApiSourceModalResult =
 	| { type: "api"; source: ApiSourceConfig; headers: ApiHeader[] }
 	| { type: "folder"; source: FolderSourceConfig; outsidePath: string }
-	| { type: "csv"; source: CsvSourceConfig };
+	| { type: "csv"; source: CsvSourceConfig }
+	| { type: "markdown-table"; source: MarkdownTableSourceConfig };
 
 const SOURCE_TYPE_OPTIONS: { value: DataSourceType; label: string }[] = [
 	{ value: "api", label: "API" },
@@ -27,13 +30,6 @@ const SOURCE_TYPE_OPTIONS: { value: DataSourceType; label: string }[] = [
 	{ value: "markdown-table", label: "Markdown table" },
 	{ value: "csv", label: "CSV" },
 ];
-
-/** PR-3 (G1) fence: Markdown table has no config of its own yet — shown while it's selected, in
- * place of any real config section. Folder (PR-4) and CSV (PR-7) each have their own real body
- * instead. */
-const STUB_TYPE_LABEL: Record<Exclude<DataSourceType, "api" | "folder" | "csv">, string> = {
-	"markdown-table": "Markdown table",
-};
 
 const MAPPING_TARGETS: { key: "idField" | "labelField" | "secondaryField"; label: string; required: boolean }[] = [
 	{ key: "idField", label: "ID (required)", required: true },
@@ -104,6 +100,17 @@ export class ApiSourceModal extends Modal {
 	/** PR-7 (G18): CSV's own vault-relative file path — CSV otherwise reuses the API mapping/fill-mode/
 	 * guard/refresh fields verbatim below, since only one type is ever selected at a time. */
 	private csvPath: string;
+	/** PR-8 (G18/G20): Markdown Table's own vault-relative `.md` file path and selected table index —
+	 * otherwise reuses the API mapping/fill-mode/guard/refresh fields verbatim, same as CSV above.
+	 * `mdTableIndex` is `null` whenever the file has more than one table and the user hasn't explicitly
+	 * chosen one yet (R1: never auto-pick table 1 when there's a genuine choice) — `0` both when there's
+	 * no choice to make (zero or one table) and when loading a previously-saved config's stored index. */
+	private mdTablePath: string;
+	private mdTableIndex: number | null;
+	/** PR-8 (G20): the tables detected by the last "Load sample" — cached so the index-picker dropdown
+	 * can switch between tables (re-deriving `sampleFields` for the newly chosen one) without needing
+	 * to re-read the file from disk on every selection change. */
+	private mdTables: MarkdownTable[] = [];
 
 	constructor(
 		app: App,
@@ -112,13 +119,23 @@ export class ApiSourceModal extends Modal {
 		private onSave: (result: ApiSourceModalResult) => void,
 		initialFolderSource: FolderSourceConfig | null = null,
 		initialOutsidePath: string = "",
-		initialCsvSource: CsvSourceConfig | null = null
+		initialCsvSource: CsvSourceConfig | null = null,
+		initialMarkdownTableSource: MarkdownTableSourceConfig | null = null
 	) {
 		super(app);
-		this.selectedType = initial ? "api" : initialFolderSource ? "folder" : initialCsvSource ? "csv" : null;
+		this.selectedType = initial
+			? "api"
+			: initialFolderSource
+				? "folder"
+				: initialCsvSource
+					? "csv"
+					: initialMarkdownTableSource
+						? "markdown-table"
+						: null;
 		this.resetApiFieldsToBlank();
 		this.resetFolderFieldsToBlank();
 		this.resetCsvFieldsToBlank();
+		this.resetMarkdownTableFieldsToBlank();
 		this.headers = initialHeaders.map((h) => ({ ...h }));
 		if (initial) {
 			this.url = initial.url ?? "";
@@ -164,6 +181,24 @@ export class ApiSourceModal extends Modal {
 			this.mappingMode = initialCsvSource.mappingMode === "js" ? "js" : "drag";
 			this.jsSource = initialCsvSource.jsSource ?? "";
 			const rawExtras = initialCsvSource.mapping?.extraFields;
+			if (rawExtras && typeof rawExtras === "object") {
+				this.extraFields = Object.entries(rawExtras).map(([name, field]) => ({ name, field }));
+			}
+		}
+		if (initialMarkdownTableSource) {
+			this.mdTablePath = initialMarkdownTableSource.path ?? "";
+			this.mdTableIndex = initialMarkdownTableSource.tableIndex ?? 0;
+			this.mapping = initialMarkdownTableSource.mapping ? { ...initialMarkdownTableSource.mapping } : this.mapping;
+			this.mode = initialMarkdownTableSource.mode ?? "merge";
+			this.refreshOnViewLoad = initialMarkdownTableSource.refreshOnViewLoad ?? false;
+			this.keepOnEmpty = initialMarkdownTableSource.keepOnEmpty ?? true;
+			this.confirmBeforeDelete = initialMarkdownTableSource.confirmBeforeDelete ?? true;
+			this.refreshEveryMinutesEnabled = initialMarkdownTableSource.refreshEveryMinutesEnabled ?? false;
+			this.refreshEveryMinutesRaw =
+				initialMarkdownTableSource.refreshEveryMinutes !== undefined ? String(initialMarkdownTableSource.refreshEveryMinutes) : "";
+			this.mappingMode = initialMarkdownTableSource.mappingMode === "js" ? "js" : "drag";
+			this.jsSource = initialMarkdownTableSource.jsSource ?? "";
+			const rawExtras = initialMarkdownTableSource.mapping?.extraFields;
 			if (rawExtras && typeof rawExtras === "object") {
 				this.extraFields = Object.entries(rawExtras).map(([name, field]) => ({ name, field }));
 			}
@@ -232,6 +267,26 @@ export class ApiSourceModal extends Modal {
 		this.resetSharedRefreshFields();
 	}
 
+	/** PR-8 (G18/G20): Markdown Table's blank starting state, mirroring `resetCsvFieldsToBlank` — same
+	 * reused mapping/fill-mode/guard fields, plus its own path and table-index/cached-tables fields. */
+	private resetMarkdownTableFieldsToBlank(): void {
+		this.mdTablePath = "";
+		this.mdTableIndex = 0;
+		this.mdTables = [];
+		this.mapping = { idField: "", labelField: "", secondaryField: undefined };
+		this.extraFields = [];
+		this.mappingMode = "drag";
+		this.jsSource = "";
+		this.sampleFields = [];
+		this.arrayFieldCandidates = [];
+		this.lastResponse = null;
+		this.testResult = null;
+		this.mode = "merge";
+		this.keepOnEmpty = true;
+		this.confirmBeforeDelete = true;
+		this.resetSharedRefreshFields();
+	}
+
 	onOpen(): void {
 		this.render();
 	}
@@ -274,13 +329,13 @@ export class ApiSourceModal extends Modal {
 					const next = (value || null) as DataSourceType | null;
 					if (next === this.selectedType) return;
 					this.selectedType = next;
-					// G2: switching the type — into "api", into "folder", into "csv", or into the remaining
-					// stub type — always discards whatever config existed for the type being left. "api",
-					// "folder", and "csv" each have their own config to reset; the remaining stub type has
-					// none.
+					// G2: switching the type — into "api", "folder", "csv", or "markdown-table" — always
+					// discards whatever config existed for the type being left; each type has its own
+					// config to reset.
 					if (next === "api") this.resetApiFieldsToBlank();
 					else if (next === "folder") this.resetFolderFieldsToBlank();
 					else if (next === "csv") this.resetCsvFieldsToBlank();
+					else if (next === "markdown-table") this.resetMarkdownTableFieldsToBlank();
 					this.render();
 				});
 			});
@@ -291,11 +346,8 @@ export class ApiSourceModal extends Modal {
 			this.renderFolderBody();
 		} else if (this.selectedType === "csv") {
 			this.renderCsvBody();
-		} else if (this.selectedType) {
-			contentEl.createEl("p", {
-				cls: "atlas-source-type-stub",
-				text: `${STUB_TYPE_LABEL[this.selectedType]} sources aren't configurable in this version yet.`,
-			});
+		} else if (this.selectedType === "markdown-table") {
+			this.renderMarkdownTableBody();
 		}
 
 		const footer = new Setting(contentEl);
@@ -723,6 +775,137 @@ export class ApiSourceModal extends Modal {
 		this.render();
 	}
 
+	/** PR-8 (G17-G20): the Markdown Table source's modal body — a `.md`-filtered vault-file picker in
+	 * place of CSV's `.csv` picker, a "Load sample" button that parses the file and (G20) shows an
+	 * index-picker only when the file has more than one table, then the exact same mapping/fill-mode/
+	 * guard/refresh UI an API/CSV source uses. No headers, no click-action section — same as CSV. */
+	private renderMarkdownTableBody(): void {
+		const { contentEl } = this;
+
+		this.renderMarkdownTablePathSuggester(contentEl);
+
+		new Setting(contentEl).addButton((btn) =>
+			btn.setButtonText("Load sample").onClick(() => void this.loadMarkdownTableSample())
+		);
+
+		// G20: the index-selection prompt — never shown when the file has zero or exactly one table,
+		// since there's nothing to choose between.
+		const needsPrompt = needsTableIndexPrompt(this.mdTables);
+		if (needsPrompt) {
+			new Setting(contentEl)
+				.setName("Table")
+				.setDesc(`This file has ${this.mdTables.length} tables — choose which one to use.`)
+				.addDropdown((dropdown) => {
+					// R1: no option is auto-selected — the placeholder is the only match until the user
+					// picks a real table, so mapping below stays hidden and Save stays blocked until then.
+					dropdown.addOption("", "Choose a table…");
+					for (let i = 0; i < this.mdTables.length; i++) {
+						dropdown.addOption(String(i), `Table ${i + 1} (${this.mdTables[i].headers.join(", ")})`);
+					}
+					dropdown.setValue(this.mdTableIndex === null ? "" : String(this.mdTableIndex));
+					dropdown.onChange((value) => {
+						this.mdTableIndex = value === "" ? null : Number(value);
+						this.applyMarkdownTableSelection();
+						this.render();
+					});
+				});
+		}
+
+		// R1: mapping only ever renders once there's no real choice to make (0/1 tables) or the user has
+		// explicitly chosen one — never pre-filled from an auto-picked table.
+		if (!needsPrompt || this.mdTableIndex !== null) {
+			this.renderMappingFieldsUI(contentEl);
+			this.renderFillModeAndGuardsUI(contentEl);
+			this.renderRefreshToggles(contentEl);
+		}
+	}
+
+	/** G18: a filterable list of every `.md` file in the vault, vault-relative paths only — mirrors
+	 * `renderCsvPathSuggester` but filtered to the `.md` extension. */
+	private renderMarkdownTablePathSuggester(contentEl: HTMLElement): void {
+		const allPaths = this.listVaultMdFiles();
+		let listEl: HTMLElement | null = null;
+		const renderList = (filter: string) => {
+			if (!listEl) return;
+			listEl.empty();
+			const normalized = filter.trim().toLowerCase();
+			const matches = normalized ? allPaths.filter((p) => p.toLowerCase().includes(normalized)) : allPaths;
+			for (const path of matches.slice(0, 50)) {
+				const item = listEl.createEl("div", { cls: "atlas-folder-suggest-item", text: path });
+				item.onclick = () => {
+					this.mdTablePath = path;
+					this.render();
+				};
+			}
+		};
+
+		new Setting(contentEl)
+			.setName("Markdown file")
+			.setDesc("Vault-relative path to the .md file containing the table.")
+			.addText((text) =>
+				text
+					.setPlaceholder("Search vault .md files…")
+					.setValue(this.mdTablePath)
+					.onChange((value) => {
+						this.mdTablePath = value;
+						this.updateSaveButton();
+						renderList(value);
+					})
+			);
+		listEl = contentEl.createEl("div", { cls: "atlas-folder-suggest-list" });
+		renderList(this.mdTablePath);
+	}
+
+	/** Recursively walks the vault root, mirroring `listVaultCsvFiles`, but collects `.md` files
+	 * instead. */
+	private listVaultMdFiles(): string[] {
+		const root = this.app.vault?.getRoot();
+		if (!root) return [];
+		const paths: string[] = [];
+		const walk = (folder: TFolder) => {
+			for (const child of folder.children) {
+				if (child instanceof TFolder) walk(child);
+				else if (child.path.toLowerCase().endsWith(".md")) paths.push(child.path);
+			}
+		};
+		walk(root);
+		return paths;
+	}
+
+	/** PR-8 (G20): mirrors `loadCsvSample`'s role for Markdown Table — reads the selected file and
+	 * detects every table in it (`detectMarkdownTables`). R1: when there's more than one table, the
+	 * selected index starts at `null` (no auto-pick) — the index picker, rendered only when there's more
+	 * than one, is how the user then actually chooses; with zero or one table there's no real choice, so
+	 * it defaults to 0. Then derives `sampleFields` from whichever table (if any) is selected via
+	 * `applyMarkdownTableSelection`. */
+	private async loadMarkdownTableSample(): Promise<void> {
+		const file = this.app.vault.getAbstractFileByPath(this.mdTablePath.trim());
+		if (!(file instanceof TFile)) {
+			new Notice("Atlas: file not found.");
+			return;
+		}
+		const text = await this.app.vault.cachedRead(file);
+		this.mdTables = detectMarkdownTables(text);
+		if (this.mdTables.length === 0) {
+			new Notice("Atlas: no markdown table found in this file.");
+		}
+		this.mdTableIndex = needsTableIndexPrompt(this.mdTables) ? null : 0;
+		this.applyMarkdownTableSelection();
+		this.render();
+	}
+
+	/** PR-8: re-derives `sampleFields`/`lastResponse` from whichever table in `mdTables` is currently
+	 * selected by `mdTableIndex` — called both after a fresh "Load sample" and after switching the
+	 * index-picker dropdown, so the mapping UI below always reflects the currently-selected table's
+	 * own rows/headers. R1: no table selected yet (`mdTableIndex === null`) means no rows/fields either. */
+	private applyMarkdownTableSelection(): void {
+		const table = this.mdTableIndex === null ? undefined : this.mdTables[this.mdTableIndex];
+		this.lastResponse = table ? table.rows : [];
+		this.arrayFieldCandidates = [];
+		this.sampleFields = sampleFieldsForArrayField(this.lastResponse, undefined);
+		this.testResult = null;
+	}
+
 	/** G5a/G5b/G10: shared verbatim between "api" and "folder" — same two toggles, same fields, same
 	 * validation. Factored out so Folder reuses the exact existing refresh machinery rather than a copy. */
 	private renderRefreshToggles(contentEl: HTMLElement): void {
@@ -920,8 +1103,6 @@ export class ApiSourceModal extends Modal {
 	}
 
 	private canSave(): boolean {
-		// G1/edge case: Save is blocked until a type is selected; Markdown table has no config of its
-		// own to validate in this PR, so there's nothing for it to ever become savable against.
 		if (this.selectedType === "folder") {
 			// E8: a path that doesn't currently resolve is still savable (it may start resolving later,
 			// e.g. a drive remounting) — only blank/whitespace-only is rejected outright, same contract
@@ -935,6 +1116,23 @@ export class ApiSourceModal extends Modal {
 				if (!this.csvPath.trim()) return false;
 				if (!validateJsSource(this.jsSource).ok) return false;
 			} else if (!canSaveApiSource(this.csvPath, this.mapping)) {
+				return false;
+			}
+			if (this.refreshEveryMinutesEnabled && !validateRefreshMinutes(this.refreshEveryMinutesRaw).ok) return false;
+			for (let i = 0; i < this.extraFields.length; i++) {
+				const extra = this.extraFields[i];
+				if (!isValidExtraFieldName(extra.name)) return false;
+				if (this.extraFields.findIndex((other) => other.name === extra.name) !== i) return false;
+			}
+			return true;
+		}
+		if (this.selectedType === "markdown-table") {
+			// R1: block Save until an explicit table is chosen whenever there's a real choice to make.
+			if (needsTableIndexPrompt(this.mdTables) && this.mdTableIndex === null) return false;
+			if (this.mappingMode === "js") {
+				if (!this.mdTablePath.trim()) return false;
+				if (!validateJsSource(this.jsSource).ok) return false;
+			} else if (!canSaveApiSource(this.mdTablePath, this.mapping)) {
 				return false;
 			}
 			if (this.refreshEveryMinutesEnabled && !validateRefreshMinutes(this.refreshEveryMinutesRaw).ok) return false;
@@ -1093,6 +1291,32 @@ export class ApiSourceModal extends Modal {
 			};
 			this.close();
 			this.onSave({ type: "csv", source });
+			return;
+		}
+		if (this.selectedType === "markdown-table") {
+			const refreshEveryMinutesValidation = this.refreshEveryMinutesEnabled ? validateRefreshMinutes(this.refreshEveryMinutesRaw) : null;
+			const extraFieldsRecord = this.buildExtraFieldsRecord();
+			const source: MarkdownTableSourceConfig = {
+				type: "markdown-table",
+				path: this.mdTablePath.trim(),
+				// `canSave()` above already guarantees a table is chosen whenever one must be (R1); the
+				// fallback here only satisfies the type checker, never actually taken.
+				tableIndex: this.mdTableIndex ?? 0,
+				mapping: {
+					...this.mapping,
+					extraFields: Object.keys(extraFieldsRecord).length > 0 ? extraFieldsRecord : undefined,
+				},
+				mode: this.mode,
+				refreshOnViewLoad: this.refreshOnViewLoad,
+				refreshEveryMinutesEnabled: this.refreshEveryMinutesEnabled,
+				refreshEveryMinutes: refreshEveryMinutesValidation?.ok ? refreshEveryMinutesValidation.minutes : undefined,
+				keepOnEmpty: this.keepOnEmpty,
+				confirmBeforeDelete: this.confirmBeforeDelete,
+				mappingMode: this.mappingMode === "js" ? "js" : undefined,
+				jsSource: this.mappingMode === "js" ? this.jsSource : undefined,
+			};
+			this.close();
+			this.onSave({ type: "markdown-table", source });
 			return;
 		}
 		// canSave() above guarantees selectedType === "api" by this point.

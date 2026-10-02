@@ -10,6 +10,7 @@ import {
 	CsvSourceConfig,
 	DEFAULT_VIEW_NAME,
 	FolderSourceConfig,
+	MarkdownTableSourceConfig,
 	PLACEHOLDER_ROW_KIND,
 	StatusGovernance,
 	Unit,
@@ -143,9 +144,14 @@ function sanitizeApiFields(node: ViewNode): void {
 
 	// G4: rows survive a source's removal as plain static rows — sanitize `apiItemState`/`apiItemOrder`
 	// whenever either is actually present (or a source exists to have produced them), rather than only
-	// when `apiSource` currently exists. PR-7: `csvSource` produces the exact same kind of rows, so it
-	// widens this the same way.
-	const hasApiState = !!node.apiSource || !!node.csvSource || node.apiItemState !== undefined || node.apiItemOrder !== undefined;
+	// when `apiSource` currently exists. PR-7/PR-8: `csvSource`/`markdownTableSource` produce the exact
+	// same kind of rows, so this widens the same way for each.
+	const hasApiState =
+		!!node.apiSource ||
+		!!node.csvSource ||
+		!!node.markdownTableSource ||
+		node.apiItemState !== undefined ||
+		node.apiItemOrder !== undefined;
 	if (hasApiState) {
 		if (!node.apiItemState || typeof node.apiItemState !== "object" || Array.isArray(node.apiItemState)) {
 			node.apiItemState = {};
@@ -168,9 +174,10 @@ function sanitizeApiFields(node: ViewNode): void {
 	}
 
 	// Cache and the awaiting-confirmation flag are meaningless without a live source — G4's static rows
-	// never show a dot at all (that's `explorer-view.ts`'s job, gated on `apiSource`/`csvSource`, not
-	// this). PR-7: `csvSource` shares this exact same cache shape with `apiSource`.
-	if (node.apiSource || node.csvSource) {
+	// never show a dot at all (that's `explorer-view.ts`'s job, gated on `apiSource`/`csvSource`/
+	// `markdownTableSource`, not this). PR-7/PR-8: `csvSource`/`markdownTableSource` share this exact
+	// same cache shape with `apiSource`.
+	if (node.apiSource || node.csvSource || node.markdownTableSource) {
 		if (!node.apiCache || typeof node.apiCache !== "object") node.apiCache = undefined;
 		if (typeof node.apiAwaitingConfirmation !== "boolean") node.apiAwaitingConfirmation = undefined;
 	} else {
@@ -180,6 +187,7 @@ function sanitizeApiFields(node: ViewNode): void {
 
 	sanitizeFolderSource(node);
 	sanitizeCsvSource(node);
+	sanitizeMarkdownTableSource(node);
 
 	for (const child of node.children) sanitizeApiFields(child);
 }
@@ -264,6 +272,57 @@ function sanitizeCsvSource(node: ViewNode): void {
 	};
 }
 
+/** PR-8 (G17-G20): `data.json` is free-form JSON — hand-edited or corrupted, `markdownTableSource.
+ * path`/`mapping`/`tableIndex` can be missing/non-string/non-numeric, same as `csvSource` above. A
+ * `markdownTableSource` missing a usable `path`, or (in drag mode) a usable `mapping`, is dropped
+ * entirely — mirrors `sanitizeCsvSource`'s own rule. `tableIndex` falls back to 0 (the only table a
+ * single-table file has) rather than being rejected outright — same "fall back to a safe default"
+ * treatment every other numeric field here gets, not a validation failure. */
+function sanitizeMarkdownTableSource(node: ViewNode): void {
+	if (!node.markdownTableSource) return;
+	const raw = node.markdownTableSource as Partial<MarkdownTableSourceConfig> & { mapping?: Partial<ApiFieldMapping> };
+	const mapping = raw.mapping;
+	const validMapping = !!mapping && typeof mapping.idField === "string" && typeof mapping.labelField === "string";
+	const isJsMode = raw.mappingMode === "js";
+	const validJsSource = typeof raw.jsSource === "string";
+	const mappingOrJsValid = isJsMode ? validJsSource : validMapping;
+	if (typeof raw.path !== "string" || !mappingOrJsValid) {
+		node.markdownTableSource = undefined;
+		return;
+	}
+	const rawMinutes = raw.refreshEveryMinutes;
+	const validMinutes = typeof rawMinutes === "number" && Number.isFinite(rawMinutes);
+	const refreshEveryMinutes = validMinutes ? clampRefreshMinutes(rawMinutes) : undefined;
+	const rawExtras = mapping?.extraFields ?? (mapping as unknown as { extras?: unknown })?.extras;
+	const extraFields: Record<string, string> = {};
+	if (rawExtras && typeof rawExtras === "object" && !Array.isArray(rawExtras)) {
+		for (const [k, v] of Object.entries(rawExtras)) {
+			if (typeof k === "string" && typeof v === "string" && /^[a-zA-Z0-9_]+$/.test(k)) extraFields[k] = v;
+		}
+	}
+	const extraFieldsRecord = Object.keys(extraFields).length > 0 ? extraFields : undefined;
+	const tableIndex = typeof raw.tableIndex === "number" && Number.isInteger(raw.tableIndex) && raw.tableIndex >= 0 ? raw.tableIndex : 0;
+	node.markdownTableSource = {
+		type: "markdown-table",
+		path: raw.path,
+		tableIndex,
+		mapping: {
+			idField: typeof mapping?.idField === "string" ? mapping.idField : "",
+			labelField: typeof mapping?.labelField === "string" ? mapping.labelField : "",
+			secondaryField: typeof mapping?.secondaryField === "string" ? mapping.secondaryField : undefined,
+			extraFields: extraFieldsRecord,
+		},
+		mode: raw.mode === "append" ? "append" : raw.mode === "overwrite" ? "overwrite" : "merge",
+		refreshOnViewLoad: !!raw.refreshOnViewLoad,
+		refreshEveryMinutesEnabled: !!raw.refreshEveryMinutesEnabled && refreshEveryMinutes !== undefined,
+		refreshEveryMinutes,
+		keepOnEmpty: typeof raw.keepOnEmpty === "boolean" ? raw.keepOnEmpty : undefined,
+		confirmBeforeDelete: typeof raw.confirmBeforeDelete === "boolean" ? raw.confirmBeforeDelete : undefined,
+		mappingMode: isJsMode ? "js" : undefined,
+		jsSource: typeof raw.jsSource === "string" ? raw.jsSource : undefined,
+	};
+}
+
 /** G9b: resolves the effective click action for a source, defaulting to "open-attachment". */
 export function resolveClickAction(source: ApiSourceConfig | undefined | null): ApiClickAction {
 	return source?.action ?? source?.clickAction ?? "open-attachment";
@@ -296,6 +355,17 @@ function cloneApiSource(source: ApiSourceConfig): ApiSourceConfig {
 
 /** PR-7: same deep-copy reasoning as `cloneApiSource` above, applied to `csvSource`. */
 function cloneCsvSource(source: CsvSourceConfig): CsvSourceConfig {
+	return {
+		...source,
+		mapping: {
+			...source.mapping,
+			extraFields: source.mapping.extraFields ? { ...source.mapping.extraFields } : undefined,
+		},
+	};
+}
+
+/** PR-8: same deep-copy reasoning as `cloneApiSource` above, applied to `markdownTableSource`. */
+function cloneMarkdownTableSource(source: MarkdownTableSourceConfig): MarkdownTableSourceConfig {
 	return {
 		...source,
 		mapping: {
@@ -351,9 +421,15 @@ function cloneApiItemState(state: Record<string, ApiItemState>): Record<string, 
 /** G4/T2: a Folder has API rows to show — either a live source (even before its first refresh
  * fills any rows) or static rows left behind by "Remove data source" — gated on this, never on
  * `apiSource` alone, so removing the source doesn't also hide the rows it leaves behind. PR-7:
- * `csvSource` is the same kind of live source as `apiSource` for this purpose. */
-export function nodeHasApiRows(node: Pick<ViewNode, "apiSource" | "csvSource" | "apiItemOrder">): boolean {
-	return Boolean(node.apiSource) || Boolean(node.csvSource) || Boolean(node.apiItemOrder && node.apiItemOrder.length > 0);
+ * `csvSource` is the same kind of live source as `apiSource` for this purpose. PR-8: so is
+ * `markdownTableSource`. */
+export function nodeHasApiRows(node: Pick<ViewNode, "apiSource" | "csvSource" | "markdownTableSource" | "apiItemOrder">): boolean {
+	return (
+		Boolean(node.apiSource) ||
+		Boolean(node.csvSource) ||
+		Boolean(node.markdownTableSource) ||
+		Boolean(node.apiItemOrder && node.apiItemOrder.length > 0)
+	);
 }
 
 export interface MetaTarget {
@@ -702,6 +778,12 @@ export class ViewsManager {
 			clone.csvSource = cloneCsvSource(node.csvSource);
 			clone.apiItemState = {};
 			clone.apiItemOrder = [];
+		} else if (node.markdownTableSource) {
+			// PR-8: same reference-sharing hazard and "copy starts with grey dot, no rows until first
+			// refresh" rule as `apiSource`/`csvSource` above.
+			clone.markdownTableSource = cloneMarkdownTableSource(node.markdownTableSource);
+			clone.apiItemState = {};
+			clone.apiItemOrder = [];
 		} else if (node.apiItemState) {
 			clone.apiItemState = cloneApiItemState(node.apiItemState);
 			clone.apiItemOrder = node.apiItemOrder ? [...node.apiItemOrder] : [];
@@ -879,17 +961,21 @@ export class ViewsManager {
 	 * already had, survive as plain static rows. The device-local headers entry is a separate store the
 	 * caller owns (see `ApiHeadersStore`); this method only ever touches the synced view data.
 	 *
-	 * R1 fix: `apiSource` and `csvSource` share the same `apiCache`/`apiAwaitingConfirmation` fields
-	 * (both produce the same kind of placeholder row), so setting one live must clear the other —
-	 * otherwise both keep refreshing into the same state and stomp each other's rows. */
+	 * R1 fix: `apiSource`, `csvSource`, and (PR-8) `markdownTableSource` share the same `apiCache`/
+	 * `apiAwaitingConfirmation` fields (all three produce the same kind of placeholder row), so setting
+	 * one live must clear the other two — otherwise they'd all keep refreshing into the same state and
+	 * stomp each other's rows. */
 	setApiSource(viewId: string, nodeId: string, source: ApiSourceConfig | undefined): void {
 		const view = this.getView(viewId);
 		const found = view && this.findNode(view.root, nodeId);
 		if (!found || found.node.type !== "meta") return;
-		const hadCsvSource = found.node.csvSource !== undefined;
+		const hadOtherSource = found.node.csvSource !== undefined || found.node.markdownTableSource !== undefined;
 		found.node.apiSource = source;
-		if (source) found.node.csvSource = undefined;
-		if (!source || hadCsvSource) {
+		if (source) {
+			found.node.csvSource = undefined;
+			found.node.markdownTableSource = undefined;
+		}
+		if (!source || hadOtherSource) {
 			found.node.apiCache = undefined;
 			found.node.apiAwaitingConfirmation = undefined;
 		}
@@ -900,15 +986,41 @@ export class ViewsManager {
 	 * exact mirror of `setApiSource`, since a CSV source produces the same kind of placeholder rows and
 	 * the same "removal keeps the rows as static, drops only cache/confirmation" rule applies.
 	 *
-	 * R1 fix: mirrors `setApiSource`'s clearing of the other source type — see its doc comment. */
+	 * R1 fix: mirrors `setApiSource`'s clearing of the other source types — see its doc comment. */
 	setCsvSource(viewId: string, nodeId: string, source: CsvSourceConfig | undefined): void {
 		const view = this.getView(viewId);
 		const found = view && this.findNode(view.root, nodeId);
 		if (!found || found.node.type !== "meta") return;
-		const hadApiSource = found.node.apiSource !== undefined;
+		const hadOtherSource = found.node.apiSource !== undefined || found.node.markdownTableSource !== undefined;
 		found.node.csvSource = source;
-		if (source) found.node.apiSource = undefined;
-		if (!source || hadApiSource) {
+		if (source) {
+			found.node.apiSource = undefined;
+			found.node.markdownTableSource = undefined;
+		}
+		if (!source || hadOtherSource) {
+			found.node.apiCache = undefined;
+			found.node.apiAwaitingConfirmation = undefined;
+		}
+		this.save();
+	}
+
+	/** PR-8 (G17-G20/G22-G24): sets a Folder's Markdown Table data source, or removes it (passing
+	 * `undefined`) — exact mirror of `setApiSource`/`setCsvSource`, since a Markdown Table source
+	 * produces the same kind of placeholder rows and the same "removal keeps the rows as static, drops
+	 * only cache/confirmation" rule applies.
+	 *
+	 * R1 fix: mirrors `setApiSource`'s clearing of the other source types — see its doc comment. */
+	setMarkdownTableSource(viewId: string, nodeId: string, source: MarkdownTableSourceConfig | undefined): void {
+		const view = this.getView(viewId);
+		const found = view && this.findNode(view.root, nodeId);
+		if (!found || found.node.type !== "meta") return;
+		const hadOtherSource = found.node.apiSource !== undefined || found.node.csvSource !== undefined;
+		found.node.markdownTableSource = source;
+		if (source) {
+			found.node.apiSource = undefined;
+			found.node.csvSource = undefined;
+		}
+		if (!source || hadOtherSource) {
 			found.node.apiCache = undefined;
 			found.node.apiAwaitingConfirmation = undefined;
 		}
@@ -1157,6 +1269,15 @@ export class ViewsManager {
 				const rewrittenCsvPath = rewritePathString(node.csvSource.path, oldPath, newPath);
 				if (rewrittenCsvPath !== node.csvSource.path) {
 					node.csvSource = { ...node.csvSource, path: rewrittenCsvPath };
+					changed = true;
+				}
+			}
+			// PR-8 (G18): `markdownTableSource.path` is the same kind of plain vault-relative string as
+			// `csvSource.path` — same rename-integrity rule via the same shared helper.
+			if (node.markdownTableSource) {
+				const rewrittenMdPath = rewritePathString(node.markdownTableSource.path, oldPath, newPath);
+				if (rewrittenMdPath !== node.markdownTableSource.path) {
+					node.markdownTableSource = { ...node.markdownTableSource, path: rewrittenMdPath };
 					changed = true;
 				}
 			}

@@ -42,9 +42,11 @@ describe("G11/F10 — recheck-on-load rule: Outside-Vault's check is uncondition
 			collectApiSourceNodes: proto.collectApiSourceNodes,
 			collectFolderSourceNodes: proto.collectFolderSourceNodes,
 			collectCsvSourceNodes: proto.collectCsvSourceNodes,
+			collectMarkdownTableSourceNodes: proto.collectMarkdownTableSourceNodes,
 			refreshApiSource: vi.fn(),
 			refreshFolderSource,
 			refreshCsvSource: vi.fn(),
+			refreshMarkdownTableSource: vi.fn(),
 		};
 
 		proto.refreshApiSourcesOnViewLoad.call(fake);
@@ -61,9 +63,11 @@ describe("G11/F10 — recheck-on-load rule: Outside-Vault's check is uncondition
 			collectApiSourceNodes: proto.collectApiSourceNodes,
 			collectFolderSourceNodes: proto.collectFolderSourceNodes,
 			collectCsvSourceNodes: proto.collectCsvSourceNodes,
+			collectMarkdownTableSourceNodes: proto.collectMarkdownTableSourceNodes,
 			refreshApiSource: vi.fn(),
 			refreshFolderSource,
 			refreshCsvSource: vi.fn(),
+			refreshMarkdownTableSource: vi.fn(),
 		};
 
 		proto.refreshApiSourcesOnViewLoad.call(fake);
@@ -80,9 +84,11 @@ describe("G11/F10 — recheck-on-load rule: Outside-Vault's check is uncondition
 			collectApiSourceNodes: proto.collectApiSourceNodes,
 			collectFolderSourceNodes: proto.collectFolderSourceNodes,
 			collectCsvSourceNodes: proto.collectCsvSourceNodes,
+			collectMarkdownTableSourceNodes: proto.collectMarkdownTableSourceNodes,
 			refreshApiSource: vi.fn(),
 			refreshFolderSource,
 			refreshCsvSource: vi.fn(),
+			refreshMarkdownTableSource: vi.fn(),
 		};
 
 		proto.refreshApiSourcesOnViewLoad.call(fake);
