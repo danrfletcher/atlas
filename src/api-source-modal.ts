@@ -141,6 +141,7 @@ export class ApiSourceModal extends Modal {
 			this.refreshEveryMinutesRaw =
 				initialFolderSource.refreshEveryMinutes !== undefined ? String(initialFolderSource.refreshEveryMinutes) : "";
 			this.removedRefs = initialFolderSource.removedRefs;
+			this.mode = initialFolderSource.mode ?? "merge";
 		}
 	}
 
@@ -183,6 +184,7 @@ export class ApiSourceModal extends Modal {
 		this.showFiles = true;
 		this.showFolders = true;
 		this.removedRefs = undefined;
+		this.mode = "merge";
 		this.resetSharedRefreshFields();
 	}
 
@@ -645,6 +647,25 @@ export class ApiSourceModal extends Modal {
 			.setName("Show folders")
 			.addToggle((toggle) => toggle.setValue(this.showFolders).onChange((value) => (this.showFolders = value)));
 
+		// PR-6 (G12-G14): governs how a managed child's row reconciles when its file is deleted from
+		// the vault — same three values/shared field as the API source's own "Fill mode" above, no
+		// guard toggles here since `keepOnEmpty`/`confirmBeforeDelete` are API-refresh-only concerns.
+		new Setting(contentEl)
+			.setName("Fill mode")
+			.setDesc(
+				"Governs what happens when a child file is deleted from the vault. Merge shows the row as \"not found\" with Remove available; Append keeps the row but clears its attachment/link; Overwrite removes the row immediately."
+			)
+			.addDropdown((dropdown) =>
+				dropdown
+					.addOption("merge", "Merge")
+					.addOption("append", "Append")
+					.addOption("overwrite", "Overwrite")
+					.setValue(this.mode)
+					.onChange((value) => {
+						this.mode = value as "append" | "merge" | "overwrite";
+					})
+			);
+
 		this.renderRefreshToggles(contentEl);
 	}
 
@@ -872,6 +893,7 @@ export class ApiSourceModal extends Modal {
 				refreshEveryMinutesEnabled: this.refreshEveryMinutesEnabled,
 				refreshEveryMinutes: refreshEveryMinutesValidation?.ok ? refreshEveryMinutesValidation.minutes : undefined,
 				removedRefs: this.removedRefs,
+				mode: this.mode,
 			};
 			this.close();
 			this.onSave({ type: "folder", source, outsidePath: this.folderLocation === "outside" ? this.outsidePath.trim() : "" });
