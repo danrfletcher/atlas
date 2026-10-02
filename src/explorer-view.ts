@@ -646,7 +646,13 @@ export class AtlasExplorerView extends ItemView {
 					return;
 				}
 				if (result.type === "csv") {
+					// R8/G4: switching API->CSV drops the API source (R1's mutual-exclusion fix), so it
+					// must also drop that source's device-local headers (possibly a bearer token) —
+					// otherwise they linger in ApiHeadersStore and silently pre-fill the next time the
+					// user switches back to API, same as "Remove data source" already does for them.
+					const hadApiSource = node.apiSource !== undefined;
 					this.plugin.viewsManager.setCsvSource(view.id, node.id, result.source);
+					if (hadApiSource) this.plugin.apiHeadersStore.delete(node.id);
 					this.refreshCsvSource(view, node, "manual");
 					return;
 				}
