@@ -807,9 +807,10 @@ export class AtlasExplorerView extends ItemView {
 	 * `unitsByRefKey` lookup can never find it, and its generic missing-ref fallback would otherwise
 	 * wrongly show a "(missing)" badge/remove button for a child whose source currently resolves fine.
 	 * Bypasses `resolveRef` entirely for exactly these rows: basename-derived text/icon, never
-	 * `missing` — reconciliation (`buildFolderSourceChildren`) is the single place that decides whether
-	 * an Outside-Vault child exists at all, by omitting it from `children` outright while unresolved
-	 * (no sentinel row), so a rendered row here is always one its source currently vouches for. */
+	 * `missing` — `renderNodeList`'s `isOutsideManagedAndUnresolved` check is what actually keeps an
+	 * Outside-Vault child out of view while its source doesn't resolve (R1/R2 fix: the node itself stays
+	 * in the persisted tree throughout), so a rendered row here is always one its source currently
+	 * vouches for. */
 	private resolveOutsideManagedRowInfo(ref: UnitRef): RowInfo {
 		const text = ref.kind === "block" ? ref.subpath : (ref.path.split("/").pop() ?? ref.path);
 		return { text, icon: ref.kind === "folder" ? "folder" : "file", promoted: false, missing: false };
@@ -821,6 +822,30 @@ export class AtlasExplorerView extends ItemView {
 	private isOutsideManagedUnit(view: View, node: ViewNode): boolean {
 		if (!node.folderSourceManaged || !node.folderSourceOwnerId) return false;
 		const owner = this.plugin.viewsManager.getNode(view.id, node.folderSourceOwnerId);
+		return owner?.folderSource?.location === "outside";
+	}
+
+	/** PR-5 (R1/R2 fix): true for an Outside-Vault-managed child whose owning source does not
+	 * currently resolve on this device. `buildFolderSourceChildren` (`folder-source.ts`) now leaves
+	 * these rows exactly as they are in the persisted tree while unresolved — restoring the right
+	 * explicit status/collapsed state/manually-nested children once the path resolves again, instead
+	 * of deleting and recreating them (R1), and never writing a wiped tree to a synced `data.json`
+	 * (R2) — so this is the one place that actually keeps them out of view while unresolved, per the
+	 * spec's "render empty... reappear on recovery" (never a deletion). */
+	private isOutsideManagedAndUnresolved(view: View, node: ViewNode): boolean {
+		if (!node.folderSourceManaged || !node.folderSourceOwnerId) return false;
+		const owner = this.plugin.viewsManager.getNode(view.id, node.folderSourceOwnerId);
+		if (owner?.folderSource?.location !== "outside") return false;
+		return !resolveOutsidePath(this.plugin.folderSourcePathStore.get(owner.id));
+	}
+
+	/** PR-5 (R3 fix): true for any node (not just the one the caller already has in hand) that an
+	 * Outside-Vault Folder source manages — looked up by id so `buildNodeDragPayload` can filter the
+	 * rest of a multi-select by id without needing each `ViewNode` object already in scope. */
+	private isOutsideManagedNodeId(viewId: string, nodeId: string): boolean {
+		const node = this.plugin.viewsManager.getNode(viewId, nodeId);
+		if (!node || !node.folderSourceManaged || !node.folderSourceOwnerId) return false;
+		const owner = this.plugin.viewsManager.getNode(viewId, node.folderSourceOwnerId);
 		return owner?.folderSource?.location === "outside";
 	}
 
@@ -1167,6 +1192,11 @@ export class AtlasExplorerView extends ItemView {
 		}
 		const resolved: Resolved[] = [];
 		for (const node of nodes) {
+			// R1/R2 fix: an Outside-Vault-managed child whose source doesn't currently resolve on this
+			// device renders as if it doesn't exist — the persisted tree keeps it intact (see
+			// `isOutsideManagedAndUnresolved`'s own doc comment) so it reappears exactly as it was the
+			// moment the path resolves again, with no separate "missing" row or hole in this list.
+			if (this.isOutsideManagedAndUnresolved(view, node)) continue;
 			const governor = sm.findGoverningAncestor(ancestors, node);
 			const status = governor ? sm.resolveNodeStatus(ancestors, node) : null;
 			let bypass = false;
@@ -1416,7 +1446,13 @@ export class AtlasExplorerView extends ItemView {
 			this.selectionAnchor = nodeId;
 			this.selectionAnchorScope = "bucket";
 		}
-		return { kind: "node", nodeIds: [...this.selectedBucketNodeIds], viewId };
+		// R3 fix: an Outside-Vault-managed child can still be part of a shift/cmd-click multi-select
+		// (its own row never starts a drag — `renderNode`'s `outsideManaged` gate — but it can tag along
+		// in someone else's selection), so it must never ride along in the payload an ordinary row's drag
+		// actually moves. Filtered out of the payload, not the selection itself, so the highlight is
+		// unaffected and only the drop/move/nest behavior changes.
+		const nodeIds = [...this.selectedBucketNodeIds].filter((id) => !this.isOutsideManagedNodeId(viewId, id));
+		return { kind: "node", nodeIds, viewId };
 	}
 
 	/** PR 20: same idea as `buildNodeDragPayload`, for an inbox row — see its own doc comment for why
