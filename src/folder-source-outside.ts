@@ -1,5 +1,4 @@
 import * as fs from "fs";
-import * as nodePath from "path";
 import { UnitRef } from "./types";
 
 /** Minimal read-only filesystem surface this module needs — kept narrow so path resolution stays
@@ -37,10 +36,14 @@ export interface OutsideReaddirFsLike extends OutsideFsLike {
 	readdirSync(path: string, options: { withFileTypes: true }): { name: string; isDirectory(): boolean }[];
 }
 
-/** G6/G3-mirror: the direct children of an Outside-Vault folder, filtered by `showFiles`/
- * `showFolders` exactly like `folderToRows` does for an Inside-Vault one — refs carry an absolute
- * filesystem path instead of a vault-relative one. Returns `[]` (never throws) whenever `path`
- * itself doesn't resolve, or enumerating it fails (e.g. permission denied mid-read). */
+/** G6/G3-mirror, R4 fix: the direct children of an Outside-Vault folder, filtered by `showFiles`/
+ * `showFolders` exactly like `folderToRows` does for an Inside-Vault one — refs carry the entry's
+ * name *relative to the Outside root* (never joined with the absolute `path` passed in), the same
+ * "never a device-specific absolute string" contract a vault-relative ref already satisfies for
+ * Inside-Vault. The absolute root itself stays exactly where `FolderSourcePathStore` already puts
+ * it (device-local, never `data.json`) — joining it back onto `path` here would leak it right back
+ * into every synced child node instead. Returns `[]` (never throws) whenever `path` itself doesn't
+ * resolve, or enumerating it fails (e.g. permission denied mid-read). */
 export function listOutsideChildrenWith(
 	fsLike: OutsideReaddirFsLike,
 	path: string,
@@ -50,11 +53,10 @@ export function listOutsideChildrenWith(
 	const refs: UnitRef[] = [];
 	try {
 		for (const entry of fsLike.readdirSync(path, { withFileTypes: true })) {
-			const childPath = nodePath.join(path, entry.name);
 			if (entry.isDirectory()) {
-				if (options.showFolders) refs.push({ kind: "folder", path: childPath });
+				if (options.showFolders) refs.push({ kind: "folder", path: entry.name });
 			} else if (options.showFiles) {
-				refs.push({ kind: "file", path: childPath });
+				refs.push({ kind: "file", path: entry.name });
 			}
 		}
 	} catch {
