@@ -15,6 +15,7 @@ import { noticeIfLinksNotUpdated } from "./links-notice";
 import { registerTestHarness } from "./test-harness";
 import { DEFAULT_COLOR_PALETTE, StatusSet, StatusesManager } from "./statuses";
 import { ApiHeadersStore } from "./api-headers-store";
+import { FolderSourcePathStore } from "./folder-source-path-store";
 import { ApiSourceController } from "./api-source-controller";
 
 interface AtlasData {
@@ -43,6 +44,9 @@ export default class AtlasPlugin extends Plugin {
 	statusesManager: StatusesManager;
 	/** G13: device-local (never-synced) storage for API data-source request headers. */
 	apiHeadersStore: ApiHeadersStore;
+	/** PR-5 (G6/F6): device-local (never-synced) storage for Outside-Vault Folder source absolute
+	 * paths — its own store, separate from `apiHeadersStore`, so the two never interact. */
+	folderSourcePathStore: FolderSourcePathStore;
 	/** G1/G6/G11: the fetch → map → merge → persist pipeline for API-backed Folders. */
 	apiSourceController: ApiSourceController;
 	/** Public so the explorer (F8/F11) can reuse it instead of re-reading free-block files on every render. */
@@ -92,7 +96,8 @@ export default class AtlasPlugin extends Plugin {
 			},
 			openDialog: (options) => openNameDialog(this.app, options),
 		});
-				this.apiHeadersStore = new ApiHeadersStore(this.app);
+		this.apiHeadersStore = new ApiHeadersStore(this.app);
+		this.folderSourcePathStore = new FolderSourcePathStore(this.app);
 		this.apiSourceController = new ApiSourceController();
 		this.addSettingTab(new AtlasSettingTab(this.app, this));
 
