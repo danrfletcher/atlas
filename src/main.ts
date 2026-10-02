@@ -18,6 +18,7 @@ import { ApiHeadersStore } from "./api-headers-store";
 import { FolderSourcePathStore } from "./folder-source-path-store";
 import { ApiSourceController } from "./api-source-controller";
 import { CsvSourceController } from "./csv-source-controller";
+import { MarkdownTableSourceController } from "./markdown-table-source-controller";
 
 interface AtlasData {
 	settings: AtlasSettings;
@@ -53,6 +54,10 @@ export default class AtlasPlugin extends Plugin {
 	/** PR-7 (G17-G19/G21-G23): the read → parse → map → merge → persist pipeline for CSV-backed
 	 * Folders — a vault file read stands in for `apiSourceController`'s HTTP fetch. */
 	csvSourceController: CsvSourceController;
+	/** PR-8 (G17-G20/G22-G24): the read → parse → map → merge → persist pipeline for Markdown-Table-
+	 * backed Folders — same shape as `csvSourceController`, with a parsed table's rows standing in for
+	 * CSV's own parsed rows. */
+	markdownTableSourceController: MarkdownTableSourceController;
 	/** Public so the explorer (F8/F11) can reuse it instead of re-reading free-block files on every render. */
 	freeBlockTextCache: FreeBlockTextCache;
 	private linkSuggest: AtlasLinkSuggest;
@@ -104,6 +109,7 @@ export default class AtlasPlugin extends Plugin {
 		this.folderSourcePathStore = new FolderSourcePathStore(this.app);
 		this.apiSourceController = new ApiSourceController();
 		this.csvSourceController = new CsvSourceController();
+		this.markdownTableSourceController = new MarkdownTableSourceController();
 		this.addSettingTab(new AtlasSettingTab(this.app, this));
 
 		this.linkSuggest = new AtlasLinkSuggest(this);
@@ -150,9 +156,13 @@ export default class AtlasPlugin extends Plugin {
 			this.app.vault.on("modify", (file) => {
 				this.graduation.handleModify();
 				// G21: a saved `.csv` file re-triggers every CSV-sourced node pointed at it, same as the
-				// view-load/every-N-minutes triggers already do for API sources.
+				// view-load/every-N-minutes triggers already do for API sources. PR-8: a saved `.md` file
+				// does the same for every Markdown-Table-sourced node pointed at it.
 				for (const leaf of this.app.workspace.getLeavesOfType(ATLAS_VIEW_TYPE)) {
-					if (leaf.view instanceof AtlasExplorerView) leaf.view.notifyCsvFileModified(file.path);
+					if (leaf.view instanceof AtlasExplorerView) {
+						leaf.view.notifyCsvFileModified(file.path);
+						leaf.view.notifyMarkdownTableFileModified(file.path);
+					}
 				}
 			})
 		);

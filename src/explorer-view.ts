@@ -444,6 +444,16 @@ export class AtlasExplorerView extends ItemView {
 		}
 	}
 
+	/** PR-8 (G21): same role as `notifyCsvFileModified` above, for Markdown Table sources — called
+	 * from `main.ts`'s vault `"modify"` listener on every file save, reusing the exact same
+	 * refresh-toggle plumbing (no new refresh UI). */
+	notifyMarkdownTableFileModified(path: string): void {
+		const view = this.plugin.viewsManager.getActiveView();
+		for (const node of this.collectMarkdownTableSourceNodes(view.root)) {
+			if (node.markdownTableSource?.path === path) this.refreshMarkdownTableSource(view, node, "automatic");
+		}
+	}
+
 	// --- G1/G5/G6/G11: API-backed Folders ---------------------------------------------------------
 
 	/** G5a/PR-4 (G10): refreshes every Folder in the active view that has "refresh when Atlas view
@@ -463,6 +473,9 @@ export class AtlasExplorerView extends ItemView {
 		}
 		for (const node of this.collectCsvSourceNodes(view.root)) {
 			if (node.csvSource?.refreshOnViewLoad) this.refreshCsvSource(view, node, "automatic");
+		}
+		for (const node of this.collectMarkdownTableSourceNodes(view.root)) {
+			if (node.markdownTableSource?.refreshOnViewLoad) this.refreshMarkdownTableSource(view, node, "automatic");
 		}
 	}
 
@@ -517,6 +530,18 @@ export class AtlasExplorerView extends ItemView {
 		return out;
 	}
 
+	/** PR-8 (G21): same walk as `collectCsvSourceNodes`, for Markdown Table sources. */
+	private collectMarkdownTableSourceNodes(nodes: ViewNode[]): ViewNode[] {
+		const out: ViewNode[] = [];
+		for (const node of nodes) {
+			if (node.type === "meta") {
+				if (node.markdownTableSource) out.push(node);
+				out.push(...this.collectMarkdownTableSourceNodes(node.children));
+			}
+		}
+		return out;
+	}
+
 	/** G5b/F3/PR-4 (G10): (re)schedules this Atlas view's "Refresh every X minutes" timers against
 	 * the active View's current set of eligible Folders — both API and Folder sources feed the same
 	 * scheduler (`RefreshEveryTimers` is already source-type-agnostic), so no new scheduler is
@@ -553,7 +578,17 @@ export class AtlasExplorerView extends ItemView {
 				minutes: node.csvSource?.refreshEveryMinutes ?? MIN_REFRESH_MINUTES,
 				lastFetchedAt: node.apiCache?.fetchedAt ?? null,
 			}));
-		this.refreshEveryTimers.sync([...apiNodes, ...folderNodes, ...csvNodes], (nodeId) => {
+		// PR-8: a Markdown Table source shares `apiCache` with API/CSV sources, so its timer entry is
+		// built exactly like `csvNodes` above.
+		const mdTableNodes = this.collectMarkdownTableSourceNodes(view.root)
+			.filter((node) => node.markdownTableSource?.refreshEveryMinutesEnabled)
+			.map((node) => ({
+				id: node.id,
+				enabled: true,
+				minutes: node.markdownTableSource?.refreshEveryMinutes ?? MIN_REFRESH_MINUTES,
+				lastFetchedAt: node.apiCache?.fetchedAt ?? null,
+			}));
+		this.refreshEveryTimers.sync([...apiNodes, ...folderNodes, ...csvNodes, ...mdTableNodes], (nodeId) => {
 			const activeView = this.plugin.viewsManager.getActiveView();
 			const apiTarget = this.collectApiSourceNodes(activeView.root).find((n) => n.id === nodeId);
 			if (apiTarget) {
@@ -566,7 +601,12 @@ export class AtlasExplorerView extends ItemView {
 				return;
 			}
 			const csvTarget = this.collectCsvSourceNodes(activeView.root).find((n) => n.id === nodeId);
-			if (csvTarget) this.refreshCsvSource(activeView, csvTarget, "automatic");
+			if (csvTarget) {
+				this.refreshCsvSource(activeView, csvTarget, "automatic");
+				return;
+			}
+			const mdTableTarget = this.collectMarkdownTableSourceNodes(activeView.root).find((n) => n.id === nodeId);
+			if (mdTableTarget) this.refreshMarkdownTableSource(activeView, mdTableTarget, "automatic");
 		});
 	}
 
@@ -625,6 +665,25 @@ export class AtlasExplorerView extends ItemView {
 		});
 	}
 
+	/** PR-8 (G17-G20/G22-G24): the Markdown Table equivalent of `refreshCsvSource` — same no-mobile-
+	 * guard reasoning (a vault file read, not a live request). */
+	private refreshMarkdownTableSource(view: View, node: ViewNode, trigger: "manual" | "automatic" = "manual"): void {
+		if (!node.markdownTableSource) return;
+		void this.plugin.markdownTableSourceController.refresh(node, node.markdownTableSource, () => this.plugin.viewsManager.notifyExternalMutation(), {
+			vault: this.plugin.app.vault,
+			trigger,
+			confirmDelete: (count) =>
+				new Promise((resolve) => {
+					const modal = new ConfirmDeleteRowsModal(this.plugin.app, count, (answer) => {
+						this.openConfirmDeleteModals = this.openConfirmDeleteModals.filter((m) => m !== modal);
+						resolve(answer);
+					});
+					this.openConfirmDeleteModals.push(modal);
+					modal.open();
+				}),
+		});
+	}
+
 	private openApiSourceModal(view: View, node: ViewNode): void {
 		const headers = this.plugin.apiHeadersStore.get(node.id);
 		const outsidePath = this.plugin.folderSourcePathStore.get(node.id);
@@ -656,13 +715,23 @@ export class AtlasExplorerView extends ItemView {
 					this.refreshCsvSource(view, node, "manual");
 					return;
 				}
+				if (result.type === "markdown-table") {
+					// PR-8: same device-local-headers cleanup as the CSV branch above, for switching away
+					// from API into Markdown Table.
+					const hadApiSource = node.apiSource !== undefined;
+					this.plugin.viewsManager.setMarkdownTableSource(view.id, node.id, result.source);
+					if (hadApiSource) this.plugin.apiHeadersStore.delete(node.id);
+					this.refreshMarkdownTableSource(view, node, "manual");
+					return;
+				}
 				this.plugin.apiHeadersStore.set(node.id, result.headers);
 				this.plugin.viewsManager.setApiSource(view.id, node.id, result.source);
 				this.refreshApiSource(view, node, "manual");
 			},
 			node.folderSource ?? null,
 			outsidePath,
-			node.csvSource ?? null
+			node.csvSource ?? null,
+			node.markdownTableSource ?? null
 		).open();
 	}
 
@@ -1742,11 +1811,11 @@ export class AtlasExplorerView extends ItemView {
 			const iconEl = row.createDiv({ cls: "atlas-icon" });
 			this.renderRowIcon(iconEl, view, node, ancestors, "layers");
 			row.createSpan({ cls: "atlas-row-text", text: node.label ?? "" });
-			if (node.apiSource || node.csvSource) {
-				// G11/PR-7: connection dot — green ok / grey never-refreshed / red last-refresh-failed /
-				// amber (PR-3) waiting on an unanswered automatic delete confirmation. CSV shares this
-				// exact dot: `CsvSourceController` writes the same `apiCache`/`apiAwaitingConfirmation`
-				// fields an API source does.
+			if (node.apiSource || node.csvSource || node.markdownTableSource) {
+				// G11/PR-7/PR-8: connection dot — green ok / grey never-refreshed / red last-refresh-failed
+				// / amber (PR-3) waiting on an unanswered automatic delete confirmation. CSV and Markdown
+				// Table both share this exact dot: their controllers write the same `apiCache`/
+				// `apiAwaitingConfirmation` fields an API source does.
 				const dot = row.createSpan({
 					cls: `atlas-api-connection-dot atlas-api-dot-${dotStateFor(node.apiCache, node.apiAwaitingConfirmation)}`,
 				});
@@ -2440,6 +2509,30 @@ export class AtlasExplorerView extends ItemView {
 							`Remove the data source from "${node.label}"? Its current rows stay in place as plain rows — it just stops refreshing.`,
 							"Remove",
 							() => this.plugin.viewsManager.setCsvSource(view.id, node.id, undefined)
+						).open();
+					})
+			);
+		} else if (node.markdownTableSource) {
+			// PR-8: reuses the exact same menu actions as a CSV source — "Refresh now" re-reads+parses
+			// the file (no mobile guard, see `refreshMarkdownTableSource`'s own doc comment); "Remove
+			// data source" just stops it, same as a CSV source's own Remove (rows stay in place).
+			// Markdown Table has no device-local headers store to clean up on removal.
+			menu.addItem((item) =>
+				item
+					.setTitle("Refresh now")
+					.setIcon("refresh-cw")
+					.onClick(() => this.refreshMarkdownTableSource(view, node, "manual"))
+			);
+			menu.addItem((item) =>
+				item
+					.setTitle("Remove data source")
+					.setIcon("unplug")
+					.onClick(() => {
+						new ConfirmModal(
+							this.plugin.app,
+							`Remove the data source from "${node.label}"? Its current rows stay in place as plain rows — it just stops refreshing.`,
+							"Remove",
+							() => this.plugin.viewsManager.setMarkdownTableSource(view.id, node.id, undefined)
 						).open();
 					})
 			);
