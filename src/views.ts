@@ -877,13 +877,19 @@ export class ViewsManager {
 	 * live source, and it stops refreshing entirely — no more dot at all) but deliberately keeps
 	 * `apiItemState`/`apiItemOrder` untouched: the rows themselves, with whatever status/notes they
 	 * already had, survive as plain static rows. The device-local headers entry is a separate store the
-	 * caller owns (see `ApiHeadersStore`); this method only ever touches the synced view data. */
+	 * caller owns (see `ApiHeadersStore`); this method only ever touches the synced view data.
+	 *
+	 * R1 fix: `apiSource` and `csvSource` share the same `apiCache`/`apiAwaitingConfirmation` fields
+	 * (both produce the same kind of placeholder row), so setting one live must clear the other —
+	 * otherwise both keep refreshing into the same state and stomp each other's rows. */
 	setApiSource(viewId: string, nodeId: string, source: ApiSourceConfig | undefined): void {
 		const view = this.getView(viewId);
 		const found = view && this.findNode(view.root, nodeId);
 		if (!found || found.node.type !== "meta") return;
+		const hadCsvSource = found.node.csvSource !== undefined;
 		found.node.apiSource = source;
-		if (!source) {
+		if (source) found.node.csvSource = undefined;
+		if (!source || hadCsvSource) {
 			found.node.apiCache = undefined;
 			found.node.apiAwaitingConfirmation = undefined;
 		}
@@ -892,13 +898,17 @@ export class ViewsManager {
 
 	/** PR-7 (G17-G19/G22-G23): sets a Folder's CSV data source, or removes it (passing `undefined`) —
 	 * exact mirror of `setApiSource`, since a CSV source produces the same kind of placeholder rows and
-	 * the same "removal keeps the rows as static, drops only cache/confirmation" rule applies. */
+	 * the same "removal keeps the rows as static, drops only cache/confirmation" rule applies.
+	 *
+	 * R1 fix: mirrors `setApiSource`'s clearing of the other source type — see its doc comment. */
 	setCsvSource(viewId: string, nodeId: string, source: CsvSourceConfig | undefined): void {
 		const view = this.getView(viewId);
 		const found = view && this.findNode(view.root, nodeId);
 		if (!found || found.node.type !== "meta") return;
+		const hadApiSource = found.node.apiSource !== undefined;
 		found.node.csvSource = source;
-		if (!source) {
+		if (source) found.node.apiSource = undefined;
+		if (!source || hadApiSource) {
 			found.node.apiCache = undefined;
 			found.node.apiAwaitingConfirmation = undefined;
 		}
