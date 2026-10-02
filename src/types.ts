@@ -362,6 +362,17 @@ export interface ApiItemState {
 	 * gone. So while `notFound` is true, this is the last time the row was truly seen, which is what
 	 * "not found, last seen <date>" reports. */
 	lastSeenAt?: string;
+	/** PR-6 (R2 fix): set only on an entry `reconcileFolderSourceChildDelete` itself produced by
+	 * demoting a deleted Folder-source-managed child — never on a genuine API/Table-sourced row.
+	 * `sweepFolderSourceDeletedPlaceholders` gates on this before touching anything, so a node that
+	 * still carries live, unrelated API-sourced rows alongside its `folderSource` never has those
+	 * mistaken for its own demoted children. */
+	folderSourceDeleted?: true;
+	/** PR-6 (R3 fix): the index this row's real `ViewNode` occupied among its parent's children at
+	 * the moment it was demoted — carried through every later sweep unchanged. `renderNodeList`
+	 * uses it to re-insert the row among the owner's real children at (approximately) its old slot,
+	 * instead of appending it after all of them the way a genuine API/Table row still is. */
+	position?: number;
 }
 
 /** PR 17: extends `StatusGovernance` so the view root itself can be a governor — "Statuses" on the
