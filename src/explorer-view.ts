@@ -288,6 +288,11 @@ export class AtlasExplorerView extends ItemView {
 	private sortMode: "manual" | "alphabetical" = "manual";
 	private bucketCollapsed = false;
 	private inboxCollapsed = true;
+	/** PR-5 (G7/G8): whether dismissed inbox rows render inline, tagged "hidden". Mirrors
+	 * `inboxCollapsed` — a single instance field rather than per-view, matching this view's existing
+	 * convention that transient section-header UI state is shared across view switches within the
+	 * same explorer instance, not stored per `View`. Off by default on fresh load, same as collapse. */
+	private showDismissed = false;
 	/** PR 9: filter input is hidden behind a reveal toggle now instead of always shown. */
 	private filterRevealed = false;
 	/** One-shot: set when the reveal toggle is clicked open, consumed by the very next
@@ -820,8 +825,14 @@ export class AtlasExplorerView extends ItemView {
 		await this.renderBucketSection(bucketEl, view);
 
 		const inboxUnits = this.plugin.viewsManager.getInboxUnits(allUnits, view.id, view.inboxMode, this.plugin.unitIndex);
+		// PR-5 (G8): only resolved while the toggle is active — otherwise dismissed rows never enter
+		// the merged/sorted list at all, matching G8's "renders inline in the existing list" via an
+		// extra input set rather than a post-filter that would still momentarily touch every dismissed row.
+		const dismissedUnits = this.showDismissed
+			? this.plugin.viewsManager.getDismissedInboxUnits(allUnits, view.id, view.inboxMode, this.plugin.unitIndex)
+			: [];
 		const inboxEl = container.createDiv({ cls: "atlas-section atlas-inbox" });
-		await this.renderInboxSection(inboxEl, view, inboxUnits, inboxViewportScrollTop);
+		await this.renderInboxSection(inboxEl, view, inboxUnits, dismissedUnits, inboxViewportScrollTop);
 
 		if (activeRowKey) {
 			const restored = container.querySelector<HTMLElement>(`[data-select-key="${CSS.escape(activeRowKey)}"]`);
@@ -1588,12 +1599,26 @@ export class AtlasExplorerView extends ItemView {
 
 	// --- inbox -----------------------------------------------------------------------------------
 
-	private async renderInboxSection(container: HTMLElement, view: View, units: Unit[], viewportScrollTop: number): Promise<void> {
+	private async renderInboxSection(
+		container: HTMLElement,
+		view: View,
+		units: Unit[],
+		dismissedUnits: Unit[],
+		viewportScrollTop: number
+	): Promise<void> {
 		const header = container.createDiv({ cls: "atlas-section-header" });
 		const chevron = header.createDiv({ cls: "atlas-chevron" });
 		setIcon(chevron, this.inboxCollapsed ? "chevron-right" : "chevron-down");
 		header.createSpan({ text: "Inbox" });
+		// PR-5: the count badge reflects the real (undismissed) inbox size regardless of whether
+		// dismissed rows are currently revealed — "Show Dismissed" is a temporary peek, not a change
+		// to what's actually in the inbox, so the count shouldn't jump around as it's toggled.
 		header.createSpan({ cls: "atlas-badge atlas-count-badge", text: String(units.length) });
+		// PR-5 (G7): additive — the header's existing collapse `click` listener below is untouched.
+		header.addEventListener("contextmenu", (evt) => {
+			evt.preventDefault();
+			this.showInboxHeaderMenu(evt);
+		});
 
 		const modeToggle = header.createDiv({ cls: "atlas-inbox-mode" });
 		for (const mode of ["view", "global"] as const) {
@@ -1634,8 +1659,14 @@ export class AtlasExplorerView extends ItemView {
 		const listEl = sectionInner.createDiv({ cls: "atlas-node-list" });
 		this.makeDropZone(listEl, { kind: "inbox-area", viewId: view.id });
 
+		// PR-5 (G8): dismissed rows are merged into the exact same input list the rest of this
+		// function already sorts/selects/virtualizes — never a second container or render path.
+		const combined = [
+			...units.map((unit) => ({ unit, hidden: false })),
+			...dismissedUnits.map((unit) => ({ unit, hidden: true })),
+		];
 		const resolved = await Promise.all(
-			units.map(async (unit) => ({ unit, ref: unitToRef(unit), info: await this.resolveRef(unitToRef(unit)) }))
+			combined.map(async ({ unit, hidden }) => ({ unit, ref: unitToRef(unit), hidden, info: await this.resolveRef(unitToRef(unit)) }))
 		);
 		const filtered = resolved.filter((r) => this.matchesFilter(r.info.text));
 		const sorted =
@@ -1693,7 +1724,7 @@ export class AtlasExplorerView extends ItemView {
 		}).open();
 	}
 
-	private renderInboxRow(container: HTMLElement, ref: UnitRef, info: RowInfo, view: View): HTMLElement {
+	private renderInboxRow(container: HTMLElement, ref: UnitRef, info: RowInfo, view: View, hidden = false): HTMLElement {
 		const row = container.createDiv({ cls: "atlas-row atlas-row-unit" });
 		const key = unitRefKey(ref);
 		row.dataset.refKey = key;
@@ -1705,6 +1736,9 @@ export class AtlasExplorerView extends ItemView {
 		row.createSpan({ cls: "atlas-row-text", text: info.text });
 		if (info.promoted) row.createSpan({ cls: "atlas-badge", text: "promoted" });
 		if (info.added) row.createSpan({ cls: "atlas-badge", text: "added" });
+		// PR-5 (G8): independent of the promoted/added spans above — a unit can carry both at once
+		// without either clobbering the other, since each is just its own sibling span.
+		if (hidden) row.createSpan({ cls: "atlas-badge", text: "hidden" });
 		if (info.secondary) row.createSpan({ cls: "atlas-row-secondary", text: info.secondary });
 		// PR 9 (issue 2): modules never expand inline anymore, in the inbox or the bucket — the icon
 		// opens the Module Contents modal instead (see `wireModuleRow`).
@@ -1731,7 +1765,7 @@ export class AtlasExplorerView extends ItemView {
 	 * and bucket section on every frame. */
 	private renderVirtualizedInboxRows(
 		listEl: HTMLElement,
-		sorted: { ref: UnitRef; info: RowInfo; unit: Unit }[],
+		sorted: { ref: UnitRef; info: RowInfo; unit: Unit; hidden: boolean }[],
 		viewportScrollTop: number,
 		view: View
 	): void {
@@ -1754,8 +1788,8 @@ export class AtlasExplorerView extends ItemView {
 			const count = Math.ceil(viewportHeight / INBOX_ROW_HEIGHT) + INBOX_OVERSCAN * 2;
 			const end = Math.min(sorted.length, start + count);
 			for (let i = start; i < end; i++) {
-				const { ref, info } = sorted[i];
-				const row = this.renderInboxRow(spacer, ref, info, view);
+				const { ref, info, hidden } = sorted[i];
+				const row = this.renderInboxRow(spacer, ref, info, view, hidden);
 				row.addClass("atlas-row-virtual");
 				row.style.top = `${i * INBOX_ROW_HEIGHT}px`;
 			}
@@ -2067,6 +2101,24 @@ export class AtlasExplorerView extends ItemView {
 		new StatusesModal(this.plugin.app, this.plugin.statusesManager.getStatusSets(), governance, (patch) =>
 			this.plugin.viewsManager.updateStatusGovernance(view.id, nodeId, patch)
 		).open();
+	}
+
+	/** PR-5 (G7): the inbox section header's own right-click menu — a single toggle item, same
+	 * `Menu`/`showAtMouseEvent` construction as the toolbar view-name menu and the row menus below.
+	 * Toggling flips the instance-level `showDismissed` flag and re-renders; no persisted write, same
+	 * as `inboxCollapsed`. */
+	private showInboxHeaderMenu(evt: MouseEvent): void {
+		const menu = new Menu();
+		menu.addItem((item) =>
+			item
+				.setTitle(this.showDismissed ? "Hide Dismissed" : "Show Dismissed")
+				.setIcon(this.showDismissed ? "eye-off" : "eye")
+				.onClick(() => {
+					this.showDismissed = !this.showDismissed;
+					void this.render();
+				})
+		);
+		menu.showAtMouseEvent(evt);
 	}
 
 	private showInboxUnitMenu(evt: MouseEvent, ref: UnitRef, view: View): void {
