@@ -1222,6 +1222,16 @@ export class AtlasExplorerView extends ItemView {
 		// a surviving match instead bypasses hide/truncate outright, same "a filter match is never
 		// folded away" rule real nodes already get.
 		if (apiOwner?.apiItemOrder) {
+			// R3 fix: a Folder-source-demoted row (`item.folderSourceDeleted`, carrying the real index
+			// its `ViewNode` occupied among `apiOwner`'s children at the moment it was deleted) is
+			// spliced back in among those real children at (approximately) that same position, instead
+			// of always landing after every one of them the way a genuine API/Table row still does —
+			// "append-mode row retains all other row data (title, metadata, position)". Collected
+			// separately and inserted after the real-children loop above so `realCount` reflects only
+			// those real children, never any already-inserted positioned row.
+			const realCount = resolved.length;
+			const positioned: { entry: Resolved; position: number }[] = [];
+			const trailing: Resolved[] = [];
 			for (const itemId of apiOwner.apiItemOrder) {
 				const item = apiOwner.apiItemState?.[itemId];
 				if (!item) continue;
@@ -1229,8 +1239,18 @@ export class AtlasExplorerView extends ItemView {
 				const pseudo = this.pseudoNodeForApiItem(item);
 				const governor = sm.findGoverningAncestor(ancestors, pseudo);
 				const status = governor ? sm.resolveNodeStatus(ancestors, pseudo) : null;
-				resolved.push({ node: pseudo, status, governor, bypass: filterActive, apiItem: item });
+				const entry: Resolved = { node: pseudo, status, governor, bypass: filterActive, apiItem: item };
+				if (item.folderSourceDeleted && typeof item.position === "number") {
+					positioned.push({ entry, position: Math.min(Math.max(item.position, 0), realCount) });
+				} else {
+					trailing.push(entry);
+				}
 			}
+			// Insert highest position first: splice(p, 0, x) only shifts indices >= p, so a later
+			// (lower-position) insertion's target index is never disturbed by an earlier one.
+			positioned.sort((a, b) => b.position - a.position);
+			for (const { entry, position } of positioned) resolved.splice(position, 0, entry);
+			resolved.push(...trailing);
 		}
 
 		// PR 22: sort-by-status — the nearest governor that reaches this list (same ancestor-walk
