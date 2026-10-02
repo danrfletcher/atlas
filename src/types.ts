@@ -290,6 +290,12 @@ export interface FolderSourceConfig {
 	 * recreates one of these, the same way any other removed ref stays gone rather than being
 	 * resurrected on the next refresh. */
 	removedRefs?: string[];
+	/** PR-6 (G12-G14): reuses `ApiSourceConfig.mode`'s exact three values to govern how a managed
+	 * child's row reconciles when the underlying vault file is deleted — "merge" demotes it to a
+	 * not-found placeholder (Remove available), "append" keeps the row with its attachment/link
+	 * cleared, "overwrite" removes it immediately with no placeholder. Defaults to "merge" when absent
+	 * (sanitized in `sanitizeFolderSource`), matching `ApiSourceConfig`'s own default. */
+	mode?: "append" | "merge" | "overwrite";
 }
 
 export interface MarkdownTableSourceConfigStub {

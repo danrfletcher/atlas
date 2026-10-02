@@ -1,5 +1,5 @@
 import { TFolder } from "obsidian";
-import { FolderSourceConfig, UnitRef, ViewNode, unitRefKey } from "./types";
+import { ApiItemState, FolderSourceConfig, PLACEHOLDER_ROW_KIND, UnitRef, ViewNode, unitRefKey } from "./types";
 import { listOutsideChildren, resolveOutsidePath } from "./folder-source-outside";
 
 /** G3/G4: the direct children of `folder`, filtered independently by `showFiles`/`showFolders` —
@@ -158,4 +158,51 @@ export function buildFolderSourceChildren(
 	const managedElsewhere = collectManagedRefKeys(context.viewRoot, context.sourceNodeId);
 	const removedRefs = new Set(source.removedRefs ?? []);
 	return reconcileManagedChildren(existingChildren, desiredRefs, source, makeNode, { managedElsewhere, removedRefs });
+}
+
+/** PR-6 (G12-G14): the one parameterized rule for how a Folder-source child's row reconciles,
+ * given the source's *current* `mode` — called both at the moment the underlying file is deleted
+ * (with `deletedRef` set, so the fresh entry carries a `noteRef` for PR-2's existing
+ * noteRef-clearing sweep to immediately clear in append mode — genuine reuse, not a reimplemented
+ * clear) and again on every later reconciliation pass over already-demoted rows (with `deletedRef`
+ * omitted, so a dead link is never resurrected) — satisfying "mode is read at reconciliation time,
+ * not delete time" for a mode switch that happens between the two.
+ *
+ * - "overwrite": no placeholder at all (G14) — `undefined` tells the caller to drop the row, or to
+ *   never have created one.
+ * - "merge": PR-2's exact stale-item shape (G12) — `notFound: true` plus the (frozen) `lastSeenAt`
+ *   this rule was first applied with, so it renders through the identical "not found, last seen"
+ *   code path as a stale API item, Remove included.
+ * - "append": the row stays, with no `notFound` (G13) — `deletedRef` becomes `noteRef` only at the
+ *   initial call so the existing clear-on-delete mechanism has something to clear; a later call
+ *   (switched *into* append, or re-confirmed while already in it) passes none and leaves no link to
+ *   re-attach.
+ *
+ * `base.explicitStatusId` (the deleted unit's own status override, carried over from `ViewNode` to
+ * `ApiItemState` — same field name, same meaning) survives in both shapes untouched, matching G13's
+ * "retains all other row data ... nothing else mutates." */
+export function reconcileFolderSourceChildDelete(
+	mode: "append" | "merge" | "overwrite",
+	base: { id: string; label: string; lastSeenAt: string; explicitStatusId?: string },
+	deletedRef?: UnitRef
+): ApiItemState | undefined {
+	if (mode === "overwrite") return undefined;
+	if (mode === "merge") {
+		return {
+			id: base.id,
+			label: base.label,
+			kind: PLACEHOLDER_ROW_KIND,
+			notFound: true,
+			lastSeenAt: base.lastSeenAt,
+			explicitStatusId: base.explicitStatusId,
+		};
+	}
+	return {
+		id: base.id,
+		label: base.label,
+		kind: PLACEHOLDER_ROW_KIND,
+		noteRef: deletedRef,
+		lastSeenAt: base.lastSeenAt,
+		explicitStatusId: base.explicitStatusId,
+	};
 }
