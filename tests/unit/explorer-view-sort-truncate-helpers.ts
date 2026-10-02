@@ -61,6 +61,7 @@ export interface FakeExplorer {
 	renderTruncationGroupHeader: ReturnType<typeof vi.fn>;
 	renderNode: ReturnType<typeof vi.fn>;
 	renderApiItemRow: ((...args: unknown[]) => unknown) | ReturnType<typeof vi.fn>;
+	isOutsideManagedAndUnresolved: ReturnType<typeof vi.fn>;
 }
 
 /** Builds a fake `this` for `renderNodeList`. `renderNode`/`renderApiItemRow` are stubbed with
@@ -86,6 +87,7 @@ export function makeFakeExplorer(sm: StatusesManager, overrides: Partial<FakeExp
 		renderApiItemRow: vi.fn((item: { id: string }, container: HTMLElement) => {
 			container.createDiv({ cls: "marker-api", attr: { "data-id": item.id } });
 		}),
+		isOutsideManagedAndUnresolved: vi.fn(() => false),
 		...overrides,
 	};
 	return fake;
