@@ -261,6 +261,18 @@ export function collectApiSourceNodeIdPairs(original: ViewNode, clone: ViewNode)
 	return pairs;
 }
 
+/** PR-5 (G6/F6 mirror of R3/G7 above): an Outside-Vault Folder source's device-local absolute path
+ * (`FolderSourcePathStore`, keyed by node id) has no home in `duplicateNode`'s return value either —
+ * same id-pairing approach, scoped to `folderSource?.location === "outside"` instead of `apiSource`. */
+export function collectOutsideFolderSourceNodeIdPairs(original: ViewNode, clone: ViewNode): ApiSourceIdPair[] {
+	const pairs: ApiSourceIdPair[] = [];
+	if (original.folderSource?.location === "outside") pairs.push({ originalId: original.id, cloneId: clone.id });
+	for (let i = 0; i < original.children.length; i++) {
+		pairs.push(...collectOutsideFolderSourceNodeIdPairs(original.children[i], clone.children[i]));
+	}
+	return pairs;
+}
+
 /** G7 (extended to G4's static rows): a deep copy of a Folder's per-id row state — `noteRef` is itself
  * an object, so a shallow copy of the map would still leave both copies' rows pointing at (and able to
  * mutate) the very same `UnitRef`. */
@@ -812,7 +824,7 @@ export class ViewsManager {
 	 * is; see `buildFolderSourceChildren`'s own doc comment for the full reconciliation contract). A
 	 * no-op if the node isn't a meta node with a Folder source. Read-only against the vault: this
 	 * never creates/moves/deletes anything on disk (F5). */
-	refreshFolderSource(viewId: string, nodeId: string): void {
+	refreshFolderSource(viewId: string, nodeId: string, outsidePath?: string): void {
 		const view = this.getView(viewId);
 		if (!view) return;
 		const found = this.findNode(view.root, nodeId);
@@ -830,7 +842,8 @@ export class ViewsManager {
 				folderSourceManaged: true,
 				folderSourceOwnerId: ownerId,
 			}),
-			{ sourceNodeId: ownerId, viewRoot: view.root }
+			{ sourceNodeId: ownerId, viewRoot: view.root },
+			outsidePath
 		);
 		this.save();
 	}
