@@ -152,10 +152,14 @@ describe("reconcileManagedChildren — G7/G9/E2", () => {
 });
 
 describe("buildFolderSourceChildren — G16/E1", () => {
-	it("location 'outside' is a no-op in this PR, returning existingChildren unchanged", () => {
+	// PR-5: Outside Vault is no longer a no-op — see tests/unit/folder-source-outside-children-behavior.test.ts
+	// for the full Outside-Vault reconciliation contract. This just confirms hand-placed (non-managed)
+	// children in `existingChildren` pass through untouched when no outside path resolves, matching the
+	// "anything else is left alone" contract `reconcileManagedChildren` already documents.
+	it("location 'outside' with no resolving path leaves hand-placed (non-managed) children untouched", () => {
 		const existing = [unitNode({ kind: "file", path: "x.md" })];
 		const result = buildFolderSourceChildren({ getAbstractFileByPath: () => null }, source({ location: "outside" }), existing, (ref) => unitNode(ref));
-		expect(result).toBe(existing);
+		expect(result).toEqual(existing);
 	});
 
 	it("an unresolvable target folder falls back to a single missing-ref sentinel managed child", () => {
