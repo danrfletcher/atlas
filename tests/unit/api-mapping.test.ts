@@ -10,6 +10,7 @@ import {
 	mapSampleRows,
 	sampleFieldsForArrayField,
 } from "../../src/api-mapping";
+import { parseCsv } from "../../src/csv-parsing";
 import { ApiFieldMapping } from "../../src/types";
 
 const mapping: ApiFieldMapping = { idField: "id", labelField: "name" };
@@ -205,5 +206,29 @@ describe("formatLocalDateFromIso — R19: local calendar date, not the UTC one",
 		} finally {
 			process.env.TZ = originalTz;
 		}
+	});
+});
+
+describe("mapSampleRows — PR-7: CSV row-object compatibility", () => {
+	it("maps CSV-parsed row objects exactly like any other flat-array response, unmodified", () => {
+		const parsed = parseCsv("id,name,secondary\n1,One,alpha\n2,Two,beta\n");
+		expect(parsed.ok).toBe(true);
+		if (!parsed.ok) return;
+		const result = mapSampleRows(parsed.rows, { idField: "id", labelField: "name", secondaryField: "secondary" });
+		expect(result.rows).toEqual([
+			{ id: "1", label: "One", secondary: "alpha" },
+			{ id: "2", label: "Two", secondary: "beta" },
+		]);
+		expect(result.skippedCount).toBe(0);
+		expect(result.truncated).toBe(false);
+	});
+
+	it("skips a CSV row missing its id/label field exactly like it would for any other source (E2)", () => {
+		const parsed = parseCsv("id,name\n1,One\n,NoId\n");
+		expect(parsed.ok).toBe(true);
+		if (!parsed.ok) return;
+		const result = mapSampleRows(parsed.rows, mapping);
+		expect(result.rows).toEqual([{ id: "1", label: "One" }]);
+		expect(result.skippedCount).toBe(1);
 	});
 });

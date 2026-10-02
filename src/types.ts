@@ -190,6 +190,12 @@ export interface ViewNode extends StatusGovernance {
 	 * what lets a refresh find a managed row again no matter where the user dragged or nested it,
 	 * instead of only looking at the source's own direct children. */
 	folderSourceOwnerId?: string;
+	/** PR-7 (G17-G19/G21-G23): a CSV-file source — unlike `folderSource`, this produces placeholder/
+	 * API-item rows exactly like `apiSource` (same `apiCache`/`apiItemState`/`apiItemOrder`/
+	 * `apiAwaitingConfirmation` fields below, shared with `apiSource` rather than duplicated), just
+	 * triggered by a file-change/view-load/timer instead of a network fetch. Only ever set on a
+	 * `type: "meta"` node, and never set at the same time as `apiSource` on the same node. */
+	csvSource?: CsvSourceConfig;
 }
 
 /** A single request header, e.g. `Authorization: Bearer …`. Never persisted in `data.json` — see
@@ -301,14 +307,38 @@ export interface FolderSourceConfig {
 export interface MarkdownTableSourceConfigStub {
 	type: "markdown-table";
 }
-export interface CsvSourceConfigStub {
-	type: "csv";
+
+/** PR-7 (G17-G19/G22-G23): a CSV file inside the vault, parsed from scratch (`csv-parsing.ts`) and
+ * fed through the exact same `mapSampleRows`/`runJsMapping` + `planApiRefresh` pipeline as an API
+ * source, producing the same `PLACEHOLDER_ROW_KIND` rows — so Remove/Remove-attachment and every
+ * other placeholder-row affordance work unmodified. Deliberately has no `action`/`clickAction`/
+ * `command` field: `handleApiItemClick`'s existing `apiSource?.action ?? apiSource?.clickAction ??
+ * "open-attachment"` fallback already resolves to "open-attachment" when `apiSource` is absent, which
+ * is the only sensible default for a CSV row anyway. The first row is always treated as headers
+ * (G19) — no toggle. */
+export interface CsvSourceConfig {
+	type?: "csv";
+	/** G18: vault-relative path to the `.csv` file — never absolute (unlike Outside-Vault Folder
+	 * sources, a CSV source has no device-local-path variant, so this is safe to persist in synced
+	 * `data.json` as a plain string). */
+	path: string;
+	mapping: ApiFieldMapping;
+	mode: "append" | "merge" | "overwrite";
+	/** G21: refreshes automatically whenever the file at `path` is modified, in addition to reusing
+	 * the same view-load/every-N-minutes triggers as an API source. */
+	refreshOnViewLoad: boolean;
+	refreshEveryMinutesEnabled?: boolean;
+	refreshEveryMinutes?: number;
+	keepOnEmpty?: boolean;
+	confirmBeforeDelete?: boolean;
+	mappingMode?: "drag" | "js";
+	jsSource?: string;
 }
 
 /** PR-3 (G1): the sibling-shapes union `ApiSourceConfig`'s new `type` field exists to support —
- * `ViewNode.apiSource`/`ViewNode.folderSource` stay their own concretely-typed fields rather than
- * this union, which is exercised today only inside `ApiSourceModal`. */
-export type DataSourceConfig = ApiSourceConfig | FolderSourceConfig | MarkdownTableSourceConfigStub | CsvSourceConfigStub;
+ * `ViewNode.apiSource`/`ViewNode.folderSource`/`ViewNode.csvSource` stay their own concretely-typed
+ * fields rather than this union, which is exercised today only inside `ApiSourceModal`. */
+export type DataSourceConfig = ApiSourceConfig | FolderSourceConfig | MarkdownTableSourceConfigStub | CsvSourceConfig;
 
 /** A row exactly as mapped from a response — this is all the cache ever holds, never the raw
  * response (G13, E9). */

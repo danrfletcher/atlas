@@ -1,0 +1,105 @@
+import { describe, expect, it } from "vitest";
+import { App } from "obsidian";
+import { CsvSourceController } from "../../src/csv-source-controller";
+import { dotStateFor } from "../../src/api-source-controller";
+import { CsvSourceConfig, ViewNode } from "../../src/types";
+
+function makeNode(id: string): ViewNode {
+	return { id, type: "meta", label: "CSV folder", children: [] };
+}
+
+function baseSource(path: string, overrides: Partial<CsvSourceConfig> = {}): CsvSourceConfig {
+	return {
+		path,
+		mapping: { idField: "id", labelField: "name" },
+		mode: "merge",
+		refreshOnViewLoad: false,
+		...overrides,
+	};
+}
+
+describe("CsvSourceController — integration: create, map, render-ready state", () => {
+	it("G17-G19: a successful refresh parses the file, maps rows through the unmodified mapping pipeline, and goes green", async () => {
+		const app = new App();
+		await app.vault.create("data.csv", "id,name\n1,One\n2,Two\n");
+		const node = makeNode("n1");
+		expect(dotStateFor(node.apiCache)).toBe("grey");
+
+		const controller = new CsvSourceController();
+		let persisted = 0;
+		await controller.refresh(node, baseSource("data.csv"), () => persisted++, { vault: app.vault, now: () => 1000 });
+
+		expect(persisted).toBe(1);
+		expect(node.apiCache?.ok).toBe(true);
+		expect(node.apiCache?.rows).toEqual([
+			{ id: "1", label: "One" },
+			{ id: "2", label: "Two" },
+		]);
+		expect(dotStateFor(node.apiCache)).toBe("green");
+		expect(node.apiItemOrder).toEqual(["1", "2"]);
+		expect(Object.keys(node.apiItemState ?? {})).toEqual(["1", "2"]);
+	});
+
+	it("G23/E4: a missing source file is reported the same way a dead API URL would be, never throwing", async () => {
+		const app = new App();
+		const node = makeNode("n1");
+		const controller = new CsvSourceController();
+		let persisted = 0;
+		await controller.refresh(node, baseSource("missing.csv"), () => persisted++, { vault: app.vault, now: () => 1000 });
+
+		expect(persisted).toBe(1);
+		expect(node.apiCache?.ok).toBe(false);
+		expect(node.apiCache?.error).toContain("missing.csv");
+		expect(dotStateFor(node.apiCache)).toBe("red");
+	});
+
+	it("G21: a vault file-save (modify event) triggers a re-parse that picks up the new rows", async () => {
+		const app = new App();
+		const file = await app.vault.create("data.csv", "id,name\n1,One\n");
+		const node = makeNode("n1");
+		const controller = new CsvSourceController();
+		let persisted = 0;
+		const refresh = (trigger: "manual" | "automatic") =>
+			controller.refresh(node, baseSource("data.csv"), () => persisted++, { vault: app.vault, now: () => 1000, trigger });
+
+		await refresh("manual");
+		expect(node.apiCache?.rows).toEqual([{ id: "1", label: "One" }]);
+
+		let pending: Promise<void> = Promise.resolve();
+		app.vault.on("modify", () => {
+			pending = refresh("automatic");
+		});
+		await app.vault.modify(file, "id,name\n1,One\n2,Two\n");
+		await pending; // the file-save-triggered automatic refresh
+
+		expect(node.apiCache?.rows).toEqual([
+			{ id: "1", label: "One" },
+			{ id: "2", label: "Two" },
+		]);
+	});
+
+	it("overwrite mode asks for confirmation before deleting rows, exactly as it does for an API source", async () => {
+		const app = new App();
+		const node = makeNode("n1");
+		node.apiItemState = {
+			"1": { id: "1", label: "One", kind: "placeholder", lastSeenAt: "2025-01-01T00:00:00.000Z" },
+			"2": { id: "2", label: "Two", kind: "placeholder", lastSeenAt: "2025-01-01T00:00:00.000Z" },
+		};
+		node.apiItemOrder = ["1", "2"];
+		await app.vault.create("data.csv", "id,name\n1,One\n");
+
+		const controller = new CsvSourceController();
+		const confirmedCounts: number[] = [];
+		await controller.refresh(node, baseSource("data.csv", { mode: "overwrite" }), () => {}, {
+			vault: app.vault,
+			now: () => 2000,
+			confirmDelete: async (count) => {
+				confirmedCounts.push(count);
+				return "confirmed";
+			},
+		});
+
+		expect(confirmedCounts).toEqual([1]);
+		expect(node.apiItemOrder).toEqual(["1"]);
+	});
+});
