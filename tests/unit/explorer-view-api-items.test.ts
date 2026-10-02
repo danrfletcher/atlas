@@ -7,6 +7,8 @@ import {
 	makeFakeExplorer,
 	makeStatusesManager,
 	proto,
+	realNode,
+	rowOrder,
 	view,
 } from "./explorer-view-sort-truncate-helpers";
 
@@ -64,5 +66,52 @@ describe("G25 — regression: renderApiItemRow output is unchanged by the merged
 		await callRenderNodeList(mergedFake, [], mergedContainer, view, 1, [folder], folder);
 
 		expect(mergedContainer.innerHTML).toBe(directContainer.innerHTML);
+	});
+});
+
+describe("PR-6 R3 fix: a Folder-source-demoted row renders back at its recorded position among real children", () => {
+	it("a row demoted from the middle slot re-renders between the two real children that were either side of it", async () => {
+		const sm = makeStatusesManager();
+		const folder = folderGovernor();
+		const demoted: ApiItemState = { id: "demoted-b", label: "b", kind: "placeholder", notFound: true, lastSeenAt: "2026-01-01T00:00:00.000Z", folderSourceDeleted: true, position: 1 };
+		folder.apiItemState = { "demoted-b": demoted };
+		folder.apiItemOrder = ["demoted-b"];
+		const realChildren = [realNode("a-real"), realNode("c-real")];
+
+		const fake = makeFakeExplorer(sm);
+		const container = document.createElement("div");
+		await callRenderNodeList(fake, realChildren, container, view, 1, [folder], folder);
+
+		expect(rowOrder(container)).toEqual(["a-real", "demoted-b", "c-real"]);
+	});
+
+	it("a genuine API row (no folderSourceDeleted marker) still always renders after every real child, unaffected by this fix", async () => {
+		const sm = makeStatusesManager();
+		const folder = folderGovernor();
+		const genuine: ApiItemState = { id: "api-1", label: "Genuine API row" };
+		folder.apiItemState = { "api-1": genuine };
+		folder.apiItemOrder = ["api-1"];
+		const realChildren = [realNode("a-real"), realNode("c-real")];
+
+		const fake = makeFakeExplorer(sm);
+		const container = document.createElement("div");
+		await callRenderNodeList(fake, realChildren, container, view, 1, [folder], folder);
+
+		expect(rowOrder(container)).toEqual(["a-real", "c-real", "api-1"]);
+	});
+
+	it("a position past the end of the current real children clamps to the end instead of throwing or dropping the row", async () => {
+		const sm = makeStatusesManager();
+		const folder = folderGovernor();
+		const demoted: ApiItemState = { id: "demoted-z", label: "z", kind: "placeholder", notFound: true, lastSeenAt: "2026-01-01T00:00:00.000Z", folderSourceDeleted: true, position: 99 };
+		folder.apiItemState = { "demoted-z": demoted };
+		folder.apiItemOrder = ["demoted-z"];
+		const realChildren = [realNode("a-real")];
+
+		const fake = makeFakeExplorer(sm);
+		const container = document.createElement("div");
+		await callRenderNodeList(fake, realChildren, container, view, 1, [folder], folder);
+
+		expect(rowOrder(container)).toEqual(["a-real", "demoted-z"]);
 	});
 });

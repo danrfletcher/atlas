@@ -12,13 +12,47 @@ export function unitRefsEqual(a: UnitRef, b: UnitRef): boolean {
 	return unitRefKey(a) === unitRefKey(b);
 }
 
+/** F9 rename integrity: rewrite `path` if it's an exact match for `oldPath`, or a descendant of it
+ * (`oldPath/...`) — the same rule Obsidian applies to link paths on rename. Returns the same string
+ * instance, unchanged, if neither applies (so callers can cheaply detect "did this change"). Shared
+ * by `rewriteRefPath` (below) and PR-4's `folderSource.path`, a plain vault-relative string with the
+ * same rename-integrity requirement but no surrounding `UnitRef` to rewrite. */
+export function rewritePathString(path: string, oldPath: string, newPath: string): string {
+	if (path === oldPath) return newPath;
+	if (path.startsWith(`${oldPath}/`)) return `${newPath}${path.slice(oldPath.length)}`;
+	return path;
+}
+
 /** F9 rename integrity: rewrite `ref.path` if it's an exact match for `oldPath`, or a descendant
  * of it (`oldPath/...`) — the same rule Obsidian applies to link paths on rename. Returns the same
  * `ref` instance, unchanged, if neither applies (so callers can cheaply detect "did this change"). */
 export function rewriteRefPath(ref: UnitRef, oldPath: string, newPath: string): UnitRef {
-	if (ref.path === oldPath) return { ...ref, path: newPath };
-	if (ref.path.startsWith(`${oldPath}/`)) return { ...ref, path: `${newPath}${ref.path.slice(oldPath.length)}` };
-	return ref;
+	const rewritten = rewritePathString(ref.path, oldPath, newPath);
+	return rewritten === ref.path ? ref : { ...ref, path: rewritten };
+}
+
+/** PR-4 (R8): rewrites the path embedded in a `unitRefKey` string (`'file:Proj/a.md'`,
+ * `'folder:Proj'`, `'block:Proj/a.md#^abc'`) using the same rename-integrity rule as
+ * `rewritePathString`. `FolderSourceConfig.removedRefs` stores these keys rather than `UnitRef`s
+ * (it only needs to test membership), but still needs to stay in sync on rename like every other
+ * ref in the view — otherwise a removed row's key stops matching the renamed path and the row comes
+ * back on the next refresh. Returns the same string instance, unchanged, if the embedded path
+ * doesn't match `oldPath`. */
+export function rewriteRefKeyPath(key: string, oldPath: string, newPath: string): string {
+	const colon = key.indexOf(":");
+	if (colon < 0) return key;
+	const kind = key.slice(0, colon);
+	const rest = key.slice(colon + 1);
+	if (kind === "block") {
+		const hash = rest.indexOf("#");
+		if (hash < 0) return key;
+		const path = rest.slice(0, hash);
+		const subpath = rest.slice(hash + 1);
+		const rewritten = rewritePathString(path, oldPath, newPath);
+		return rewritten === path ? key : `block:${rewritten}#${subpath}`;
+	}
+	const rewritten = rewritePathString(rest, oldPath, newPath);
+	return rewritten === rest ? key : `${kind}:${rewritten}`;
 }
 
 /** A unit as classified by the index — the computed shape the explorer (F8) will render. */
@@ -140,6 +174,33 @@ export interface ViewNode extends StatusGovernance {
 	 * (confirmed or cancelled), including a later manual "Refresh now", which always asks again
 	 * regardless of this flag. Meaningless (and always cleared) once `apiSource` itself is absent. */
 	apiAwaitingConfirmation?: boolean;
+	/** PR-4 (G3-G5/G10/G16): an Inside-Vault "Folder" source — unlike `apiSource`, this never produces
+	 * placeholder/API-item rows; it only decides which real `ViewNode` unit children belong under this
+	 * meta node (via `buildFolderSourceChildren`/`reconcileManagedChildren` in `folder-source.ts`), so
+	 * those children go through the exact same place/nest/reorder/status/missing-ref machinery as any
+	 * other unit (G7/G9/G16). Only ever set on a `type: "meta"` node. */
+	folderSource?: FolderSourceConfig;
+	/** PR-4: true only on a `type: "unit"` child this Folder's own reconciliation created/owns, so a
+	 * later refresh can tell its managed rows apart from anything the user separately nested in here by
+	 * hand, without needing new dedup logic (E2 is handled entirely by existing multi-placement
+	 * support). Absent/false means "not mine" — never cleared or removed by reconciliation. */
+	folderSourceManaged?: boolean;
+	/** PR-4 (R1 fix): the id of the meta node whose `folderSource` created this row, set alongside
+	 * `folderSourceManaged` and never cleared by moving/nesting it elsewhere in the view (G7) — this is
+	 * what lets a refresh find a managed row again no matter where the user dragged or nested it,
+	 * instead of only looking at the source's own direct children. */
+	folderSourceOwnerId?: string;
+	/** PR-7 (G17-G19/G21-G23): a CSV-file source — unlike `folderSource`, this produces placeholder/
+	 * API-item rows exactly like `apiSource` (same `apiCache`/`apiItemState`/`apiItemOrder`/
+	 * `apiAwaitingConfirmation` fields below, shared with `apiSource` rather than duplicated), just
+	 * triggered by a file-change/view-load/timer instead of a network fetch. Only ever set on a
+	 * `type: "meta"` node, and never set at the same time as `apiSource` on the same node. */
+	csvSource?: CsvSourceConfig;
+	/** PR-8 (G17-G20/G22-G24): a markdown pipe-table source — same `apiCache`/`apiItemState`/
+	 * `apiItemOrder`/`apiAwaitingConfirmation` fields shared with `apiSource`/`csvSource` above. Only
+	 * ever set on a `type: "meta"` node, and never set at the same time as `apiSource`/`csvSource` on
+	 * the same node. */
+	markdownTableSource?: MarkdownTableSourceConfig;
 }
 
 /** A single request header, e.g. `Authorization: Bearer …`. Never persisted in `data.json` — see
@@ -164,7 +225,17 @@ export interface ApiFieldMapping {
 	extraFields?: Record<string, string>;
 }
 
+/** PR-3 (G1): the data-source modal's type selector. `ApiSourceConfig` is the only shape this PR
+ * actually builds — `folder`/`markdown-table`/`csv` are stub shapes with nothing but the discriminant
+ * itself, existing purely so the union/mechanism is in place for PR-4 through PR-8 to grow into
+ * without altering this PR's code. */
+export type DataSourceType = "api" | "folder" | "markdown-table" | "csv";
+
 export interface ApiSourceConfig {
+	/** PR-3 (G1): optional, not required, so a source persisted before this PR (with no `type` at all)
+	 * still loads as an API source — only the modal's own in-memory state treats "no type selected" as
+	 * meaningfully different from "api". */
+	type?: "api";
 	url: string;
 	/** GET only in this PR (G1) — the type exists so a later PR's JS/other-method work has somewhere to
 	 * grow into, without this PR's own code ever producing or accepting anything else. */
@@ -205,6 +276,98 @@ export interface ApiSourceConfig {
 	command?: string;
 }
 
+/** PR-4 (G3-G5/G10/G16): the Inside-Vault "Folder" source's config. Outside Vault (external
+ * filesystem) is PR-5's job — `location` already carries that discriminant so this PR's code can
+ * stub it out (the modal blocks Save while it's selected) without a later PR having to widen this
+ * shape's own fields. */
+export interface FolderSourceConfig {
+	type?: "folder";
+	/** G4: defaults to "inside". "outside" (PR-5) reconciles children against a device-local absolute
+	 * path instead — see `FolderSourcePathStore`, never this object's own `path` field. */
+	location: "inside" | "outside";
+	/** G5: vault-relative path to the target folder — never absolute. Only meaningful while
+	 * `location` is "inside"; meaningless while "outside" (see `FolderSourcePathStore`). */
+	path: string;
+	/** G4: both default true, independent of each other. */
+	showFiles: boolean;
+	showFolders: boolean;
+	/** G10: reuses the exact same refresh-toggle fields/semantics as `ApiSourceConfig` — no new
+	 * refresh UI or scheduler for Folder sources. */
+	refreshOnViewLoad: boolean;
+	refreshEveryMinutesEnabled?: boolean;
+	refreshEveryMinutes?: number;
+	/** PR-4 (R1 fix): `unitRefKey`-keyed refs the user has explicitly removed from this source's
+	 * managed set (via "Remove from view", the Delete key, or dragging to the inbox) — reconcile never
+	 * recreates one of these, the same way any other removed ref stays gone rather than being
+	 * resurrected on the next refresh. */
+	removedRefs?: string[];
+	/** PR-6 (G12-G14): reuses `ApiSourceConfig.mode`'s exact three values to govern how a managed
+	 * child's row reconciles when the underlying vault file is deleted — "merge" demotes it to a
+	 * not-found placeholder (Remove available), "append" keeps the row with its attachment/link
+	 * cleared, "overwrite" removes it immediately with no placeholder. Defaults to "merge" when absent
+	 * (sanitized in `sanitizeFolderSource`), matching `ApiSourceConfig`'s own default. */
+	mode?: "append" | "merge" | "overwrite";
+}
+
+/** PR-8 (G17-G20/G22-G24): a markdown pipe-table inside a vault `.md` file, parsed from scratch
+ * (`markdown-table-mapping.ts`) and fed through the exact same `mapResponseRows`/`runJsMapping` +
+ * `planApiRefresh` pipeline as an API/CSV source, producing the same `PLACEHOLDER_ROW_KIND` rows —
+ * so Remove/Remove-attachment and every other placeholder-row affordance work unmodified. */
+export interface MarkdownTableSourceConfig {
+	type?: "markdown-table";
+	/** G18: vault-relative path to the `.md` file — never absolute. */
+	path: string;
+	/** G20: 0-based index into the file's detected tables, chosen once at setup time (prompted only
+	 * when the file has more than one table) and never re-validated afterwards. G24/F9: deliberately
+	 * NOT re-checked against the file's current tables on every refresh — if a later edit changes
+	 * which table sits at this index (or removes it), the source just keeps reading whatever (if
+	 * anything) is now there, with no drift detection, warning, or re-prompt. */
+	tableIndex: number;
+	mapping: ApiFieldMapping;
+	mode: "append" | "merge" | "overwrite";
+	/** Refreshes automatically whenever the file at `path` is modified, in addition to reusing the
+	 * same view-load/every-N-minutes triggers as an API/CSV source — no new refresh UI. */
+	refreshOnViewLoad: boolean;
+	refreshEveryMinutesEnabled?: boolean;
+	refreshEveryMinutes?: number;
+	keepOnEmpty?: boolean;
+	confirmBeforeDelete?: boolean;
+	mappingMode?: "drag" | "js";
+	jsSource?: string;
+}
+
+/** PR-7 (G17-G19/G22-G23): a CSV file inside the vault, parsed from scratch (`csv-parsing.ts`) and
+ * fed through the exact same `mapSampleRows`/`runJsMapping` + `planApiRefresh` pipeline as an API
+ * source, producing the same `PLACEHOLDER_ROW_KIND` rows — so Remove/Remove-attachment and every
+ * other placeholder-row affordance work unmodified. Deliberately has no `action`/`clickAction`/
+ * `command` field: `handleApiItemClick`'s existing `apiSource?.action ?? apiSource?.clickAction ??
+ * "open-attachment"` fallback already resolves to "open-attachment" when `apiSource` is absent, which
+ * is the only sensible default for a CSV row anyway. The first row is always treated as headers
+ * (G19) — no toggle. */
+export interface CsvSourceConfig {
+	type?: "csv";
+	/** G18: vault-relative path to the `.csv` file — never absolute (unlike Outside-Vault Folder
+	 * sources, a CSV source has no device-local-path variant, so this is safe to persist in synced
+	 * `data.json` as a plain string). */
+	path: string;
+	mapping: ApiFieldMapping;
+	mode: "append" | "merge" | "overwrite";
+	/** G21: refreshes automatically whenever the file at `path` is modified, in addition to reusing
+	 * the same view-load/every-N-minutes triggers as an API source. */
+	refreshOnViewLoad: boolean;
+	refreshEveryMinutesEnabled?: boolean;
+	refreshEveryMinutes?: number;
+	keepOnEmpty?: boolean;
+	confirmBeforeDelete?: boolean;
+	mappingMode?: "drag" | "js";
+	jsSource?: string;
+}
+
+/** PR-3 (G1): the sibling-shapes union `ApiSourceConfig`'s new `type` field exists to support —
+ * `ViewNode.apiSource`/`ViewNode.folderSource`/`ViewNode.csvSource` stay their own concretely-typed
+ * fields rather than this union, which is exercised today only inside `ApiSourceModal`. */
+export type DataSourceConfig = ApiSourceConfig | FolderSourceConfig | MarkdownTableSourceConfig | CsvSourceConfig;
+
 /** A row exactly as mapped from a response — this is all the cache ever holds, never the raw
  * response (G13, E9). */
 export interface ApiMappedRow {
@@ -232,11 +395,21 @@ export interface ApiCache {
 	lastSuccessAt?: number;
 }
 
+/** G29: the one general placeholder-row kind tag every placeholder row carries — shared by
+ * API-sourced rows today and (future) Table-sourced rows, so menu-enablement (Remove,
+ * Remove attachment) gates on this tag plus `notFound`/`noteRef` instead of on an API-specific
+ * check that wouldn't extend to Table rows. There is only one value because there is only one
+ * general kind — API and Table rows are never distinguished by it. */
+export const PLACEHOLDER_ROW_KIND = "placeholder" as const;
+export type PlaceholderRowKind = typeof PLACEHOLDER_ROW_KIND;
+
 /** One API row's durable, per-id state (G6c: status and note never change on refresh; label and
  * secondary text always follow the API). */
 export interface ApiItemState {
 	id: string;
 	label: string;
+	/** G29: always `PLACEHOLDER_ROW_KIND` — see its doc comment. */
+	kind: PlaceholderRowKind;
 	secondary?: string;
 	explicitStatusId?: string;
 	noteRef?: UnitRef;
@@ -247,6 +420,17 @@ export interface ApiItemState {
 	 * gone. So while `notFound` is true, this is the last time the row was truly seen, which is what
 	 * "not found, last seen <date>" reports. */
 	lastSeenAt?: string;
+	/** PR-6 (R2 fix): set only on an entry `reconcileFolderSourceChildDelete` itself produced by
+	 * demoting a deleted Folder-source-managed child — never on a genuine API/Table-sourced row.
+	 * `sweepFolderSourceDeletedPlaceholders` gates on this before touching anything, so a node that
+	 * still carries live, unrelated API-sourced rows alongside its `folderSource` never has those
+	 * mistaken for its own demoted children. */
+	folderSourceDeleted?: true;
+	/** PR-6 (R3 fix): the index this row's real `ViewNode` occupied among its parent's children at
+	 * the moment it was demoted — carried through every later sweep unchanged. `renderNodeList`
+	 * uses it to re-insert the row among the owner's real children at (approximately) its old slot,
+	 * instead of appending it after all of them the way a genuine API/Table row still is. */
+	position?: number;
 }
 
 /** PR 17: extends `StatusGovernance` so the view root itself can be a governor — "Statuses" on the

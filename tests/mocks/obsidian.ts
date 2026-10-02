@@ -19,6 +19,7 @@ declare global {
 		addClass(...cls: string[]): void;
 		removeClass(...cls: string[]): void;
 		toggleClass(cls: string, on: boolean): void;
+		setAttr(name: string, value: string): void;
 	}
 }
 
@@ -57,6 +58,9 @@ proto.removeClass = function (...cls: string[]) {
 };
 proto.toggleClass = function (cls: string, on: boolean) {
 	this.classList.toggle(cls, on);
+};
+proto.setAttr = function (name: string, value: string) {
+	this.setAttribute(name, value);
 };
 
 // --- Vault model --------------------------------------------------------------------------------
@@ -171,9 +175,21 @@ export class Vault {
 		return folder;
 	}
 
-	async modify(file: TFile, _data: string): Promise<void> {
+	async modify(file: TFile, data: string): Promise<void> {
 		this.calls.push("modify");
+		this.contents.set(file.path, data);
 		this.emit("modify", file);
+	}
+
+	async read(file: TFile): Promise<string> {
+		this.calls.push("read");
+		if (!this.contents.has(file.path)) throw new Error(`ENOENT: no such file, read '${file.path}'`);
+		return this.contents.get(file.path)!;
+	}
+
+	async cachedRead(file: TFile): Promise<string> {
+		this.calls.push("cachedRead");
+		return this.read(file);
 	}
 
 	/** Like Obsidian 1.13.7: deleting a folder without `force` throws EISDIR, and the folder stays. */
