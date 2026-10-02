@@ -1,7 +1,7 @@
 import { App } from "obsidian";
 import type { UnitIndex } from "./unit-index";
 import { clampRefreshMinutes } from "./api-refresh-timer";
-import { buildFolderSourceChildren } from "./folder-source";
+import { buildFolderSourceChildren, reconcileFolderSourceChildDelete } from "./folder-source";
 import {
 	ApiClickAction,
 	ApiFieldMapping,
@@ -208,6 +208,8 @@ function sanitizeFolderSource(node: ViewNode): void {
 		// R1 fix: `unitRefKey` strings the user has removed from this source's managed set — any
 		// non-string entry (hand-edited `data.json`) is dropped rather than rejecting the whole list.
 		removedRefs: Array.isArray(rawRemoved) ? rawRemoved.filter((key): key is string => typeof key === "string") : undefined,
+		// PR-6: same three-value `mode` as `ApiSourceConfig`, same "merge" default on anything else.
+		mode: raw.mode === "append" ? "append" : raw.mode === "overwrite" ? "overwrite" : "merge",
 	};
 }
 
@@ -859,7 +861,37 @@ export class ViewsManager {
 			{ sourceNodeId: ownerId, viewRoot: view.root },
 			outsidePath
 		);
+		this.sweepFolderSourceDeletedPlaceholders(found.node);
 		this.save();
+	}
+
+	/** PR-6: the "next reconciliation pass" half of the mode-switch edge cases — re-applies
+	 * `reconcileFolderSourceChildDelete` to every placeholder this Folder source previously demoted a
+	 * deleted child into, using the source's *current* `mode` rather than whatever mode was active at
+	 * the moment each one was created. A Folder source's `apiItemState` entries only ever come from
+	 * that demotion (Folder sources have no other producer of them, unlike `apiSource`), so sweeping
+	 * all of them here is safe and never touches an API source's own stale-item bookkeeping. Switching
+	 * to "overwrite" sweeps every one of them away with no warning (G14, read at reconciliation time);
+	 * switching between "merge"/"append" reshapes them in place. No `deletedRef` survives a prior call,
+	 * so this never re-populates a `noteRef` an earlier append-mode clear already removed. */
+	private sweepFolderSourceDeletedPlaceholders(node: ViewNode): void {
+		if (!node.folderSource || !node.apiItemState) return;
+		const mode = node.folderSource.mode ?? "merge";
+		for (const [id, item] of Object.entries(node.apiItemState)) {
+			const base = {
+				id: item.id,
+				label: item.label,
+				lastSeenAt: item.lastSeenAt ?? new Date().toISOString(),
+				explicitStatusId: item.explicitStatusId,
+			};
+			const reconciled = reconcileFolderSourceChildDelete(mode, base);
+			if (!reconciled) {
+				delete node.apiItemState[id];
+				if (node.apiItemOrder) node.apiItemOrder = node.apiItemOrder.filter((x) => x !== id);
+			} else {
+				node.apiItemState[id] = reconciled;
+			}
+		}
 	}
 
 	/** T1 fix: every ref currently managed by an Inside-Vault Folder source, across every view.
@@ -1030,10 +1062,72 @@ export class ViewsManager {
 	 * elsewhere to a different path, is never mistaken for this file's reference. */
 	onVaultDelete(path: string): void {
 		let changed = false;
+		const nowIso = new Date().toISOString();
+		// PR-6 (G12-G14): demote any Folder-source-managed child at `path` into a placeholder on its
+		// owning Folder node *before* the clear sweep below, so an append-mode placeholder's freshly
+		// attached `noteRef` (deliberately pointed at the just-deleted path so G27's existing clear
+		// mechanism picks it up) is cleared within this same call — genuine reuse of that mechanism,
+		// not a second copy of it.
+		for (const view of this.views) {
+			if (this.reconcileFolderSourceDeletesForPath(view.root, path, nowIso)) changed = true;
+		}
 		for (const view of this.views) {
 			if (this.clearNoteRefsForPath(view.root, path)) changed = true;
 		}
 		if (changed) this.save();
+	}
+
+	/** PR-6 (G12-G14): the delete-time half of the mode-reconciliation rule — finds every real
+	 * `ViewNode` this view's Folder sources manage whose `ref.path` is the just-deleted `path`, lifts
+	 * its own children up one level (same contract as any other removal here), and demotes it per its
+	 * owning source's *current* `mode` via `reconcileFolderSourceChildDelete` (shared with the later
+	 * reconciliation-time sweep in `sweepFolderSourceDeletedPlaceholders`, so this stays the one
+	 * parameterized rule rather than its own ad-hoc branch). An Outside-Vault-owned child is skipped
+	 * outright — its `ref.path` is a bare root-relative name, never a real vault path, and Outside
+	 * deletions are PR-5's own unresolved-path contract, not a vault `delete` event. */
+	private reconcileFolderSourceDeletesForPath(root: ViewNode[], path: string, nowIso: string): boolean {
+		const byId = new Map<string, ViewNode>();
+		const indexIds = (nodes: ViewNode[]): void => {
+			for (const node of nodes) {
+				byId.set(node.id, node);
+				indexIds(node.children);
+			}
+		};
+		indexIds(root);
+
+		type Match = { list: ViewNode[]; index: number; node: ViewNode };
+		const matches: Match[] = [];
+		const collect = (list: ViewNode[]): void => {
+			for (let i = 0; i < list.length; i++) {
+				const node = list[i];
+				if (node.type === "unit" && node.folderSourceManaged && node.ref && node.ref.path === path) {
+					matches.push({ list, index: i, node });
+				}
+				collect(node.children);
+			}
+		};
+		collect(root);
+		if (matches.length === 0) return false;
+
+		// Highest index first within each list, so splicing one match never shifts another's index.
+		matches.sort((a, b) => b.index - a.index);
+		for (const { list, index, node } of matches) {
+			const owner = node.folderSourceOwnerId ? byId.get(node.folderSourceOwnerId) : undefined;
+			if (owner?.folderSource?.location === "outside") continue;
+			const ref = node.ref as UnitRef;
+			const mode = owner?.folderSource?.mode ?? "merge";
+			const label = ref.path.split("/").pop() ?? ref.path;
+			const base = { id: unitRefKey(ref), label, lastSeenAt: nowIso, explicitStatusId: node.explicitStatusId };
+			const placeholder = reconcileFolderSourceChildDelete(mode, base, ref);
+			list.splice(index, 1, ...node.children);
+			if (placeholder && owner) {
+				if (!owner.apiItemState) owner.apiItemState = {};
+				if (!owner.apiItemOrder) owner.apiItemOrder = [];
+				owner.apiItemState[placeholder.id] = placeholder;
+				if (!owner.apiItemOrder.includes(placeholder.id)) owner.apiItemOrder.push(placeholder.id);
+			}
+		}
+		return true;
 	}
 
 	private clearNoteRefsForPath(nodes: ViewNode[], path: string): boolean {
