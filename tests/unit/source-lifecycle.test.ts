@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { App } from "obsidian";
 import { ViewsManager, nodeHasApiRows } from "../../src/views";
-import { ApiSourceConfig } from "../../src/types";
+import { ApiSourceConfig, CsvSourceConfig } from "../../src/types";
 
 /** G4/G7/E6/E7: exercises `ViewsManager`'s source-lifecycle operations — "Remove data source" (G4),
  * "Duplicate Folder" (G7), Folder deletion's itemState cleanup (E6), and E7's promotion carry-over
@@ -12,6 +12,16 @@ function makeSource(overrides: Partial<ApiSourceConfig> = {}): ApiSourceConfig {
 	return {
 		url: "https://api.example.com/items",
 		method: "GET",
+		mapping: { idField: "id", labelField: "name" },
+		mode: "merge",
+		refreshOnViewLoad: false,
+		...overrides,
+	};
+}
+
+function makeCsvSource(overrides: Partial<CsvSourceConfig> = {}): CsvSourceConfig {
+	return {
+		path: "data/items.csv",
 		mapping: { idField: "id", labelField: "name" },
 		mode: "merge",
 		refreshOnViewLoad: false,
@@ -66,6 +76,73 @@ describe("G4 — Remove data source keeps rows as static, drops source+cache, st
 		const unitNode = view.root[0];
 		vm.setApiSource(view.id, unitNode.id, makeSource());
 		expect(vm.getNode(view.id, unitNode.id)!.apiSource).toBeUndefined();
+	});
+});
+
+describe("R1 — setApiSource/setCsvSource are mutually exclusive on the same node", () => {
+	it("setCsvSource clears a live apiSource (and its cache/confirmation flag)", () => {
+		const vm = makeManager();
+		const view = vm.getViews()[0];
+		const folder = vm.addMetaFolder(view.id, null, "Folder")!;
+		vm.setApiSource(view.id, folder.id, makeSource());
+		const node = vm.getNode(view.id, folder.id)!;
+		node.apiCache = { fetchedAt: 1, ok: true, error: null, rows: [], skippedCount: 0, truncated: false };
+		node.apiAwaitingConfirmation = true;
+
+		vm.setCsvSource(view.id, folder.id, makeCsvSource());
+
+		const after = vm.getNode(view.id, folder.id)!;
+		expect(after.csvSource).toEqual(makeCsvSource());
+		expect(after.apiSource).toBeUndefined();
+		expect(after.apiCache).toBeUndefined();
+		expect(after.apiAwaitingConfirmation).toBeUndefined();
+	});
+
+	it("setApiSource clears a live csvSource (and its cache/confirmation flag)", () => {
+		const vm = makeManager();
+		const view = vm.getViews()[0];
+		const folder = vm.addMetaFolder(view.id, null, "Folder")!;
+		vm.setCsvSource(view.id, folder.id, makeCsvSource());
+		const node = vm.getNode(view.id, folder.id)!;
+		node.apiCache = { fetchedAt: 1, ok: true, error: null, rows: [], skippedCount: 0, truncated: false };
+		node.apiAwaitingConfirmation = true;
+
+		vm.setApiSource(view.id, folder.id, makeSource());
+
+		const after = vm.getNode(view.id, folder.id)!;
+		expect(after.apiSource).toEqual(makeSource());
+		expect(after.csvSource).toBeUndefined();
+		expect(after.apiCache).toBeUndefined();
+		expect(after.apiAwaitingConfirmation).toBeUndefined();
+	});
+
+	it("leftover static rows (apiItemState/apiItemOrder) survive switching api->csv, same as a plain removal", () => {
+		const vm = makeManager();
+		const view = vm.getViews()[0];
+		const folder = vm.addMetaFolder(view.id, null, "Folder")!;
+		vm.setApiSource(view.id, folder.id, makeSource());
+		const node = vm.getNode(view.id, folder.id)!;
+		node.apiItemState = { "1": { id: "1", label: "One", explicitStatusId: "done" } };
+		node.apiItemOrder = ["1"];
+
+		vm.setCsvSource(view.id, folder.id, makeCsvSource());
+
+		const after = vm.getNode(view.id, folder.id)!;
+		expect(after.apiItemState).toEqual({ "1": { id: "1", label: "One", explicitStatusId: "done" } });
+		expect(after.apiItemOrder).toEqual(["1"]);
+	});
+
+	it("removing a CSV source untouched by any prior API source does not disturb apiSource (stays undefined, no-op clear)", () => {
+		const vm = makeManager();
+		const view = vm.getViews()[0];
+		const folder = vm.addMetaFolder(view.id, null, "Folder")!;
+		vm.setCsvSource(view.id, folder.id, makeCsvSource());
+
+		vm.setCsvSource(view.id, folder.id, undefined);
+
+		const after = vm.getNode(view.id, folder.id)!;
+		expect(after.csvSource).toBeUndefined();
+		expect(after.apiSource).toBeUndefined();
 	});
 });
 

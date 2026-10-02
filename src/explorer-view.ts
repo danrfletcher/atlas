@@ -433,6 +433,17 @@ export class AtlasExplorerView extends ItemView {
 		this.queueRender();
 	}
 
+	/** PR-7 (G21): called from `main.ts`'s vault `"modify"` listener on every file save — refreshes
+	 * every CSV-sourced node in the active view whose `csvSource.path` matches the modified file.
+	 * Scoped to the active view only, mirroring `refreshApiSourcesOnViewLoad`/`syncRefreshTimers`'s own
+	 * scoping (a Folder in a non-active view has no live timer either). */
+	notifyCsvFileModified(path: string): void {
+		const view = this.plugin.viewsManager.getActiveView();
+		for (const node of this.collectCsvSourceNodes(view.root)) {
+			if (node.csvSource?.path === path) this.refreshCsvSource(view, node, "automatic");
+		}
+	}
+
 	// --- G1/G5/G6/G11: API-backed Folders ---------------------------------------------------------
 
 	/** G5a/PR-4 (G10): refreshes every Folder in the active view that has "refresh when Atlas view
@@ -449,6 +460,9 @@ export class AtlasExplorerView extends ItemView {
 			if (node.folderSource?.refreshOnViewLoad || node.folderSource?.location === "outside") {
 				this.refreshFolderSource(view, node);
 			}
+		}
+		for (const node of this.collectCsvSourceNodes(view.root)) {
+			if (node.csvSource?.refreshOnViewLoad) this.refreshCsvSource(view, node, "automatic");
 		}
 	}
 
@@ -489,6 +503,20 @@ export class AtlasExplorerView extends ItemView {
 		return out;
 	}
 
+	/** PR-7 (G21): same walk as `collectApiSourceNodes`/`collectFolderSourceNodes`, for CSV sources —
+	 * kept as its own function for the same reason the other two are: each is gated/dispatched on its
+	 * own field at every call site anyway. */
+	private collectCsvSourceNodes(nodes: ViewNode[]): ViewNode[] {
+		const out: ViewNode[] = [];
+		for (const node of nodes) {
+			if (node.type === "meta") {
+				if (node.csvSource) out.push(node);
+				out.push(...this.collectCsvSourceNodes(node.children));
+			}
+		}
+		return out;
+	}
+
 	/** G5b/F3/PR-4 (G10): (re)schedules this Atlas view's "Refresh every X minutes" timers against
 	 * the active View's current set of eligible Folders — both API and Folder sources feed the same
 	 * scheduler (`RefreshEveryTimers` is already source-type-agnostic), so no new scheduler is
@@ -515,7 +543,17 @@ export class AtlasExplorerView extends ItemView {
 				// immediate catch-up refresh the same way a never-fetched API source does.
 				lastFetchedAt: null,
 			}));
-		this.refreshEveryTimers.sync([...apiNodes, ...folderNodes], (nodeId) => {
+		// PR-7: a CSV source shares `apiCache` with API sources (same shape, same `fetchedAt`), so its
+		// timer entry is built exactly like `apiNodes` above.
+		const csvNodes = this.collectCsvSourceNodes(view.root)
+			.filter((node) => node.csvSource?.refreshEveryMinutesEnabled)
+			.map((node) => ({
+				id: node.id,
+				enabled: true,
+				minutes: node.csvSource?.refreshEveryMinutes ?? MIN_REFRESH_MINUTES,
+				lastFetchedAt: node.apiCache?.fetchedAt ?? null,
+			}));
+		this.refreshEveryTimers.sync([...apiNodes, ...folderNodes, ...csvNodes], (nodeId) => {
 			const activeView = this.plugin.viewsManager.getActiveView();
 			const apiTarget = this.collectApiSourceNodes(activeView.root).find((n) => n.id === nodeId);
 			if (apiTarget) {
@@ -523,7 +561,12 @@ export class AtlasExplorerView extends ItemView {
 				return;
 			}
 			const folderTarget = this.collectFolderSourceNodes(activeView.root).find((n) => n.id === nodeId);
-			if (folderTarget) this.refreshFolderSource(activeView, folderTarget);
+			if (folderTarget) {
+				this.refreshFolderSource(activeView, folderTarget);
+				return;
+			}
+			const csvTarget = this.collectCsvSourceNodes(activeView.root).find((n) => n.id === nodeId);
+			if (csvTarget) this.refreshCsvSource(activeView, csvTarget, "automatic");
 		});
 	}
 
@@ -561,6 +604,27 @@ export class AtlasExplorerView extends ItemView {
 		this.plugin.viewsManager.refreshFolderSource(view.id, node.id, outsidePath);
 	}
 
+	/** PR-7 (G17-G19/G21-G23): the CSV equivalent of `refreshApiSource` — a vault file read stands in
+	 * for the HTTP fetch, so (unlike `refreshApiSource`) this deliberately has no `Platform.isMobile`
+	 * guard: reading a file already in the vault works offline/on mobile exactly as well as it does on
+	 * desktop, there's no live request to skip. */
+	private refreshCsvSource(view: View, node: ViewNode, trigger: "manual" | "automatic" = "manual"): void {
+		if (!node.csvSource) return;
+		void this.plugin.csvSourceController.refresh(node, node.csvSource, () => this.plugin.viewsManager.notifyExternalMutation(), {
+			vault: this.plugin.app.vault,
+			trigger,
+			confirmDelete: (count) =>
+				new Promise((resolve) => {
+					const modal = new ConfirmDeleteRowsModal(this.plugin.app, count, (answer) => {
+						this.openConfirmDeleteModals = this.openConfirmDeleteModals.filter((m) => m !== modal);
+						resolve(answer);
+					});
+					this.openConfirmDeleteModals.push(modal);
+					modal.open();
+				}),
+		});
+	}
+
 	private openApiSourceModal(view: View, node: ViewNode): void {
 		const headers = this.plugin.apiHeadersStore.get(node.id);
 		const outsidePath = this.plugin.folderSourcePathStore.get(node.id);
@@ -581,12 +645,24 @@ export class AtlasExplorerView extends ItemView {
 					this.refreshFolderSource(view, node);
 					return;
 				}
+				if (result.type === "csv") {
+					// R8/G4: switching API->CSV drops the API source (R1's mutual-exclusion fix), so it
+					// must also drop that source's device-local headers (possibly a bearer token) —
+					// otherwise they linger in ApiHeadersStore and silently pre-fill the next time the
+					// user switches back to API, same as "Remove data source" already does for them.
+					const hadApiSource = node.apiSource !== undefined;
+					this.plugin.viewsManager.setCsvSource(view.id, node.id, result.source);
+					if (hadApiSource) this.plugin.apiHeadersStore.delete(node.id);
+					this.refreshCsvSource(view, node, "manual");
+					return;
+				}
 				this.plugin.apiHeadersStore.set(node.id, result.headers);
 				this.plugin.viewsManager.setApiSource(view.id, node.id, result.source);
 				this.refreshApiSource(view, node, "manual");
 			},
 			node.folderSource ?? null,
-			outsidePath
+			outsidePath,
+			node.csvSource ?? null
 		).open();
 	}
 
@@ -1666,9 +1742,11 @@ export class AtlasExplorerView extends ItemView {
 			const iconEl = row.createDiv({ cls: "atlas-icon" });
 			this.renderRowIcon(iconEl, view, node, ancestors, "layers");
 			row.createSpan({ cls: "atlas-row-text", text: node.label ?? "" });
-			if (node.apiSource) {
-				// G11: connection dot — green ok / grey never-refreshed / red last-refresh-failed / amber
-				// (PR-3) waiting on an unanswered automatic delete confirmation.
+			if (node.apiSource || node.csvSource) {
+				// G11/PR-7: connection dot — green ok / grey never-refreshed / red last-refresh-failed /
+				// amber (PR-3) waiting on an unanswered automatic delete confirmation. CSV shares this
+				// exact dot: `CsvSourceController` writes the same `apiCache`/`apiAwaitingConfirmation`
+				// fields an API source does.
 				const dot = row.createSpan({
 					cls: `atlas-api-connection-dot atlas-api-dot-${dotStateFor(node.apiCache, node.apiAwaitingConfirmation)}`,
 				});
@@ -2338,6 +2416,30 @@ export class AtlasExplorerView extends ItemView {
 							`Remove the data source from "${node.label}"? Its current children stay in place as plain units — it just stops refreshing.`,
 							"Remove",
 							() => this.plugin.viewsManager.setFolderSource(view.id, node.id, undefined)
+						).open();
+					})
+			);
+		} else if (node.csvSource) {
+			// PR-7: reuses the exact same menu actions as an API source — "Refresh now" re-reads+parses
+			// the file (no mobile guard, see `refreshCsvSource`'s own doc comment); "Remove data source"
+			// just stops it, same as an API source's own Remove (rows stay in place). CSV has no
+			// device-local headers store to clean up on removal.
+			menu.addItem((item) =>
+				item
+					.setTitle("Refresh now")
+					.setIcon("refresh-cw")
+					.onClick(() => this.refreshCsvSource(view, node, "manual"))
+			);
+			menu.addItem((item) =>
+				item
+					.setTitle("Remove data source")
+					.setIcon("unplug")
+					.onClick(() => {
+						new ConfirmModal(
+							this.plugin.app,
+							`Remove the data source from "${node.label}"? Its current rows stay in place as plain rows — it just stops refreshing.`,
+							"Remove",
+							() => this.plugin.viewsManager.setCsvSource(view.id, node.id, undefined)
 						).open();
 					})
 			);

@@ -88,3 +88,51 @@ describe("PR-3 — explorer-view.ts call sites keep working with the new ApiSour
 		expect(refreshApiSource).toHaveBeenCalledWith(view, node, "manual");
 	});
 });
+
+describe("R8 — switching API->CSV drops the API source's device-local headers, same as Remove data source", () => {
+	it("deletes the ApiHeadersStore entry when a node that had a live apiSource is switched to csv", () => {
+		FakeApiSourceModal.instances.length = 0;
+		const node = meta("m", "Folder");
+		node.apiSource = { url: "https://api.example.com/items", method: "GET", mapping: { idField: "id", labelField: "name" }, mode: "merge", refreshOnViewLoad: false };
+
+		const apiHeadersStore = { get: vi.fn(() => []), set: vi.fn(), delete: vi.fn() };
+		const viewsManager = { setCsvSource: vi.fn() };
+		const folderSourcePathStore = { get: vi.fn(() => ""), set: vi.fn(), delete: vi.fn() };
+		const plugin = { app: {}, apiHeadersStore, viewsManager, folderSourcePathStore };
+		const refreshCsvSource = vi.fn();
+		(AtlasExplorerView.prototype as unknown as { openApiSourceModal: (...a: unknown[]) => void }).openApiSourceModal.call(
+			{ plugin, refreshCsvSource },
+			view,
+			node
+		);
+
+		const modal = FakeApiSourceModal.instances[0];
+		const csvSource = { path: "data/items.csv", mapping: { idField: "id", labelField: "name" }, mode: "merge" as const, refreshOnViewLoad: false };
+		modal.onSave({ type: "csv", source: csvSource });
+
+		expect(viewsManager.setCsvSource).toHaveBeenCalledWith(view.id, node.id, csvSource);
+		expect(apiHeadersStore.delete).toHaveBeenCalledWith(node.id);
+		expect(refreshCsvSource).toHaveBeenCalledWith(view, node, "manual");
+	});
+
+	it("does not touch ApiHeadersStore when switching to csv from a node that never had an apiSource", () => {
+		FakeApiSourceModal.instances.length = 0;
+		const node = meta("m2", "Folder");
+
+		const apiHeadersStore = { get: vi.fn(() => []), set: vi.fn(), delete: vi.fn() };
+		const viewsManager = { setCsvSource: vi.fn() };
+		const folderSourcePathStore = { get: vi.fn(() => ""), set: vi.fn(), delete: vi.fn() };
+		const plugin = { app: {}, apiHeadersStore, viewsManager, folderSourcePathStore };
+		(AtlasExplorerView.prototype as unknown as { openApiSourceModal: (...a: unknown[]) => void }).openApiSourceModal.call(
+			{ plugin, refreshCsvSource: vi.fn() },
+			view,
+			node
+		);
+
+		const modal = FakeApiSourceModal.instances[0];
+		const csvSource = { path: "data/items.csv", mapping: { idField: "id", labelField: "name" }, mode: "merge" as const, refreshOnViewLoad: false };
+		modal.onSave({ type: "csv", source: csvSource });
+
+		expect(apiHeadersStore.delete).not.toHaveBeenCalled();
+	});
+});
