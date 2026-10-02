@@ -1,4 +1,7 @@
 import { describe, expect, it } from "vitest";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import type { App } from "obsidian";
 import { App as MockApp, TFolder, Vault } from "../../tests/mocks/obsidian";
 import { buildFolderSourceChildren, folderToRows, isAncestorOrSelf, reconcileManagedChildren } from "../../src/folder-source";
@@ -220,6 +223,92 @@ describe("buildFolderSourceChildren — G16/E1", () => {
 
 		expect(result).toBe(existing);
 		expect(result).toEqual([managedFolder, managedFile]);
+	});
+});
+
+describe("buildFolderSourceChildren — location 'outside', R1/R2 (PR-5)", () => {
+	it("R1/R2: keeps existing managed rows exactly as-is — same array, preserving explicitStatusId/collapsed/nested children — when the device-local path is unresolved", () => {
+		const nestedChild = unitNode({ kind: "file", path: "inner.md" });
+		const managedFolder = unitNode({ kind: "folder", path: "Sub" }, { folderSourceManaged: true, children: [nestedChild], explicitStatusId: "done" });
+		const managedFile = unitNode({ kind: "file", path: "a.md" }, { folderSourceManaged: true, collapsed: true });
+		const existing = [managedFolder, managedFile];
+
+		// "" simulates both R1 (a local path that's set but the drive is currently unplugged — the
+		// path itself fails to resolve) and R2 (a second device that has never had a local path stored
+		// for this source at all — `folderSourcePathStore.get` returns "").
+		const result = buildFolderSourceChildren(
+			{ getAbstractFileByPath: () => null },
+			source({ location: "outside" }),
+			existing,
+			(ref) => unitNode(ref, { folderSourceManaged: true }),
+			undefined,
+			""
+		);
+
+		expect(result).toBe(existing);
+		expect(result).toEqual([managedFolder, managedFile]);
+	});
+
+	it("R2: a second device with no local path stored for this source never wipes the managed children the first device already synced", () => {
+		const managedFromDeviceA = unitNode({ kind: "file", path: "notes.md" }, { folderSourceManaged: true, explicitStatusId: "doing" });
+		const existing = [managedFromDeviceA];
+
+		const onDeviceB = buildFolderSourceChildren(
+			{ getAbstractFileByPath: () => null },
+			source({ location: "outside" }),
+			existing,
+			(ref) => unitNode(ref, { folderSourceManaged: true }),
+			undefined,
+			"" // device B's folderSourcePathStore has no entry for this node id
+		);
+
+		expect(onDeviceB).toBe(existing);
+		expect(onDeviceB[0]).toBe(managedFromDeviceA);
+		expect(onDeviceB[0].explicitStatusId).toBe("doing");
+	});
+
+	it("R1: recovers automatically once the path resolves again — the same managed node is kept (never recreated), preserving explicit status/collapsed state/nested children", () => {
+		const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "atlas-outside-folder-recover-test-"));
+		try {
+			fs.writeFileSync(path.join(tmpDir, "a.md"), "x");
+
+			const nestedChild = unitNode({ kind: "file", path: "inner.md" });
+			const managedFolder = unitNode(
+				{ kind: "folder", path: "Sub" },
+				{ folderSourceManaged: true, children: [nestedChild], explicitStatusId: "done" }
+			);
+			const managedFile = unitNode({ kind: "file", path: "a.md" }, { folderSourceManaged: true, collapsed: true });
+			const existing = [managedFolder, managedFile];
+
+			// The drive is unplugged: everything is left exactly as-is (R1/R2).
+			const whileUnplugged = buildFolderSourceChildren(
+				{ getAbstractFileByPath: () => null },
+				source({ location: "outside" }),
+				existing,
+				(ref) => unitNode(ref, { folderSourceManaged: true }),
+				undefined,
+				""
+			);
+			expect(whileUnplugged).toBe(existing);
+
+			// The drive reconnects at tmpDir: the previously-managed rows are kept, not rebuilt from scratch.
+			const afterRecovery = buildFolderSourceChildren(
+				{ getAbstractFileByPath: () => null },
+				source({ location: "outside" }),
+				whileUnplugged,
+				(ref) => unitNode(ref, { folderSourceManaged: true }),
+				undefined,
+				tmpDir
+			);
+
+			expect(afterRecovery).toContain(managedFile);
+			expect(managedFile.collapsed).toBe(true);
+			expect(afterRecovery).toContain(managedFolder);
+			expect(managedFolder.explicitStatusId).toBe("done");
+			expect(managedFolder.children).toEqual([nestedChild]);
+		} finally {
+			fs.rmSync(tmpDir, { recursive: true, force: true });
+		}
 	});
 });
 
