@@ -101,9 +101,12 @@ export class ApiSourceModal extends Modal {
 	 * guard/refresh fields verbatim below, since only one type is ever selected at a time. */
 	private csvPath: string;
 	/** PR-8 (G18/G20): Markdown Table's own vault-relative `.md` file path and selected table index —
-	 * otherwise reuses the API mapping/fill-mode/guard/refresh fields verbatim, same as CSV above. */
+	 * otherwise reuses the API mapping/fill-mode/guard/refresh fields verbatim, same as CSV above.
+	 * `mdTableIndex` is `null` whenever the file has more than one table and the user hasn't explicitly
+	 * chosen one yet (R1: never auto-pick table 1 when there's a genuine choice) — `0` both when there's
+	 * no choice to make (zero or one table) and when loading a previously-saved config's stored index. */
 	private mdTablePath: string;
-	private mdTableIndex: number;
+	private mdTableIndex: number | null;
 	/** PR-8 (G20): the tables detected by the last "Load sample" — cached so the index-picker dropdown
 	 * can switch between tables (re-deriving `sampleFields` for the newly chosen one) without needing
 	 * to re-read the file from disk on every selection change. */
@@ -787,26 +790,34 @@ export class ApiSourceModal extends Modal {
 
 		// G20: the index-selection prompt — never shown when the file has zero or exactly one table,
 		// since there's nothing to choose between.
-		if (needsTableIndexPrompt(this.mdTables)) {
+		const needsPrompt = needsTableIndexPrompt(this.mdTables);
+		if (needsPrompt) {
 			new Setting(contentEl)
 				.setName("Table")
 				.setDesc(`This file has ${this.mdTables.length} tables — choose which one to use.`)
 				.addDropdown((dropdown) => {
+					// R1: no option is auto-selected — the placeholder is the only match until the user
+					// picks a real table, so mapping below stays hidden and Save stays blocked until then.
+					dropdown.addOption("", "Choose a table…");
 					for (let i = 0; i < this.mdTables.length; i++) {
 						dropdown.addOption(String(i), `Table ${i + 1} (${this.mdTables[i].headers.join(", ")})`);
 					}
-					dropdown.setValue(String(this.mdTableIndex));
+					dropdown.setValue(this.mdTableIndex === null ? "" : String(this.mdTableIndex));
 					dropdown.onChange((value) => {
-						this.mdTableIndex = Number(value);
+						this.mdTableIndex = value === "" ? null : Number(value);
 						this.applyMarkdownTableSelection();
 						this.render();
 					});
 				});
 		}
 
-		this.renderMappingFieldsUI(contentEl);
-		this.renderFillModeAndGuardsUI(contentEl);
-		this.renderRefreshToggles(contentEl);
+		// R1: mapping only ever renders once there's no real choice to make (0/1 tables) or the user has
+		// explicitly chosen one — never pre-filled from an auto-picked table.
+		if (!needsPrompt || this.mdTableIndex !== null) {
+			this.renderMappingFieldsUI(contentEl);
+			this.renderFillModeAndGuardsUI(contentEl);
+			this.renderRefreshToggles(contentEl);
+		}
 	}
 
 	/** G18: a filterable list of every `.md` file in the vault, vault-relative paths only — mirrors
@@ -862,10 +873,11 @@ export class ApiSourceModal extends Modal {
 	}
 
 	/** PR-8 (G20): mirrors `loadCsvSample`'s role for Markdown Table — reads the selected file and
-	 * detects every table in it (`detectMarkdownTables`), resets the selected index to 0 (G20: never
-	 * auto-pick a table other than the first when there's a genuine choice — the index picker itself,
-	 * rendered only when there's more than one, is how the user then actually chooses), and derives
-	 * `sampleFields` from that table's rows via `applyMarkdownTableSelection`. */
+	 * detects every table in it (`detectMarkdownTables`). R1: when there's more than one table, the
+	 * selected index starts at `null` (no auto-pick) — the index picker, rendered only when there's more
+	 * than one, is how the user then actually chooses; with zero or one table there's no real choice, so
+	 * it defaults to 0. Then derives `sampleFields` from whichever table (if any) is selected via
+	 * `applyMarkdownTableSelection`. */
 	private async loadMarkdownTableSample(): Promise<void> {
 		const file = this.app.vault.getAbstractFileByPath(this.mdTablePath.trim());
 		if (!(file instanceof TFile)) {
@@ -877,7 +889,7 @@ export class ApiSourceModal extends Modal {
 		if (this.mdTables.length === 0) {
 			new Notice("Atlas: no markdown table found in this file.");
 		}
-		this.mdTableIndex = 0;
+		this.mdTableIndex = needsTableIndexPrompt(this.mdTables) ? null : 0;
 		this.applyMarkdownTableSelection();
 		this.render();
 	}
@@ -885,9 +897,9 @@ export class ApiSourceModal extends Modal {
 	/** PR-8: re-derives `sampleFields`/`lastResponse` from whichever table in `mdTables` is currently
 	 * selected by `mdTableIndex` — called both after a fresh "Load sample" and after switching the
 	 * index-picker dropdown, so the mapping UI below always reflects the currently-selected table's
-	 * own rows/headers. */
+	 * own rows/headers. R1: no table selected yet (`mdTableIndex === null`) means no rows/fields either. */
 	private applyMarkdownTableSelection(): void {
-		const table = this.mdTables[this.mdTableIndex];
+		const table = this.mdTableIndex === null ? undefined : this.mdTables[this.mdTableIndex];
 		this.lastResponse = table ? table.rows : [];
 		this.arrayFieldCandidates = [];
 		this.sampleFields = sampleFieldsForArrayField(this.lastResponse, undefined);
@@ -1115,6 +1127,8 @@ export class ApiSourceModal extends Modal {
 			return true;
 		}
 		if (this.selectedType === "markdown-table") {
+			// R1: block Save until an explicit table is chosen whenever there's a real choice to make.
+			if (needsTableIndexPrompt(this.mdTables) && this.mdTableIndex === null) return false;
 			if (this.mappingMode === "js") {
 				if (!this.mdTablePath.trim()) return false;
 				if (!validateJsSource(this.jsSource).ok) return false;
@@ -1285,7 +1299,9 @@ export class ApiSourceModal extends Modal {
 			const source: MarkdownTableSourceConfig = {
 				type: "markdown-table",
 				path: this.mdTablePath.trim(),
-				tableIndex: this.mdTableIndex,
+				// `canSave()` above already guarantees a table is chosen whenever one must be (R1); the
+				// fallback here only satisfies the type checker, never actually taken.
+				tableIndex: this.mdTableIndex ?? 0,
 				mapping: {
 					...this.mapping,
 					extraFields: Object.keys(extraFieldsRecord).length > 0 ? extraFieldsRecord : undefined,
