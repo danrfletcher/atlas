@@ -6,12 +6,31 @@ import { obsidianRequestImpl } from "./api-request-obsidian";
 import { MIN_REFRESH_MINUTES, validateRefreshMinutes } from "./api-refresh-timer";
 import { resolveArgv, validateCommand } from "./command-argv";
 import { ConfirmModal } from "./modals";
-import { ApiClickAction, ApiFieldMapping, ApiHeader, ApiSourceConfig } from "./types";
+import { ApiClickAction, ApiFieldMapping, ApiHeader, ApiSourceConfig, DataSourceType } from "./types";
 
 export interface ApiSourceModalResult {
+	/** PR-3 (G1): the selected source type, so callers can persist which type was configured — always
+	 * "api" today since Save is only reachable once an "api" config is valid (see `canSave`); the field
+	 * exists now so PR-4 onward don't need to change this result shape again. */
+	type: DataSourceType;
 	source: ApiSourceConfig;
 	headers: ApiHeader[];
 }
+
+const SOURCE_TYPE_OPTIONS: { value: DataSourceType; label: string }[] = [
+	{ value: "api", label: "API" },
+	{ value: "folder", label: "Folder" },
+	{ value: "markdown-table", label: "Markdown table" },
+	{ value: "csv", label: "CSV" },
+];
+
+/** PR-3 (G1) fence: Folder/Markdown table/CSV have no config of their own in this PR — shown while
+ * one of those three is selected, in place of any real config section. */
+const STUB_TYPE_LABEL: Record<Exclude<DataSourceType, "api">, string> = {
+	folder: "Folder",
+	"markdown-table": "Markdown table",
+	csv: "CSV",
+};
 
 const MAPPING_TARGETS: { key: "idField" | "labelField" | "secondaryField"; label: string; required: boolean }[] = [
 	{ key: "idField", label: "ID (required)", required: true },
@@ -27,6 +46,9 @@ const MAPPING_TARGETS: { key: "idField" | "labelField" | "secondaryField"; label
  * (G5a "when Atlas view loads", G5b "every X minutes"), and the optional click action (G9b).
  */
 export class ApiSourceModal extends Modal {
+	/** PR-3 (G1): null only for a brand-new, never-saved source — editing an existing (necessarily
+	 * "api", today) source pre-selects "api" immediately in the constructor, never null. */
+	private selectedType: DataSourceType | null;
 	private url: string;
 	private headers: ApiHeader[];
 	private mode: "append" | "merge" | "overwrite";
@@ -65,23 +87,51 @@ export class ApiSourceModal extends Modal {
 
 	constructor(app: App, initial: ApiSourceConfig | null, initialHeaders: ApiHeader[], private onSave: (result: ApiSourceModalResult) => void) {
 		super(app);
-		this.url = initial?.url ?? "";
+		this.selectedType = initial ? "api" : null;
+		this.resetApiFieldsToBlank();
 		this.headers = initialHeaders.map((h) => ({ ...h }));
-		this.mode = initial?.mode ?? "merge";
-		this.refreshOnViewLoad = initial?.refreshOnViewLoad ?? false;
-		this.keepOnEmpty = initial?.keepOnEmpty ?? true;
-		this.confirmBeforeDelete = initial?.confirmBeforeDelete ?? true;
-		this.refreshEveryMinutesEnabled = initial?.refreshEveryMinutesEnabled ?? false;
-		this.refreshEveryMinutesRaw = initial?.refreshEveryMinutes !== undefined ? String(initial.refreshEveryMinutes) : "";
-		this.mapping = initial?.mapping ? { ...initial.mapping } : { idField: "", labelField: "", secondaryField: undefined };
-		this.mappingMode = initial?.mappingMode === "js" ? "js" : "drag";
-		this.jsSource = initial?.jsSource ?? "";
-		this.action = initial?.action ?? initial?.clickAction ?? "open-attachment";
-		this.command = initial?.command ?? "";
-		const rawExtras = initial?.mapping?.extraFields;
-		if (rawExtras && typeof rawExtras === "object") {
-			this.extraFields = Object.entries(rawExtras).map(([name, field]) => ({ name, field }));
+		if (initial) {
+			this.url = initial.url ?? "";
+			this.mode = initial.mode ?? "merge";
+			this.refreshOnViewLoad = initial.refreshOnViewLoad ?? false;
+			this.keepOnEmpty = initial.keepOnEmpty ?? true;
+			this.confirmBeforeDelete = initial.confirmBeforeDelete ?? true;
+			this.refreshEveryMinutesEnabled = initial.refreshEveryMinutesEnabled ?? false;
+			this.refreshEveryMinutesRaw = initial.refreshEveryMinutes !== undefined ? String(initial.refreshEveryMinutes) : "";
+			this.mapping = initial.mapping ? { ...initial.mapping } : this.mapping;
+			this.mappingMode = initial.mappingMode === "js" ? "js" : "drag";
+			this.jsSource = initial.jsSource ?? "";
+			this.action = initial.action ?? initial.clickAction ?? "open-attachment";
+			this.command = initial.command ?? "";
+			const rawExtras = initial.mapping?.extraFields;
+			if (rawExtras && typeof rawExtras === "object") {
+				this.extraFields = Object.entries(rawExtras).map(([name, field]) => ({ name, field }));
+			}
 		}
+	}
+
+	/** PR-3 (G2): the "api" config's blank starting state — shared by the constructor (brand-new
+	 * source) and by the type dropdown's `onChange` (switching into "api" from anything else, or from
+	 * "api" back to "api" after a discard, must never carry over a previous selection's field values). */
+	private resetApiFieldsToBlank(): void {
+		this.url = "";
+		this.headers = [];
+		this.mode = "merge";
+		this.refreshOnViewLoad = false;
+		this.keepOnEmpty = true;
+		this.confirmBeforeDelete = true;
+		this.refreshEveryMinutesEnabled = false;
+		this.refreshEveryMinutesRaw = "";
+		this.mapping = { idField: "", labelField: "", secondaryField: undefined };
+		this.extraFields = [];
+		this.mappingMode = "drag";
+		this.jsSource = "";
+		this.action = "open-attachment";
+		this.command = "";
+		this.sampleFields = [];
+		this.arrayFieldCandidates = [];
+		this.lastResponse = null;
+		this.testResult = null;
 	}
 
 	onOpen(): void {
@@ -113,6 +163,53 @@ export class ApiSourceModal extends Modal {
 		const { contentEl } = this;
 		contentEl.empty();
 		contentEl.createEl("h3", { text: "Data source" });
+
+		new Setting(contentEl)
+			.setName("Source type")
+			.addDropdown((dropdown) => {
+				for (const option of SOURCE_TYPE_OPTIONS) dropdown.addOption(option.value, option.label);
+				// G1: a brand-new source opens with none pre-selected — `setValue("")` matches no option
+				// (there's deliberately no blank 5th option), which is how a plain <select> renders with
+				// nothing shown as selected rather than defaulting to the first option in the list.
+				dropdown.setValue(this.selectedType ?? "");
+				dropdown.onChange((value) => {
+					const next = (value || null) as DataSourceType | null;
+					if (next === this.selectedType) return;
+					this.selectedType = next;
+					// G2: switching the type — into "api", out of "api", or between the two stub types —
+					// always discards whatever config existed for the type being left. Only "api" has any
+					// config to reset in this PR; the stub types have none.
+					if (next === "api") this.resetApiFieldsToBlank();
+					this.render();
+				});
+			});
+
+		if (this.selectedType === "api") {
+			this.renderApiBody();
+		} else if (this.selectedType) {
+			contentEl.createEl("p", {
+				cls: "atlas-source-type-stub",
+				text: `${STUB_TYPE_LABEL[this.selectedType]} sources aren't configurable in this version yet.`,
+			});
+		}
+
+		const footer = new Setting(contentEl);
+		footer.addButton((btn) => btn.setButtonText("Cancel").onClick(() => this.close()));
+		footer.addButton((btn) => {
+			this.saveButton = btn;
+			btn
+				.setCta()
+				.setButtonText("Save")
+				.setDisabled(!this.canSave())
+				.onClick(() => this.save());
+			return btn;
+		});
+	}
+
+	/** PR-3 (G1): the modal body for the "api" source type — unchanged from before this PR beyond
+	 * being behind the type dropdown instead of always rendering. */
+	private renderApiBody(): void {
+		const { contentEl } = this;
 
 		new Setting(contentEl)
 			.setName("URL")
@@ -447,18 +544,6 @@ export class ApiSourceModal extends Modal {
 			commandErrorEl = contentEl.createEl("p", { cls: "atlas-api-field-error" });
 			updateCommandValidity();
 		}
-
-		const footer = new Setting(contentEl);
-		footer.addButton((btn) => btn.setButtonText("Cancel").onClick(() => this.close()));
-		footer.addButton((btn) => {
-			this.saveButton = btn;
-			btn
-				.setCta()
-				.setButtonText("Save")
-				.setDisabled(!this.canSave())
-				.onClick(() => this.save());
-			return btn;
-		});
 	}
 
 	private buildExtraFieldsRecord(): Record<string, string> {
@@ -472,6 +557,9 @@ export class ApiSourceModal extends Modal {
 	}
 
 	private canSave(): boolean {
+		// G1/edge case: Save is blocked until a type is selected; Folder/Table/CSV have no config of
+		// their own to validate in this PR, so there's nothing for them to ever become savable against.
+		if (this.selectedType !== "api") return false;
 		if (this.mappingMode === "js") {
 			if (!this.url.trim()) return false;
 			if (!validateJsSource(this.jsSource).ok) return false;
@@ -576,9 +664,11 @@ export class ApiSourceModal extends Modal {
 
 	private save(): void {
 		if (!this.canSave()) return;
+		// canSave() above guarantees selectedType === "api" by this point.
 		const refreshEveryMinutesValidation = this.refreshEveryMinutesEnabled ? validateRefreshMinutes(this.refreshEveryMinutesRaw) : null;
 		const extraFieldsRecord = this.buildExtraFieldsRecord();
 		const source: ApiSourceConfig = {
+			type: "api",
 			url: this.url.trim(),
 			method: "GET",
 			mapping: {
@@ -598,6 +688,6 @@ export class ApiSourceModal extends Modal {
 			command: this.action === "run-command" ? this.command.trim() : undefined,
 		};
 		this.close();
-		this.onSave({ source, headers: this.headers.filter((h) => h.key.trim().length > 0) });
+		this.onSave({ type: "api", source, headers: this.headers.filter((h) => h.key.trim().length > 0) });
 	}
 }

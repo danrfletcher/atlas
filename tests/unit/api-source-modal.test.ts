@@ -110,8 +110,11 @@ vi.mock("obsidian", () => {
 
 	class FakeDropdownComponent {
 		value = "";
+		/** PR-3: options recorded in add order, so a test can assert exactly which/how many were added. */
+		options: { value: string; label: string }[] = [];
 		private changeCb?: (v: string) => void;
-		addOption() {
+		addOption(value: string, label: string) {
+			this.options.push({ value, label });
 			return this;
 		}
 		setValue(v: string) {
@@ -335,6 +338,7 @@ describe("T1/T3/T5/T7 — ApiSourceModal's Save button after an empty-then-valid
 
 		expect(onSave).toHaveBeenCalledTimes(1);
 		expect(onSave).toHaveBeenCalledWith({
+			type: "api",
 			source: expect.objectContaining({
 				mode: "overwrite",
 				refreshOnViewLoad: true,
@@ -385,6 +389,7 @@ describe("T1/T3/T5/T7 — ApiSourceModal's Save button after an empty-then-valid
 		// Save and verify payload
 		(modal as any).saveButton.simulateClick();
 		expect(onSave).toHaveBeenCalledWith({
+			type: "api",
 			source: expect.objectContaining({
 				action: "run-command",
 				clickAction: "run-command",
@@ -492,5 +497,96 @@ describe("PR-6.C fix — scroll position resets on the drop-triggered re-render"
 		// Regression: the drop itself still creates a new extra field mapped to the dropped field.
 		expect((modal as any).extraFields).toHaveLength(1);
 		expect((modal as any).extraFields[0].field).toBe("extra");
+	});
+});
+
+describe("PR-3 — source type dropdown and modal-body switching", () => {
+	it("dropdown renders 4 options, none pre-selected on open", () => {
+		const modal = new ApiSourceModal({} as any, null, [], vi.fn());
+		(modal as any).onOpen();
+
+		const dropdown = settingNamed(modal, "Source type").components[0];
+		expect(dropdown.options).toEqual([
+			{ value: "api", label: "API" },
+			{ value: "folder", label: "Folder" },
+			{ value: "markdown-table", label: "Markdown table" },
+			{ value: "csv", label: "CSV" },
+		]);
+		expect(dropdown.value).toBe("");
+	});
+
+	it("modal body stays empty until a type is selected", () => {
+		const modal = new ApiSourceModal({} as any, null, [], vi.fn());
+		(modal as any).onOpen();
+
+		expect(settingNamed(modal, "URL")).toBeUndefined();
+		expect(settingNamed(modal, "Fill mode")).toBeUndefined();
+		expect((modal as any).saveButton.disabled).toBe(true);
+	});
+
+	it("type-switch discards old config, defaults unselected", () => {
+		const onSave = vi.fn();
+		const modal = new ApiSourceModal({} as any, validConfig(), [], onSave);
+		(modal as any).onOpen();
+
+		settingNamed(modal, "URL").components[0].type("https://changed.example.com/items");
+		expect(settingNamed(modal, "URL").components[0].value).toBe("https://changed.example.com/items");
+
+		// Switching away from "api" removes the API config section entirely — a stub type has no
+		// fields of its own to carry anything over into.
+		settingNamed(modal, "Source type").components[0].select("folder");
+		expect(settingNamed(modal, "URL")).toBeUndefined();
+
+		// Switching back into "api" starts from a blank config, not the earlier edited value — no
+		// stale fields leak across the switch.
+		settingNamed(modal, "Source type").components[0].select("api");
+		expect(settingNamed(modal, "URL").components[0].value).toBe("");
+	});
+
+	it("selecting API renders existing API config form with unchanged fields", () => {
+		const onSave = vi.fn();
+		const modal = new ApiSourceModal({} as any, null, [], onSave);
+		(modal as any).onOpen();
+
+		settingNamed(modal, "Source type").components[0].select("api");
+
+		// The pre-existing API config form renders unchanged: URL, the disabled "GET" Method field,
+		// and the same Fill mode options/default as before this PR.
+		expect(settingNamed(modal, "URL")).toBeTruthy();
+		const methodField = settingNamed(modal, "Method").components[0];
+		expect(methodField.value).toBe("GET");
+		expect(methodField.disabled).toBe(true);
+		const fillModeDropdown = settingNamed(modal, "Fill mode").components[0];
+		expect(fillModeDropdown.options.map((o: { value: string }) => o.value)).toEqual(["merge", "append", "overwrite"]);
+		expect(fillModeDropdown.value).toBe("merge");
+
+		// Filling in and saving a valid API config still works exactly as before the switch to
+		// type-based rendering.
+		settingNamed(modal, "URL").components[0].type("https://api.example.com/items");
+		(modal as any).mapping = { idField: "id", labelField: "name" };
+		(modal as any).updateSaveButton();
+		expect((modal as any).saveButton.disabled).toBe(false);
+
+		(modal as any).saveButton.simulateClick();
+		expect(onSave).toHaveBeenCalledWith({
+			type: "api",
+			source: expect.objectContaining({ url: "https://api.example.com/items", method: "GET" }),
+			headers: [],
+		});
+	});
+
+	it("Save disabled/blocked when no type selected", () => {
+		const onSave = vi.fn();
+		const modal = new ApiSourceModal({} as any, null, [], onSave);
+		(modal as any).onOpen();
+
+		expect((modal as any).saveButton.disabled).toBe(true);
+		(modal as any).saveButton.simulateClick();
+		expect(onSave).not.toHaveBeenCalled();
+
+		// Still blocked after selecting a stub type — Folder/Table/CSV have no config of their own to
+		// ever become savable against in this PR.
+		settingNamed(modal, "Source type").components[0].select("folder");
+		expect((modal as any).saveButton.disabled).toBe(true);
 	});
 });
