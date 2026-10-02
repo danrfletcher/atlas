@@ -271,10 +271,11 @@ export interface ApiSourceConfig {
  * shape's own fields. */
 export interface FolderSourceConfig {
 	type?: "folder";
-	/** G4: defaults to "inside". "outside" is accepted/persisted but not yet acted on (PR-5). */
+	/** G4: defaults to "inside". "outside" (PR-5) reconciles children against a device-local absolute
+	 * path instead — see `FolderSourcePathStore`, never this object's own `path` field. */
 	location: "inside" | "outside";
 	/** G5: vault-relative path to the target folder — never absolute. Only meaningful while
-	 * `location` is "inside". */
+	 * `location` is "inside"; meaningless while "outside" (see `FolderSourcePathStore`). */
 	path: string;
 	/** G4: both default true, independent of each other. */
 	showFiles: boolean;
