@@ -1,6 +1,14 @@
 import { App, TAbstractFile, TFile, TFolder } from "obsidian";
 import type { AtlasSettings } from "./settings";
-import { Unit, UnitRef, rewriteRefPath, unitRefsEqual } from "./types";
+import { AddedItem, DismissScope, Unit, UnitRef, rewriteRefPath, unitRefsEqual } from "./types";
+
+/** PR-2: adds or removes `ref` from `list` by `unitRefKey` equality, returning a new array only when
+ * membership actually changes (so callers can skip a no-op persist). */
+function setRefMembership(list: UnitRef[], ref: UnitRef, value: boolean): UnitRef[] {
+	const present = list.some((existing) => unitRefsEqual(existing, ref));
+	if (value === present) return list;
+	return value ? [...list, ref] : list.filter((existing) => !unitRefsEqual(existing, ref));
+}
 
 /**
  * In-memory index of every unit in the vault (F2). Rebuilt fully on load, then kept current by
@@ -17,12 +25,29 @@ export class UnitIndex {
 	private promotedFolders = new Map<string, Unit>();
 	private promotedBlocks = new Map<string, Unit>();
 	private manualPromotions: UnitRef[];
+	/** PR-2: per-view dismiss state — view id -> dismissed refs for that view. A global dismiss is
+	 * never enumerated into these; see `dismissedGlobal`. */
+	private dismissedByView: Map<string, UnitRef[]>;
+	/** PR-2: the single cross-view dismiss set written when dismissing from Global view. */
+	private dismissedGlobal: UnitRef[];
+	/** PR-2: units manually added to the inbox via "+" — distinct from `manualPromotions`. */
+	private addedItems: AddedItem[];
 	private changeListeners = new Set<() => void>();
 	/** Paths whose units are kept out of `getUnits` (a count each, so overlapping holds are safe). */
 	private held = new Map<string, number>();
 
-	constructor(private app: App, private settings: AtlasSettings, manualPromotions: UnitRef[]) {
+	constructor(
+		private app: App,
+		private settings: AtlasSettings,
+		manualPromotions: UnitRef[],
+		dismissedByView: Record<string, UnitRef[]> = {},
+		dismissedGlobal: UnitRef[] = [],
+		addedItems: AddedItem[] = []
+	) {
 		this.manualPromotions = manualPromotions;
+		this.dismissedByView = new Map(Object.entries(dismissedByView));
+		this.dismissedGlobal = dismissedGlobal;
+		this.addedItems = addedItems;
 	}
 
 	onChange(cb: () => void): () => void {
@@ -76,6 +101,55 @@ export class UnitIndex {
 	removeManualPromotion(ref: UnitRef): void {
 		this.manualPromotions = this.manualPromotions.filter((existing) => !unitRefsEqual(existing, ref));
 		this.computePromotions();
+	}
+
+	getDismissedByView(): Record<string, UnitRef[]> {
+		return Object.fromEntries(this.dismissedByView);
+	}
+
+	getDismissedGlobal(): UnitRef[] {
+		return this.dismissedGlobal;
+	}
+
+	getAddedItems(): AddedItem[] {
+		return this.addedItems;
+	}
+
+	/** `"global"` only ever reads the single cross-view set. `"view"` reads that view's own set, but
+	 * also reads true if `ref` was dismissed globally — a global dismiss reads as dismissed from every
+	 * view's perspective without needing an entry in every view's own map. The fallback runs one way
+	 * only: a view-scoped dismiss never makes `isDismissed(ref, "global")` true. */
+	isDismissed(ref: UnitRef, scope: "global"): boolean;
+	isDismissed(ref: UnitRef, scope: "view", viewId: string): boolean;
+	isDismissed(ref: UnitRef, scope: DismissScope, viewId?: string): boolean {
+		if (scope === "global") return this.dismissedGlobal.some((existing) => unitRefsEqual(existing, ref));
+		if (this.dismissedGlobal.some((existing) => unitRefsEqual(existing, ref))) return true;
+		const viewSet = viewId ? this.dismissedByView.get(viewId) : undefined;
+		return !!viewSet && viewSet.some((existing) => unitRefsEqual(existing, ref));
+	}
+
+	setDismissed(ref: UnitRef, scope: "global", value: boolean): void;
+	setDismissed(ref: UnitRef, scope: "view", value: boolean, viewId: string): void;
+	setDismissed(ref: UnitRef, scope: DismissScope, value: boolean, viewId?: string): void {
+		if (scope === "global") {
+			this.dismissedGlobal = setRefMembership(this.dismissedGlobal, ref, value);
+			return;
+		}
+		if (!viewId) return;
+		const next = setRefMembership(this.dismissedByView.get(viewId) ?? [], ref, value);
+		if (next.length === 0) this.dismissedByView.delete(viewId);
+		else this.dismissedByView.set(viewId, next);
+	}
+
+	isAdded(ref: UnitRef): boolean {
+		return this.addedItems.some((item) => unitRefsEqual(item.ref, ref));
+	}
+
+	/** No corresponding "unmark added" — per F1, dismiss is the only removal mechanism for every
+	 * inbox item regardless of how it got there, including one added via "+". */
+	markAdded(ref: UnitRef): void {
+		if (this.isAdded(ref)) return;
+		this.addedItems.push({ ref, tag: "added" });
 	}
 
 	/** Create Module on a root file: a manual promotion of the file becomes one of the new module
@@ -302,22 +376,58 @@ export class UnitIndex {
 		return changed;
 	}
 
-	/** Returns whether any manual promotion's path was rewritten, so callers know to persist. */
+	/** Points every dismissed/added ref at `oldPath` (or under it) to `newPath`, the same way
+	 * `rewriteManualPromotions` does; true if any changed. Independent of `rebuild()`, which only
+	 * recomputes `Unit` classification and never touches this state — must run even on a folder
+	 * rename, where `onVaultRename` takes the full-rebuild branch below. */
+	rewriteDismissedAndAddedPaths(oldPath: string, newPath: string): boolean {
+		let changed = false;
+
+		for (const [viewId, refs] of this.dismissedByView) {
+			const rewritten = refs.map((ref) => rewriteRefPath(ref, oldPath, newPath));
+			if (rewritten.some((ref, i) => ref !== refs[i])) {
+				this.dismissedByView.set(viewId, rewritten);
+				changed = true;
+			}
+		}
+
+		const rewrittenGlobal = this.dismissedGlobal.map((ref) => rewriteRefPath(ref, oldPath, newPath));
+		if (rewrittenGlobal.some((ref, i) => ref !== this.dismissedGlobal[i])) {
+			this.dismissedGlobal = rewrittenGlobal;
+			changed = true;
+		}
+
+		const rewrittenAdded = this.addedItems.map((item) => {
+			const rewritten = rewriteRefPath(item.ref, oldPath, newPath);
+			return rewritten === item.ref ? item : { ...item, ref: rewritten };
+		});
+		if (rewrittenAdded.some((item, i) => item !== this.addedItems[i])) {
+			this.addedItems = rewrittenAdded;
+			changed = true;
+		}
+
+		return changed;
+	}
+
+	/** Returns whether any manual promotion's, dismissed, or added-item path was rewritten, so
+	 * callers know to persist. */
 	onVaultRename(file: TAbstractFile, oldPath: string): boolean {
 		const start = performance.now();
 		const promotionsChanged = this.rewriteManualPromotions(oldPath, file.path);
+		const dismissedChanged = this.rewriteDismissedAndAddedPaths(oldPath, file.path);
+		const changed = promotionsChanged || dismissedChanged;
 
 		if (file instanceof TFolder) {
 			// A folder rename can move every nested unit's path at once — re-derive from scratch
 			// rather than remapping each map entry by hand. Rare event, correctness over the last ms.
 			this.rebuild();
 			this.logIncremental("rename (folder, full rebuild)", start);
-			return promotionsChanged;
+			return changed;
 		}
 		this.onVaultDelete(oldPath);
 		this.onVaultCreate(file);
 		this.logIncremental("rename", start);
-		return promotionsChanged;
+		return changed;
 	}
 
 	private logIncremental(kind: string, start: number): void {
