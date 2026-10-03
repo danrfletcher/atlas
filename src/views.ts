@@ -588,6 +588,22 @@ export class ViewsManager {
 		});
 	}
 
+	/** PR-5 (G8): the complement of `getInboxUnits` — same placed-filter, but returns only units
+	 * dismissed for this scope, so "Show Dismissed" can reveal exactly the rows the plain inbox
+	 * excludes. Shares the same mode semantics as `getInboxUnits` (global reads only the global
+	 * dismiss set; view reads that view's own set OR'd with global), so toggling never reveals a row
+	 * that `getInboxUnits` wouldn't otherwise have hidden for the same `(viewId, mode)`. */
+	getDismissedInboxUnits(allUnits: Unit[], viewId: string, mode: "view" | "global", unitIndex: UnitIndex): Unit[] {
+		const placed =
+			mode === "global"
+				? allUnits.filter((u) => !this.isPlacedAnywhere(unitToRef(u)))
+				: allUnits.filter((u) => !this.isPlaced(viewId, unitToRef(u)));
+		return placed.filter((u) => {
+			const ref = unitToRef(u);
+			return mode === "global" ? unitIndex.isDismissed(ref, "global") : unitIndex.isDismissed(ref, "view", viewId);
+		});
+	}
+
 	setNodeCollapsed(viewId: string, nodeId: string, collapsed: boolean): void {
 		const view = this.getView(viewId);
 		const found = view && this.findNode(view.root, nodeId);

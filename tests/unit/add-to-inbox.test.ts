@@ -428,9 +428,16 @@ function fakeSectionThis(app: App): FakeSectionThis {
 function callRenderInboxSection(fake: FakeSectionThis, container: HTMLElement, view: View): Promise<void> {
 	return (
 		AtlasExplorerView.prototype as unknown as {
-			renderInboxSection: (this: FakeSectionThis, container: HTMLElement, view: View, units: Unit[], viewportScrollTop: number) => Promise<void>;
+			renderInboxSection: (
+				this: FakeSectionThis,
+				container: HTMLElement,
+				view: View,
+				units: Unit[],
+				dismissedUnits: Unit[],
+				viewportScrollTop: number
+			) => Promise<void>;
 		}
-	).renderInboxSection.call(fake, container, view, [], 0);
+	).renderInboxSection.call(fake, container, view, [], [], 0);
 }
 
 describe("renderInboxSection header (G1, R4a, R4b)", () => {
