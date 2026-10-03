@@ -5,7 +5,7 @@ import { DEFAULT_SETTINGS } from "../../src/settings";
 import type { AtlasSettings } from "../../src/settings";
 import { UnitIndex } from "../../src/unit-index";
 import { seedRoot } from "../helpers";
-import type { UnitRef } from "../../src/types";
+import type { AddedItem, UnitRef } from "../../src/types";
 
 /** Wires `getFileCache`/`getFirstLinkpathDest` so `computePromotions()`'s link-scanning loop sees
  * exactly the caches and resolved destinations given here, independent of path-resolution rules. */
@@ -28,11 +28,12 @@ function makeIndex(
 	resolve: Record<string, string>,
 	manualPromotions: UnitRef[] = [],
 	settingsOverride: Partial<AtlasSettings> = {},
+	addedItems: AddedItem[] = [],
 ): { app: App; index: UnitIndex } {
 	const app = new App();
 	seedRoot(app, files, folders);
 	stubLinks(app, caches, resolve);
-	const index = new UnitIndex(app, { ...DEFAULT_SETTINGS, ...settingsOverride }, manualPromotions);
+	const index = new UnitIndex(app, { ...DEFAULT_SETTINGS, ...settingsOverride }, manualPromotions, {}, [], addedItems);
 	index.rebuild();
 	return { app, index };
 }
@@ -85,6 +86,29 @@ describe("UnitIndex.computePromotions — block/heading references (bug 1, E5/E5
 			{ Other: "ModuleB/Other.md" },
 		);
 		expect(promotedBlockPaths(index)).toEqual(["ModuleB/Other.md#^abc123"]);
+	});
+});
+
+describe("UnitIndex.getUnits() — added-file survives a later block reference to the same file (R1)", () => {
+	it("a file added via \"+\" keeps its added-file row when another note later links a block/heading inside it — dedup is by file-kind ref, not bare path", () => {
+		const { index } = makeIndex(
+			["ModuleA/Source.md", "Areas/Added.md"],
+			["ModuleA", "Areas"],
+			{
+				"ModuleA/Source.md": {
+					links: [{ link: "Added#^abc123", original: "[[Added#^abc123]]" } as never],
+				},
+			},
+			{ Added: "Areas/Added.md" },
+			[],
+			{},
+			[{ ref: { kind: "file", path: "Areas/Added.md" }, tag: "added" }],
+		);
+		// The block reference promotes a block unit (same path, kind "block") — it must not shadow
+		// the file's own added-file row, which would otherwise disappear (R1) and, if the file were
+		// also placed in a view, render greyed as "(missing)" there.
+		const units = index.getUnits().filter((u) => u.path === "Areas/Added.md");
+		expect(units.map((u) => u.type).sort()).toEqual(["added-file", "promoted-block"]);
 	});
 });
 

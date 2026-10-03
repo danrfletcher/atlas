@@ -59,6 +59,8 @@ interface RowInfo {
 	secondary?: string;
 	icon: string;
 	promoted: boolean;
+	/** PR-3 (G3): renders an "added" badge in place of "promoted" — the two are mutually exclusive. */
+	added: boolean;
 	missing: boolean;
 }
 
@@ -90,6 +92,40 @@ export class MetaFolderSuggestModal extends FuzzySuggestModal<MetaTarget> {
 	onChooseItem(target: MetaTarget): void {
 		this.onChoose(target);
 	}
+}
+
+/** PR-3 (G2): the "+" inbox-add modal. Deliberately broader than auto-promotion eligibility — its
+ * list source is every vault file, not the "references outside the module" rule (F3) — narrowed only
+ * by `candidateFilesForAdd`'s already-a-unit-somewhere exclusion. */
+export class AddFileSuggestModal extends FuzzySuggestModal<TFile> {
+	constructor(app: AtlasPlugin["app"], private files: TFile[], private onChoose: (file: TFile) => void) {
+		super(app);
+	}
+	getItems(): TFile[] {
+		return this.files;
+	}
+	getItemText(file: TFile): string {
+		return file.path;
+	}
+	onChooseItem(file: TFile): void {
+		this.onChoose(file);
+	}
+}
+
+/** PR-3 (G2, E4): every vault file minus any file already a unit somewhere (auto-promoted, manually
+ * promoted, already added) or already placed/nested as a node in any view — so picking one from the
+ * modal can never produce a duplicate inbox row. List-level exclusion only: no runtime dedupe is
+ * exercised once a file is chosen. */
+export function candidateFilesForAdd(allFiles: TFile[], units: Unit[], isPlacedAnywhere: (ref: UnitRef) => boolean): TFile[] {
+	// R2: only a *file-kind* ref counts as "the file already present as a unit" (G2) — a promoted-block
+	// unit's `.path` is its containing file's path even though it's kind "block" (per `unitToRef`), so
+	// comparing bare paths wrongly excluded a file whose only unit is a promoted block from this list.
+	const fileRefKeys = new Set(
+		units.filter((unit) => unitToRef(unit).kind === "file").map((unit) => unitRefKey(unitToRef(unit)))
+	);
+	return allFiles.filter(
+		(file) => !fileRefKeys.has(unitRefKey({ kind: "file", path: file.path })) && !isPlacedAnywhere({ kind: "file", path: file.path })
+	);
 }
 
 /** PR 9 (issue 2): replaces inline fold/unfold for modules with a browsable read-only tree of the
@@ -688,11 +724,25 @@ export class AtlasExplorerView extends ItemView {
 		const unit = this.unitsByRefKey.get(unitRefKey(ref));
 		if (unit) {
 			const resolved = await resolveUnit(this.plugin.app, this.plugin.settings, unit, this.plugin.freeBlockTextCache);
-			if (resolved) return { text: resolved.text, secondary: resolved.secondary, icon: resolved.icon, promoted: resolved.promoted, missing: false };
+			if (resolved)
+				return {
+					text: resolved.text,
+					secondary: resolved.secondary,
+					icon: resolved.icon,
+					promoted: resolved.promoted,
+					added: resolved.added,
+					missing: false,
+				};
 		}
 		// F9: refs are never deleted automatically — render greyed as missing rather than crash.
 		const fallbackText = ref.kind === "block" ? ref.subpath : (ref.path.split("/").pop() ?? ref.path);
-		return { text: fallbackText, icon: ref.kind === "folder" ? "folder" : ref.kind === "block" ? "quote" : "file", promoted: false, missing: true };
+		return {
+			text: fallbackText,
+			icon: ref.kind === "folder" ? "folder" : ref.kind === "block" ? "quote" : "file",
+			promoted: false,
+			added: false,
+			missing: true,
+		};
 	}
 
 	// --- top-level render --------------------------------------------------------------------------
@@ -1502,6 +1552,7 @@ export class AtlasExplorerView extends ItemView {
 		this.renderRowIcon(iconEl, view, node, ancestors, info.icon);
 		row.createSpan({ cls: "atlas-row-text", text: info.text });
 		if (info.promoted) row.createSpan({ cls: "atlas-badge", text: "promoted" });
+		if (info.added) row.createSpan({ cls: "atlas-badge", text: "added" });
 		if (info.secondary) row.createSpan({ cls: "atlas-row-secondary", text: info.secondary });
 		if (info.missing) {
 			row.createSpan({ cls: "atlas-row-secondary", text: "(missing)" });
@@ -1553,6 +1604,18 @@ export class AtlasExplorerView extends ItemView {
 				this.plugin.viewsManager.setInboxMode(view.id, mode);
 			});
 		}
+
+		// PR-3 (G1): a sibling of `modeToggle`, not nested inside it — `.atlas-inbox-mode` already
+		// carries its own `margin-left: auto` to push the toggle to the row's right edge, so this only
+		// needs `.atlas-section-header`'s existing flex `gap` to sit beside it without a second
+		// competing auto margin.
+		const addBtn = header.createDiv({ cls: "atlas-inbox-add-btn" });
+		setIcon(addBtn, "plus");
+		setTooltip(addBtn, "Add file to inbox");
+		addBtn.addEventListener("click", (evt) => {
+			evt.stopPropagation();
+			this.openAddFileModal();
+		});
 
 		// PR 11: same fix as the bucket section and the meta-folder chevron — content always renders
 		// into a dedicated wrapper so the collapse is a CSS transition, not a hard snap between
@@ -1615,6 +1678,21 @@ export class AtlasExplorerView extends ItemView {
 		});
 	}
 
+	/** PR-3 (G2, G3): opens the "+" modal over every vault file minus whatever's already a unit or
+	 * placed somewhere, and on selection marks it "added" (terminal state — see `markAdded`) and
+	 * persists immediately, matching the click-driven-action convention `promoteAndPlace` uses. */
+	private openAddFileModal(): void {
+		const units = this.plugin.unitIndex.getUnits();
+		const candidates = candidateFilesForAdd(this.plugin.app.vault.getFiles(), units, (ref) =>
+			this.plugin.viewsManager.isPlacedAnywhere(ref)
+		);
+		new AddFileSuggestModal(this.plugin.app, candidates, (file) => {
+			this.plugin.unitIndex.markAdded({ kind: "file", path: file.path });
+			void this.plugin.flushSave();
+			void this.render();
+		}).open();
+	}
+
 	private renderInboxRow(container: HTMLElement, ref: UnitRef, info: RowInfo): HTMLElement {
 		const row = container.createDiv({ cls: "atlas-row atlas-row-unit" });
 		const key = unitRefKey(ref);
@@ -1626,6 +1704,7 @@ export class AtlasExplorerView extends ItemView {
 		setIcon(iconEl, info.icon);
 		row.createSpan({ cls: "atlas-row-text", text: info.text });
 		if (info.promoted) row.createSpan({ cls: "atlas-badge", text: "promoted" });
+		if (info.added) row.createSpan({ cls: "atlas-badge", text: "added" });
 		if (info.secondary) row.createSpan({ cls: "atlas-row-secondary", text: info.secondary });
 		// PR 9 (issue 2): modules never expand inline anymore, in the inbox or the bucket — the icon
 		// opens the Module Contents modal instead (see `wireModuleRow`).

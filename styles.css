@@ -169,6 +169,17 @@
 	color: var(--text-on-accent);
 }
 
+.atlas-inbox-add-btn {
+	display: flex;
+	flex-shrink: 0;
+	cursor: pointer;
+	color: var(--text-faint);
+}
+
+.atlas-inbox-add-btn:hover {
+	color: var(--text-normal);
+}
+
 .atlas-node-list {
 	min-height: 8px;
 	/* Visible trailing space so there's always somewhere obvious to drop "at bucket root" even

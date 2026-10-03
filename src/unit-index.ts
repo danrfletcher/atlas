@@ -1,6 +1,6 @@
 import { App, TAbstractFile, TFile, TFolder } from "obsidian";
 import type { AtlasSettings } from "./settings";
-import { AddedItem, DismissScope, Unit, UnitRef, rewriteRefPath, unitRefsEqual } from "./types";
+import { AddedItem, DismissScope, Unit, UnitRef, rewriteRefPath, unitRefKey, unitRefsEqual, unitToRef } from "./types";
 
 /** PR-2: adds or removes `ref` from `list` by `unitRefKey` equality, returning a new array only when
  * membership actually changes (so callers can skip a no-op persist). */
@@ -60,13 +60,30 @@ export class UnitIndex {
 	}
 
 	getUnits(): Unit[] {
-		const all = [
+		const addedRefKeys = new Set(this.addedItems.map((item) => unitRefKey(item.ref)));
+		// R3: "added" is a terminal state later promotion passes never rewrite (spec edge case) — a
+		// promoted-file unit for a path that was manually added is dropped here so the "added" badge
+		// keeps surfacing instead of flipping to "promoted" once the file is also auto-/manually
+		// promoted. This covers both auto-promotion and manual promotion, since both land in
+		// `promotedFiles` (see `applyManualPromotions`).
+		const base = [
 			...this.folderUnits.values(),
 			...this.baseFileUnits.values(),
 			...this.promotedFiles.values(),
 			...this.promotedFolders.values(),
 			...this.promotedBlocks.values(),
-		];
+		].filter((unit) => !(unit.type === "promoted-file" && addedRefKeys.has(unitRefKey(unitToRef(unit)))));
+		// R1 (E4): dedup the added-file overlay by *file-kind ref*, not by bare path — a promoted-block
+		// unit's `.path` is its containing file's path (it's still kind "block" per `unitToRef`), so it
+		// must never shadow that same file's own added-file row. Only a unit that is itself a file-kind
+		// ref (root-file, free-block, promoted-file) is "the file already present as a unit" here.
+		const knownFileRefKeys = new Set(
+			base.filter((unit) => unitToRef(unit).kind === "file").map((unit) => unitRefKey(unitToRef(unit)))
+		);
+		const added: Unit[] = this.addedItems
+			.filter((item) => item.ref.kind === "file" && !knownFileRefKeys.has(unitRefKey(item.ref)))
+			.map((item) => ({ type: "added-file", path: item.ref.path }));
+		const all = [...base, ...added];
 		return this.held.size === 0 ? all : all.filter((unit) => !this.held.has(unit.path));
 	}
 
