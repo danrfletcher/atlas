@@ -1,4 +1,4 @@
-import { ApiItemState, ApiMappedRow } from "./types";
+import { ApiItemState, ApiMappedRow, PLACEHOLDER_ROW_KIND } from "./types";
 
 export interface MergeResult {
 	itemState: Record<string, ApiItemState>;
@@ -52,7 +52,7 @@ export function mergeApiItems(
 		// (the day it was noticed gone, not the day it was last confirmed present).
 		nextState[row.id] = prev
 			? { ...prev, label: row.label, secondary: row.secondary, notFound: false, lastSeenAt: options.nowIso }
-			: { id: row.id, label: row.label, secondary: row.secondary, lastSeenAt: options.nowIso };
+			: { id: row.id, label: row.label, kind: PLACEHOLDER_ROW_KIND, secondary: row.secondary, lastSeenAt: options.nowIso };
 		nextOrder.push(row.id);
 	}
 

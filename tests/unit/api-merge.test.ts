@@ -17,7 +17,7 @@ describe("mergeApiItems — G6: Append mode", () => {
 	it("adds new ids on first refresh", () => {
 		const result = mergeApiItems({}, [], [row("1"), row("2")], "append", opts);
 		expect(result.order).toEqual(["1", "2"]);
-		expect(result.itemState["1"]).toEqual({ id: "1", label: "1", secondary: undefined, lastSeenAt: NOW });
+		expect(result.itemState["1"]).toEqual({ id: "1", label: "1", kind: "placeholder", secondary: undefined, lastSeenAt: NOW });
 	});
 
 	it("keeps a vanished item exactly as it was, never marks it not found", () => {

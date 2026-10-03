@@ -110,8 +110,11 @@ vi.mock("obsidian", () => {
 
 	class FakeDropdownComponent {
 		value = "";
+		/** PR-3: options recorded in add order, so a test can assert exactly which/how many were added. */
+		options: { value: string; label: string }[] = [];
 		private changeCb?: (v: string) => void;
-		addOption() {
+		addOption(value: string, label: string) {
+			this.options.push({ value, label });
 			return this;
 		}
 		setValue(v: string) {
@@ -255,6 +258,7 @@ vi.mock("obsidian", () => {
 		Platform: { isMobile: false },
 		Setting: FakeSetting,
 		requestUrl: async () => mockHttpResponse,
+		setTooltip: vi.fn(),
 	};
 });
 
@@ -335,6 +339,7 @@ describe("T1/T3/T5/T7 — ApiSourceModal's Save button after an empty-then-valid
 
 		expect(onSave).toHaveBeenCalledTimes(1);
 		expect(onSave).toHaveBeenCalledWith({
+			type: "api",
 			source: expect.objectContaining({
 				mode: "overwrite",
 				refreshOnViewLoad: true,
@@ -385,6 +390,7 @@ describe("T1/T3/T5/T7 — ApiSourceModal's Save button after an empty-then-valid
 		// Save and verify payload
 		(modal as any).saveButton.simulateClick();
 		expect(onSave).toHaveBeenCalledWith({
+			type: "api",
 			source: expect.objectContaining({
 				action: "run-command",
 				clickAction: "run-command",
@@ -492,5 +498,233 @@ describe("PR-6.C fix — scroll position resets on the drop-triggered re-render"
 		// Regression: the drop itself still creates a new extra field mapped to the dropped field.
 		expect((modal as any).extraFields).toHaveLength(1);
 		expect((modal as any).extraFields[0].field).toBe("extra");
+	});
+});
+
+describe("PR-3 — source type dropdown and modal-body switching", () => {
+	it("dropdown renders 4 options, none pre-selected on open", () => {
+		const modal = new ApiSourceModal({} as any, null, [], vi.fn());
+		(modal as any).onOpen();
+
+		const dropdown = settingNamed(modal, "Source type").components[0];
+		expect(dropdown.options).toEqual([
+			{ value: "api", label: "API" },
+			{ value: "folder", label: "Folder" },
+			{ value: "markdown-table", label: "Markdown table" },
+			{ value: "csv", label: "CSV" },
+		]);
+		expect(dropdown.value).toBe("");
+	});
+
+	it("modal body stays empty until a type is selected", () => {
+		const modal = new ApiSourceModal({} as any, null, [], vi.fn());
+		(modal as any).onOpen();
+
+		expect(settingNamed(modal, "URL")).toBeUndefined();
+		expect(settingNamed(modal, "Fill mode")).toBeUndefined();
+		expect((modal as any).saveButton.disabled).toBe(true);
+	});
+
+	it("type-switch discards old config, defaults unselected", () => {
+		const onSave = vi.fn();
+		const modal = new ApiSourceModal({} as any, validConfig(), [], onSave);
+		(modal as any).onOpen();
+
+		settingNamed(modal, "URL").components[0].type("https://changed.example.com/items");
+		expect(settingNamed(modal, "URL").components[0].value).toBe("https://changed.example.com/items");
+
+		// Switching away from "api" removes the API config section entirely — a stub type has no
+		// fields of its own to carry anything over into.
+		settingNamed(modal, "Source type").components[0].select("folder");
+		expect(settingNamed(modal, "URL")).toBeUndefined();
+
+		// Switching back into "api" starts from a blank config, not the earlier edited value — no
+		// stale fields leak across the switch.
+		settingNamed(modal, "Source type").components[0].select("api");
+		expect(settingNamed(modal, "URL").components[0].value).toBe("");
+	});
+
+	it("selecting API renders existing API config form with unchanged fields", () => {
+		const onSave = vi.fn();
+		const modal = new ApiSourceModal({} as any, null, [], onSave);
+		(modal as any).onOpen();
+
+		settingNamed(modal, "Source type").components[0].select("api");
+
+		// The pre-existing API config form renders unchanged: URL, the disabled "GET" Method field,
+		// and the same Fill mode options/default as before this PR.
+		expect(settingNamed(modal, "URL")).toBeTruthy();
+		const methodField = settingNamed(modal, "Method").components[0];
+		expect(methodField.value).toBe("GET");
+		expect(methodField.disabled).toBe(true);
+		const fillModeDropdown = settingNamed(modal, "Fill mode").components[0];
+		expect(fillModeDropdown.options.map((o: { value: string }) => o.value)).toEqual(["merge", "append", "overwrite"]);
+		expect(fillModeDropdown.value).toBe("merge");
+
+		// Filling in and saving a valid API config still works exactly as before the switch to
+		// type-based rendering.
+		settingNamed(modal, "URL").components[0].type("https://api.example.com/items");
+		(modal as any).mapping = { idField: "id", labelField: "name" };
+		(modal as any).updateSaveButton();
+		expect((modal as any).saveButton.disabled).toBe(false);
+
+		(modal as any).saveButton.simulateClick();
+		expect(onSave).toHaveBeenCalledWith({
+			type: "api",
+			source: expect.objectContaining({ url: "https://api.example.com/items", method: "GET" }),
+			headers: [],
+		});
+	});
+
+	it("Save disabled/blocked when no type selected", () => {
+		const onSave = vi.fn();
+		const modal = new ApiSourceModal({} as any, null, [], onSave);
+		(modal as any).onOpen();
+
+		expect((modal as any).saveButton.disabled).toBe(true);
+		(modal as any).saveButton.simulateClick();
+		expect(onSave).not.toHaveBeenCalled();
+
+		// Still blocked after selecting a stub type — Table/CSV have no config of their own to ever
+		// become savable against in this PR.
+		settingNamed(modal, "Source type").components[0].select("markdown-table");
+		expect((modal as any).saveButton.disabled).toBe(true);
+
+		// Folder (PR-4) has a real config section, but Save stays blocked until a folder path is
+		// chosen — the selector starts empty (GP1/PR-3 contract), not defaulted to anything.
+		settingNamed(modal, "Source type").components[0].select("folder");
+		expect((modal as any).saveButton.disabled).toBe(true);
+	});
+});
+
+describe("R1 — Markdown Table: no auto-pick of the first table when there's a genuine choice", () => {
+	function twoTables() {
+		return [
+			{ headers: ["id", "name"], rows: [{ id: "1", name: "One" }], skippedCount: 0 },
+			{ headers: ["id", "name"], rows: [{ id: "2", name: "Two" }], skippedCount: 0 },
+		];
+	}
+
+	it("a file with more than one table starts with no table selected, hides the mapping UI, and blocks Save until one is explicitly chosen", () => {
+		const onSave = vi.fn();
+		const modal = new ApiSourceModal({} as any, null, [], onSave);
+		(modal as any).onOpen();
+		settingNamed(modal, "Source type").components[0].select("markdown-table");
+
+		// Simulates the state right after "Load sample" detects two tables (R1 fix: index starts unset,
+		// not auto-picked).
+		(modal as any).mdTablePath = "notes/table.md";
+		(modal as any).mdTables = twoTables();
+		(modal as any).mdTableIndex = null;
+		(modal as any).render();
+
+		const tableDropdown = settingNamed(modal, "Table").components[0];
+		expect(tableDropdown.value).toBe("");
+		expect(tableDropdown.options[0]).toEqual({ value: "", label: "Choose a table…" });
+
+		// Mapping stays hidden until a table is picked.
+		expect(settingNamed(modal, "Mapping mode")).toBeUndefined();
+
+		// Save stays blocked even once the mapping fields a user could otherwise reach are filled in
+		// directly, since there's no table chosen for them to belong to.
+		(modal as any).mapping = { idField: "id", labelField: "name" };
+		expect((modal as any).canSave()).toBe(false);
+		expect((modal as any).saveButton.disabled).toBe(true);
+		(modal as any).saveButton.simulateClick();
+		expect(onSave).not.toHaveBeenCalled();
+
+		// Picking a table reveals the mapping UI and unblocks Save once mapped.
+		tableDropdown.select("1");
+		expect((modal as any).mdTableIndex).toBe(1);
+		expect(settingNamed(modal, "Mapping mode")).toBeTruthy();
+		expect((modal as any).saveButton.disabled).toBe(false);
+	});
+
+	it("a file with zero or exactly one table never shows the picker and the mapping UI renders immediately", () => {
+		const modal = new ApiSourceModal({} as any, null, [], vi.fn());
+		(modal as any).onOpen();
+		settingNamed(modal, "Source type").components[0].select("markdown-table");
+
+		(modal as any).mdTables = [twoTables()[0]];
+		(modal as any).mdTableIndex = 0;
+		(modal as any).render();
+
+		expect(settingNamed(modal, "Table")).toBeUndefined();
+		expect(settingNamed(modal, "Mapping mode")).toBeTruthy();
+	});
+});
+
+describe("PR-4 — Folder source config section", () => {
+	it("selecting Folder + Inside vault renders the folder path field and both Show toggles, path starting empty", () => {
+		const modal = new ApiSourceModal({} as any, null, [], vi.fn());
+		(modal as any).onOpen();
+
+		settingNamed(modal, "Source type").components[0].select("folder");
+
+		expect(settingNamed(modal, "Location").components[0].value).toBe("inside");
+		const folderField = settingNamed(modal, "Folder").components[0];
+		expect(folderField.value).toBe("");
+		expect(settingNamed(modal, "Show files").components[0].value).toBe(true);
+		expect(settingNamed(modal, "Show folders").components[0].value).toBe(true);
+		// G10: the same shared refresh toggles as "api", both off by default.
+		expect(settingNamed(modal, "Refresh when Atlas view loads").components[0].value).toBe(false);
+		expect(settingNamed(modal, "Refresh every").components[0].value).toBe(false);
+	});
+
+	it("PR-5: selecting Outside vault shows a raw path field instead of the vault-folder suggester, but keeps the shared Show toggles", () => {
+		const modal = new ApiSourceModal({} as any, null, [], vi.fn());
+		(modal as any).onOpen();
+
+		settingNamed(modal, "Source type").components[0].select("folder");
+		settingNamed(modal, "Location").components[0].select("outside");
+
+		expect(settingNamed(modal, "Folder")).toBeUndefined();
+		expect(settingNamed(modal, "Path")).toBeTruthy();
+		expect(settingNamed(modal, "Show files")).toBeTruthy();
+		expect(settingNamed(modal, "Show folders")).toBeTruthy();
+	});
+
+	it("Save stays disabled until a folder path is entered, then saves a FolderSourceConfig", () => {
+		const onSave = vi.fn();
+		const modal = new ApiSourceModal({} as any, null, [], onSave);
+		(modal as any).onOpen();
+
+		settingNamed(modal, "Source type").components[0].select("folder");
+		expect((modal as any).saveButton.disabled).toBe(true);
+
+		settingNamed(modal, "Folder").components[0].type("Projects/Active");
+		expect((modal as any).saveButton.disabled).toBe(false);
+
+		(modal as any).saveButton.simulateClick();
+		expect(onSave).toHaveBeenCalledWith({
+			type: "folder",
+			source: expect.objectContaining({
+				type: "folder",
+				location: "inside",
+				path: "Projects/Active",
+				showFiles: true,
+				showFolders: true,
+			}),
+			outsidePath: "",
+		});
+	});
+
+	it("an existing FolderSourceConfig pre-selects Folder and restores its fields", () => {
+		const folderSource = {
+			location: "inside" as const,
+			path: "Archive",
+			showFiles: false,
+			showFolders: true,
+			refreshOnViewLoad: true,
+			refreshEveryMinutesEnabled: false,
+		};
+		const modal = new ApiSourceModal({} as any, null, [], vi.fn(), folderSource);
+		(modal as any).onOpen();
+
+		expect(settingNamed(modal, "Source type").components[0].value).toBe("folder");
+		expect(settingNamed(modal, "Folder").components[0].value).toBe("Archive");
+		expect(settingNamed(modal, "Show files").components[0].value).toBe(false);
+		expect(settingNamed(modal, "Show folders").components[0].value).toBe(true);
+		expect(settingNamed(modal, "Refresh when Atlas view loads").components[0].value).toBe(true);
 	});
 });

@@ -15,7 +15,10 @@ import { noticeIfLinksNotUpdated } from "./links-notice";
 import { registerTestHarness } from "./test-harness";
 import { DEFAULT_COLOR_PALETTE, StatusSet, StatusesManager } from "./statuses";
 import { ApiHeadersStore } from "./api-headers-store";
+import { FolderSourcePathStore } from "./folder-source-path-store";
 import { ApiSourceController } from "./api-source-controller";
+import { CsvSourceController } from "./csv-source-controller";
+import { MarkdownTableSourceController } from "./markdown-table-source-controller";
 
 interface AtlasData {
 	settings: AtlasSettings;
@@ -54,8 +57,18 @@ export default class AtlasPlugin extends Plugin {
 	statusesManager: StatusesManager;
 	/** G13: device-local (never-synced) storage for API data-source request headers. */
 	apiHeadersStore: ApiHeadersStore;
+	/** PR-5 (G6/F6): device-local (never-synced) storage for Outside-Vault Folder source absolute
+	 * paths — its own store, separate from `apiHeadersStore`, so the two never interact. */
+	folderSourcePathStore: FolderSourcePathStore;
 	/** G1/G6/G11: the fetch → map → merge → persist pipeline for API-backed Folders. */
 	apiSourceController: ApiSourceController;
+	/** PR-7 (G17-G19/G21-G23): the read → parse → map → merge → persist pipeline for CSV-backed
+	 * Folders — a vault file read stands in for `apiSourceController`'s HTTP fetch. */
+	csvSourceController: CsvSourceController;
+	/** PR-8 (G17-G20/G22-G24): the read → parse → map → merge → persist pipeline for Markdown-Table-
+	 * backed Folders — same shape as `csvSourceController`, with a parsed table's rows standing in for
+	 * CSV's own parsed rows. */
+	markdownTableSourceController: MarkdownTableSourceController;
 	/** Public so the explorer (F8/F11) can reuse it instead of re-reading free-block files on every render. */
 	freeBlockTextCache: FreeBlockTextCache;
 	private linkSuggest: AtlasLinkSuggest;
@@ -82,6 +95,14 @@ export default class AtlasPlugin extends Plugin {
 			data?.activeViewId ?? "",
 			() => this.persistDebounced()
 		);
+		// PR-4 (T1): keeps `UnitIndex` in sync with every Folder source's currently-managed refs, so
+		// those children resolve as real units (G3) instead of the generic missing-ref fallback. Runs
+		// once now for whatever's already in `data.json` from a prior session, then again on every
+		// `ViewsManager` change (refresh, save, rename-rewrite) — not gated on either refresh toggle,
+		// since already-placed managed children need to resolve on load even if neither is on.
+		const syncFolderSourceUnits = () => this.unitIndex.setFolderSourceRefs(this.viewsManager.getFolderSourceManagedRefs());
+		this.viewsManager.onChange(syncFolderSourceUnits);
+		syncFolderSourceUnits();
 		this.statusesManager = new StatusesManager(
 			data?.statusSets ?? [],
 			data?.colorPalette ?? [...DEFAULT_COLOR_PALETTE],
@@ -104,8 +125,11 @@ export default class AtlasPlugin extends Plugin {
 			},
 			openDialog: (options) => openNameDialog(this.app, options),
 		});
-				this.apiHeadersStore = new ApiHeadersStore(this.app);
+		this.apiHeadersStore = new ApiHeadersStore(this.app);
+		this.folderSourcePathStore = new FolderSourcePathStore(this.app);
 		this.apiSourceController = new ApiSourceController();
+		this.csvSourceController = new CsvSourceController();
+		this.markdownTableSourceController = new MarkdownTableSourceController();
 		this.addSettingTab(new AtlasSettingTab(this.app, this));
 
 		this.linkSuggest = new AtlasLinkSuggest(this);
@@ -134,6 +158,9 @@ export default class AtlasPlugin extends Plugin {
 			this.app.vault.on("delete", (file) => {
 				this.unitIndex.onVaultDelete(file.path);
 				this.graduation.handleDelete(file);
+				// G27: clears any placeholder row's noteRef pointing at the deleted file — additive
+				// alongside the two existing calls above, which this leaves untouched.
+				this.viewsManager.onVaultDelete(file.path);
 			})
 		);
 		this.registerEvent(
@@ -145,7 +172,20 @@ export default class AtlasPlugin extends Plugin {
 				this.graduation.handleRename(file, oldPath); // last: only records the file and schedules the move for a later tick
 			})
 		);
-		this.registerEvent(this.app.vault.on("modify", () => this.graduation.handleModify()));
+		this.registerEvent(
+			this.app.vault.on("modify", (file) => {
+				this.graduation.handleModify();
+				// G21: a saved `.csv` file re-triggers every CSV-sourced node pointed at it, same as the
+				// view-load/every-N-minutes triggers already do for API sources. PR-8: a saved `.md` file
+				// does the same for every Markdown-Table-sourced node pointed at it.
+				for (const leaf of this.app.workspace.getLeavesOfType(ATLAS_VIEW_TYPE)) {
+					if (leaf.view instanceof AtlasExplorerView) {
+						leaf.view.notifyCsvFileModified(file.path);
+						leaf.view.notifyMarkdownTableFileModified(file.path);
+					}
+				}
+			})
+		);
 		this.registerEvent(
 			this.app.metadataCache.on("resolved", () => {
 				this.unitIndex.onMetadataResolved();

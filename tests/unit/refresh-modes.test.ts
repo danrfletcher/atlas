@@ -72,7 +72,7 @@ describe("mergeApiItems — G6/G6c/E1: mode × response reconciliation", () => {
 		expect(deleted.itemState).toEqual({});
 
 		const reappeared = mergeApiItems(deleted.itemState, deleted.order, [row("1")], "overwrite", { truncated: false, nowIso: NOW });
-		expect(reappeared.itemState["1"]).toEqual({ id: "1", label: "Row 1", secondary: undefined, lastSeenAt: NOW });
+		expect(reappeared.itemState["1"]).toEqual({ id: "1", label: "Row 1", kind: "placeholder", secondary: undefined, lastSeenAt: NOW });
 		expect(reappeared.itemState["1"].explicitStatusId).toBeUndefined();
 	});
 

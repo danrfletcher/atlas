@@ -1,7 +1,15 @@
 import { App, FuzzySuggestModal, ItemView, MarkdownView, Menu, Modal, Notice, Platform, TFile, TFolder, WorkspaceLeaf, setIcon, setTooltip } from "obsidian";
 import type AtlasPlugin from "./main";
-import { ApiItemState, StatusGovernance, TruncatedStatusConfig, Unit, UnitRef, View, ViewNode, unitRefKey, unitToRef } from "./types";
-import { ApiSourceIdPair, MetaTarget, collectApiSourceNodeIdPairs, flattenMetaFolders, nodeHasApiRows } from "./views";
+import { ApiItemState, PLACEHOLDER_ROW_KIND, StatusGovernance, TruncatedStatusConfig, Unit, UnitRef, View, ViewNode, unitRefKey, unitToRef } from "./types";
+import {
+	ApiSourceIdPair,
+	MetaTarget,
+	collectApiSourceNodeIdPairs,
+	collectOutsideFolderSourceNodeIdPairs,
+	flattenMetaFolders,
+	nodeHasApiRows,
+} from "./views";
+import { resolveOutsidePath } from "./folder-source-outside";
 import { resolveUnit } from "./unit-display";
 import { TextPromptModal, ConfirmModal, ConfirmDeleteRowsModal, StatusesModal } from "./modals";
 import { StatusDefinition, pluralizeStatusLabel } from "./statuses";
@@ -405,6 +413,9 @@ export class AtlasExplorerView extends ItemView {
 		);
 		if (this.viewLoadTrigger.activate()) this.refreshApiSourcesOnViewLoad();
 		this.registerEvent(this.plugin.app.workspace.on("file-open", () => this.updateActiveHighlight()));
+		// G11/F10: Outside-Vault connection/children recheck on focus-regain — fires only from this
+		// real browser event, never a self-scheduling timer/interval/poll (F10's own fence).
+		this.registerDomEvent(window, "focus", () => this.refreshOutsideFolderSourcesOnFocus());
 		// Review follow-up (retroactive PR 9 finding): `dragPayload` was only ever cleared by a
 		// specific row's own `drop` handler or a Module Contents modal closing — never by a drag
 		// ending abnormally (dropped outside the window, over an uninstrumented area, cancelled via
@@ -463,13 +474,61 @@ export class AtlasExplorerView extends ItemView {
 		this.queueRender();
 	}
 
+	/** PR-7 (G21): called from `main.ts`'s vault `"modify"` listener on every file save — refreshes
+	 * every CSV-sourced node in the active view whose `csvSource.path` matches the modified file.
+	 * Scoped to the active view only, mirroring `refreshApiSourcesOnViewLoad`/`syncRefreshTimers`'s own
+	 * scoping (a Folder in a non-active view has no live timer either). */
+	notifyCsvFileModified(path: string): void {
+		const view = this.plugin.viewsManager.getActiveView();
+		for (const node of this.collectCsvSourceNodes(view.root)) {
+			if (node.csvSource?.path === path) this.refreshCsvSource(view, node, "automatic");
+		}
+	}
+
+	/** PR-8 (G21): same role as `notifyCsvFileModified` above, for Markdown Table sources — called
+	 * from `main.ts`'s vault `"modify"` listener on every file save, reusing the exact same
+	 * refresh-toggle plumbing (no new refresh UI). */
+	notifyMarkdownTableFileModified(path: string): void {
+		const view = this.plugin.viewsManager.getActiveView();
+		for (const node of this.collectMarkdownTableSourceNodes(view.root)) {
+			if (node.markdownTableSource?.path === path) this.refreshMarkdownTableSource(view, node, "automatic");
+		}
+	}
+
 	// --- G1/G5/G6/G11: API-backed Folders ---------------------------------------------------------
 
-	/** G5a: refreshes every Folder in the active view that has "refresh when Atlas view loads" on. */
+	/** G5a/PR-4 (G10): refreshes every Folder in the active view that has "refresh when Atlas view
+	 * loads" on — both API and (Inside-Vault) Folder sources, reusing this same trigger/toggle. */
 	private refreshApiSourcesOnViewLoad(): void {
 		const view = this.plugin.viewsManager.getActiveView();
 		for (const node of this.collectApiSourceNodes(view.root)) {
 			if (node.apiSource?.refreshOnViewLoad) this.refreshApiSource(view, node, "automatic");
+		}
+		for (const node of this.collectFolderSourceNodes(view.root)) {
+			// G11: Outside-Vault's connection/children check on load is mandatory, independent of the
+			// optional "refresh on view load" toggle (G10) — Inside-Vault keeps the toggle-gated
+			// behavior unchanged, exactly as before this PR.
+			if (node.folderSource?.refreshOnViewLoad || node.folderSource?.location === "outside") {
+				this.refreshFolderSource(view, node);
+			}
+		}
+		for (const node of this.collectCsvSourceNodes(view.root)) {
+			if (node.csvSource?.refreshOnViewLoad) this.refreshCsvSource(view, node, "automatic");
+		}
+		for (const node of this.collectMarkdownTableSourceNodes(view.root)) {
+			if (node.markdownTableSource?.refreshOnViewLoad) this.refreshMarkdownTableSource(view, node, "automatic");
+		}
+	}
+
+	/** G11/F10: re-checks every Outside-Vault Folder source in the active view on focus-regain —
+	 * recomputes its children (via `refreshFolderSource`, which looks the current device-local path up
+	 * fresh) so a since-resolved or since-unresolved path's managed children reappear/clear
+	 * automatically; the indicator dot itself needs no separate refresh call since it already
+	 * recomputes `resolveOutsidePath` live on every render. */
+	private refreshOutsideFolderSourcesOnFocus(): void {
+		const view = this.plugin.viewsManager.getActiveView();
+		for (const node of this.collectFolderSourceNodes(view.root)) {
+			if (node.folderSource?.location === "outside") this.refreshFolderSource(view, node);
 		}
 	}
 
@@ -484,12 +543,54 @@ export class AtlasExplorerView extends ItemView {
 		return out;
 	}
 
-	/** G5b/F3: (re)schedules this Atlas view's "Refresh every X minutes" timers against the active
-	 * View's current set of eligible Folders — called after every render, so a saved config change
-	 * (interval edited, toggle flipped, source removed) reschedules cleanly on the very next render
-	 * rather than needing a dedicated call site of its own for each way that can happen. */
+	/** PR-4 (G10): same walk as `collectApiSourceNodes`, for Folder sources — kept as its own
+	 * function rather than merged into one, since the two are gated/dispatched on different fields
+	 * (`apiSource` vs `folderSource`) at every call site anyway. */
+	private collectFolderSourceNodes(nodes: ViewNode[]): ViewNode[] {
+		const out: ViewNode[] = [];
+		for (const node of nodes) {
+			if (node.type === "meta") {
+				if (node.folderSource) out.push(node);
+				out.push(...this.collectFolderSourceNodes(node.children));
+			}
+		}
+		return out;
+	}
+
+	/** PR-7 (G21): same walk as `collectApiSourceNodes`/`collectFolderSourceNodes`, for CSV sources —
+	 * kept as its own function for the same reason the other two are: each is gated/dispatched on its
+	 * own field at every call site anyway. */
+	private collectCsvSourceNodes(nodes: ViewNode[]): ViewNode[] {
+		const out: ViewNode[] = [];
+		for (const node of nodes) {
+			if (node.type === "meta") {
+				if (node.csvSource) out.push(node);
+				out.push(...this.collectCsvSourceNodes(node.children));
+			}
+		}
+		return out;
+	}
+
+	/** PR-8 (G21): same walk as `collectCsvSourceNodes`, for Markdown Table sources. */
+	private collectMarkdownTableSourceNodes(nodes: ViewNode[]): ViewNode[] {
+		const out: ViewNode[] = [];
+		for (const node of nodes) {
+			if (node.type === "meta") {
+				if (node.markdownTableSource) out.push(node);
+				out.push(...this.collectMarkdownTableSourceNodes(node.children));
+			}
+		}
+		return out;
+	}
+
+	/** G5b/F3/PR-4 (G10): (re)schedules this Atlas view's "Refresh every X minutes" timers against
+	 * the active View's current set of eligible Folders — both API and Folder sources feed the same
+	 * scheduler (`RefreshEveryTimers` is already source-type-agnostic), so no new scheduler is
+	 * introduced for Folder sources. Called after every render, so a saved config change (interval
+	 * edited, toggle flipped, source removed) reschedules cleanly on the very next render rather than
+	 * needing a dedicated call site of its own for each way that can happen. */
 	private syncRefreshTimers(view: View): void {
-		const nodes = this.collectApiSourceNodes(view.root)
+		const apiNodes = this.collectApiSourceNodes(view.root)
 			.filter((node) => node.apiSource?.refreshEveryMinutesEnabled)
 			.map((node) => ({
 				id: node.id,
@@ -497,10 +598,56 @@ export class AtlasExplorerView extends ItemView {
 				minutes: node.apiSource?.refreshEveryMinutes ?? MIN_REFRESH_MINUTES,
 				lastFetchedAt: node.apiCache?.fetchedAt ?? null,
 			}));
-		this.refreshEveryTimers.sync(nodes, (nodeId) => {
+		const folderNodes = this.collectFolderSourceNodes(view.root)
+			.filter((node) => node.folderSource?.refreshEveryMinutesEnabled)
+			.map((node) => ({
+				id: node.id,
+				enabled: true,
+				minutes: node.folderSource?.refreshEveryMinutes ?? MIN_REFRESH_MINUTES,
+				// PR-4: a Folder source has no fetch-timestamp cache of its own (its "cache" is just the
+				// real children it manages) — always `null`, so a never-refreshed Folder fires one
+				// immediate catch-up refresh the same way a never-fetched API source does.
+				lastFetchedAt: null,
+			}));
+		// PR-7: a CSV source shares `apiCache` with API sources (same shape, same `fetchedAt`), so its
+		// timer entry is built exactly like `apiNodes` above.
+		const csvNodes = this.collectCsvSourceNodes(view.root)
+			.filter((node) => node.csvSource?.refreshEveryMinutesEnabled)
+			.map((node) => ({
+				id: node.id,
+				enabled: true,
+				minutes: node.csvSource?.refreshEveryMinutes ?? MIN_REFRESH_MINUTES,
+				lastFetchedAt: node.apiCache?.fetchedAt ?? null,
+			}));
+		// PR-8: a Markdown Table source shares `apiCache` with API/CSV sources, so its timer entry is
+		// built exactly like `csvNodes` above.
+		const mdTableNodes = this.collectMarkdownTableSourceNodes(view.root)
+			.filter((node) => node.markdownTableSource?.refreshEveryMinutesEnabled)
+			.map((node) => ({
+				id: node.id,
+				enabled: true,
+				minutes: node.markdownTableSource?.refreshEveryMinutes ?? MIN_REFRESH_MINUTES,
+				lastFetchedAt: node.apiCache?.fetchedAt ?? null,
+			}));
+		this.refreshEveryTimers.sync([...apiNodes, ...folderNodes, ...csvNodes, ...mdTableNodes], (nodeId) => {
 			const activeView = this.plugin.viewsManager.getActiveView();
-			const target = this.collectApiSourceNodes(activeView.root).find((n) => n.id === nodeId);
-			if (target) this.refreshApiSource(activeView, target, "automatic");
+			const apiTarget = this.collectApiSourceNodes(activeView.root).find((n) => n.id === nodeId);
+			if (apiTarget) {
+				this.refreshApiSource(activeView, apiTarget, "automatic");
+				return;
+			}
+			const folderTarget = this.collectFolderSourceNodes(activeView.root).find((n) => n.id === nodeId);
+			if (folderTarget) {
+				this.refreshFolderSource(activeView, folderTarget);
+				return;
+			}
+			const csvTarget = this.collectCsvSourceNodes(activeView.root).find((n) => n.id === nodeId);
+			if (csvTarget) {
+				this.refreshCsvSource(activeView, csvTarget, "automatic");
+				return;
+			}
+			const mdTableTarget = this.collectMarkdownTableSourceNodes(activeView.root).find((n) => n.id === nodeId);
+			if (mdTableTarget) this.refreshMarkdownTableSource(activeView, mdTableTarget, "automatic");
 		});
 	}
 
@@ -526,13 +673,107 @@ export class AtlasExplorerView extends ItemView {
 		});
 	}
 
+	/** PR-4 (G3/G10/F5): resolves and reconciles an Inside-Vault Folder source's children against its
+	 * target folder. Purely a data-layer operation (`ViewsManager.refreshFolderSource` only reads the
+	 * vault, never writes it) — the resulting real unit children render for free through the normal
+	 * tree, with no Folder-source-specific rendering path. */
+	private refreshFolderSource(view: View, node: ViewNode): void {
+		// PR-5: Outside-Vault reconciliation needs the device-local path, which `ViewsManager` itself
+		// never holds (same reason `apiHeadersStore` lookups live here, not in `ViewsManager`, for API
+		// sources) — looked up fresh on every call so a since-changed path is always current.
+		const outsidePath = node.folderSource?.location === "outside" ? this.plugin.folderSourcePathStore.get(node.id) : undefined;
+		this.plugin.viewsManager.refreshFolderSource(view.id, node.id, outsidePath);
+	}
+
+	/** PR-7 (G17-G19/G21-G23): the CSV equivalent of `refreshApiSource` — a vault file read stands in
+	 * for the HTTP fetch, so (unlike `refreshApiSource`) this deliberately has no `Platform.isMobile`
+	 * guard: reading a file already in the vault works offline/on mobile exactly as well as it does on
+	 * desktop, there's no live request to skip. */
+	private refreshCsvSource(view: View, node: ViewNode, trigger: "manual" | "automatic" = "manual"): void {
+		if (!node.csvSource) return;
+		void this.plugin.csvSourceController.refresh(node, node.csvSource, () => this.plugin.viewsManager.notifyExternalMutation(), {
+			vault: this.plugin.app.vault,
+			trigger,
+			confirmDelete: (count) =>
+				new Promise((resolve) => {
+					const modal = new ConfirmDeleteRowsModal(this.plugin.app, count, (answer) => {
+						this.openConfirmDeleteModals = this.openConfirmDeleteModals.filter((m) => m !== modal);
+						resolve(answer);
+					});
+					this.openConfirmDeleteModals.push(modal);
+					modal.open();
+				}),
+		});
+	}
+
+	/** PR-8 (G17-G20/G22-G24): the Markdown Table equivalent of `refreshCsvSource` — same no-mobile-
+	 * guard reasoning (a vault file read, not a live request). */
+	private refreshMarkdownTableSource(view: View, node: ViewNode, trigger: "manual" | "automatic" = "manual"): void {
+		if (!node.markdownTableSource) return;
+		void this.plugin.markdownTableSourceController.refresh(node, node.markdownTableSource, () => this.plugin.viewsManager.notifyExternalMutation(), {
+			vault: this.plugin.app.vault,
+			trigger,
+			confirmDelete: (count) =>
+				new Promise((resolve) => {
+					const modal = new ConfirmDeleteRowsModal(this.plugin.app, count, (answer) => {
+						this.openConfirmDeleteModals = this.openConfirmDeleteModals.filter((m) => m !== modal);
+						resolve(answer);
+					});
+					this.openConfirmDeleteModals.push(modal);
+					modal.open();
+				}),
+		});
+	}
+
 	private openApiSourceModal(view: View, node: ViewNode): void {
 		const headers = this.plugin.apiHeadersStore.get(node.id);
-		new ApiSourceModal(this.plugin.app, node.apiSource ?? null, headers, (result) => {
-			this.plugin.apiHeadersStore.set(node.id, result.headers);
-			this.plugin.viewsManager.setApiSource(view.id, node.id, result.source);
-			this.refreshApiSource(view, node, "manual");
-		}).open();
+		const outsidePath = this.plugin.folderSourcePathStore.get(node.id);
+		new ApiSourceModal(
+			this.plugin.app,
+			node.apiSource ?? null,
+			headers,
+			(result) => {
+				if (result.type === "folder") {
+					this.plugin.viewsManager.setFolderSource(view.id, node.id, result.source);
+					// G6/acceptance: Inside<->Outside toggling (or clearing the field outright) clears
+					// the previously stored path rather than leaving a stale device-local entry behind.
+					if (result.source.location === "outside" && result.outsidePath) {
+						this.plugin.folderSourcePathStore.set(node.id, result.outsidePath);
+					} else {
+						this.plugin.folderSourcePathStore.delete(node.id);
+					}
+					this.refreshFolderSource(view, node);
+					return;
+				}
+				if (result.type === "csv") {
+					// R8/G4: switching API->CSV drops the API source (R1's mutual-exclusion fix), so it
+					// must also drop that source's device-local headers (possibly a bearer token) —
+					// otherwise they linger in ApiHeadersStore and silently pre-fill the next time the
+					// user switches back to API, same as "Remove data source" already does for them.
+					const hadApiSource = node.apiSource !== undefined;
+					this.plugin.viewsManager.setCsvSource(view.id, node.id, result.source);
+					if (hadApiSource) this.plugin.apiHeadersStore.delete(node.id);
+					this.refreshCsvSource(view, node, "manual");
+					return;
+				}
+				if (result.type === "markdown-table") {
+					// PR-8: same device-local-headers cleanup as the CSV branch above, for switching away
+					// from API into Markdown Table.
+					const hadApiSource = node.apiSource !== undefined;
+					this.plugin.viewsManager.setMarkdownTableSource(view.id, node.id, result.source);
+					if (hadApiSource) this.plugin.apiHeadersStore.delete(node.id);
+					this.refreshMarkdownTableSource(view, node, "manual");
+					return;
+				}
+				this.plugin.apiHeadersStore.set(node.id, result.headers);
+				this.plugin.viewsManager.setApiSource(view.id, node.id, result.source);
+				this.refreshApiSource(view, node, "manual");
+			},
+			node.folderSource ?? null,
+			outsidePath,
+			node.csvSource ?? null,
+			node.markdownTableSource ?? null
+		).open();
 	}
 
 	/** R3/G7: `duplicateNode` deep-copies `apiSource` itself, but the device-local headers for it (and
@@ -546,6 +787,14 @@ export class AtlasExplorerView extends ItemView {
 		for (const pair of pairs) {
 			const headers = this.plugin.apiHeadersStore.get(pair.originalId);
 			if (headers.length > 0) this.plugin.apiHeadersStore.set(pair.cloneId, headers);
+		}
+		// PR-5 (G6/F6 mirror of the headers copy above): an Outside-Vault Folder source's device-local
+		// path has the same "lives outside the synced tree" problem `duplicateNode` can't solve on its
+		// own — copied across the same way, scoped to Outside-Vault sourced nodes in the subtree.
+		const outsidePairs = collectOutsideFolderSourceNodeIdPairs(node, clone);
+		for (const pair of outsidePairs) {
+			const path = this.plugin.folderSourcePathStore.get(pair.originalId);
+			if (path) this.plugin.folderSourcePathStore.set(pair.cloneId, path);
 		}
 	}
 
@@ -601,12 +850,17 @@ export class AtlasExplorerView extends ItemView {
 		}
 	}
 
-	/** G9: "Add note / block / module" — the only context-menu action for an API item besides status
-	 * (G10: no drag, nest, reorder, remove, rename, or duplicate, all of which require a real
+	/** G9/G26/G28: "Add note / block / module" plus (G29: gated on the item's shared placeholder tag,
+	 * never an API-specific check) "Remove attachment" whenever `noteRef` is set, and "Remove"
+	 * whenever the row is `notFound` — the only context-menu actions for a placeholder item besides
+	 * status (G10: no drag, nest, reorder, rename, or duplicate, all of which require a real
 	 * `ViewNode`, which items never get). With action = run command, the attachment stays reachable
-	 * from this menu. Status itself is set via the dot click (R5), not this menu. */
+	 * from this menu. Status itself is set via the dot click (R5), not this menu. Remove/Remove
+	 * attachment are additive — "Open attachment"/"Add note"/"Add block"/"Add module" keep their
+	 * existing conditions and ordering. */
 	private showApiItemMenu(evt: MouseEvent, view: View, folderNode: ViewNode, item: ApiItemState): void {
 		const menu = new Menu();
+		const isPlaceholder = item.kind === PLACEHOLDER_ROW_KIND;
 		if (item.noteRef) {
 			menu.addItem((mi) => mi.setTitle("Open attachment").setIcon("file-text").onClick(() => void this.openApiItemAttachment(item)));
 			menu.addSeparator();
@@ -614,6 +868,20 @@ export class AtlasExplorerView extends ItemView {
 		menu.addItem((mi) => mi.setTitle("Add note").setIcon("file-plus").onClick(() => void this.attachApiItem(view, folderNode, item, "file")));
 		menu.addItem((mi) => mi.setTitle("Add block").setIcon("square-plus").onClick(() => void this.attachApiItem(view, folderNode, item, "block")));
 		menu.addItem((mi) => mi.setTitle("Add module").setIcon("folder-plus").onClick(() => void this.attachApiItem(view, folderNode, item, "folder")));
+		if (isPlaceholder && (item.noteRef || item.notFound)) menu.addSeparator();
+		// G28: a manual backstop, available for any reason noteRef went stale — not conditioned on
+		// G27's auto-clear having run or being able to.
+		if (isPlaceholder && item.noteRef) {
+			menu.addItem((mi) =>
+				mi.setTitle("Remove attachment").setIcon("unlink").onClick(() => this.plugin.viewsManager.clearApiItemNoteRef(view.id, folderNode.id, item.id))
+			);
+		}
+		// G26: no bulk remove (F3), no undo (F4) — deletes the apiItemState entry outright, immediately.
+		if (isPlaceholder && item.notFound) {
+			menu.addItem((mi) =>
+				mi.setTitle("Remove").setIcon("trash-2").onClick(() => this.plugin.viewsManager.removeApiItem(view.id, folderNode.id, item.id))
+			);
+		}
 		menu.showAtMouseEvent(evt);
 	}
 
@@ -695,22 +963,6 @@ export class AtlasExplorerView extends ItemView {
 		});
 	}
 
-	/** Renders a Folder's live API items, in `apiItemOrder`, right after its real children — separate
-	 * from `renderNodeList` since these have no `ViewNode` of their own to iterate (G10). */
-	private renderApiItems(node: ViewNode, container: HTMLElement, view: View, depth: number, ancestors: StatusGovernance[]): void {
-		// G4: a Folder can have rows with no live source at all (source removed, rows kept as static) —
-		// gated on the rows themselves, not on `apiSource` being present.
-		if (!node.apiItemOrder) return;
-		for (const itemId of node.apiItemOrder) {
-			const item = node.apiItemState?.[itemId];
-			if (!item) continue;
-			// R18: API rows must respect the explorer filter, same as any unit row (G12 — a Folder with
-			// API rows behaves "like any Folder with its own children").
-			if (!apiItemMatchesFilter(this.filterText, item.label, item.secondary)) continue;
-			this.renderApiItemRow(item, container, view, node, depth, ancestors);
-		}
-	}
-
 	/** R18: does this Folder's own API rows (not its real `children`) contain a filter match? Used
 	 * alongside `subtreeHasMatch` everywhere a collapsed Folder needs to be force-revealed, or bypass
 	 * truncation grouping, for a matching descendant — API rows are a Folder's rows too, just not
@@ -748,6 +1000,53 @@ export class AtlasExplorerView extends ItemView {
 			added: false,
 			missing: true,
 		};
+	}
+
+	/** PR-5 (G8): an Outside-Vault-managed child's `ref.path` is an absolute filesystem path, never
+	 * indexed by `UnitIndex` (which only ever knows about vault paths) — `resolveRef`'s normal
+	 * `unitsByRefKey` lookup can never find it, and its generic missing-ref fallback would otherwise
+	 * wrongly show a "(missing)" badge/remove button for a child whose source currently resolves fine.
+	 * Bypasses `resolveRef` entirely for exactly these rows: basename-derived text/icon, never
+	 * `missing` — `renderNodeList`'s `isOutsideManagedAndUnresolved` check is what actually keeps an
+	 * Outside-Vault child out of view while its source doesn't resolve (R1/R2 fix: the node itself stays
+	 * in the persisted tree throughout), so a rendered row here is always one its source currently
+	 * vouches for. */
+	private resolveOutsideManagedRowInfo(ref: UnitRef): RowInfo {
+		const text = ref.kind === "block" ? ref.subpath : (ref.path.split("/").pop() ?? ref.path);
+		return { text, icon: ref.kind === "folder" ? "folder" : "file", promoted: false, added: false, missing: false };
+	}
+
+	/** PR-5 (G8/F7): true only for a `type: "unit"` node that a specifically Outside-Vault Folder
+	 * source manages — the one distinction `renderNode` needs to gate drag/nest/rename off for exactly
+	 * these rows while leaving Inside-Vault-managed (and any hand-placed) rows completely unaffected. */
+	private isOutsideManagedUnit(view: View, node: ViewNode): boolean {
+		if (!node.folderSourceManaged || !node.folderSourceOwnerId) return false;
+		const owner = this.plugin.viewsManager.getNode(view.id, node.folderSourceOwnerId);
+		return owner?.folderSource?.location === "outside";
+	}
+
+	/** PR-5 (R1/R2 fix): true for an Outside-Vault-managed child whose owning source does not
+	 * currently resolve on this device. `buildFolderSourceChildren` (`folder-source.ts`) now leaves
+	 * these rows exactly as they are in the persisted tree while unresolved — restoring the right
+	 * explicit status/collapsed state/manually-nested children once the path resolves again, instead
+	 * of deleting and recreating them (R1), and never writing a wiped tree to a synced `data.json`
+	 * (R2) — so this is the one place that actually keeps them out of view while unresolved, per the
+	 * spec's "render empty... reappear on recovery" (never a deletion). */
+	private isOutsideManagedAndUnresolved(view: View, node: ViewNode): boolean {
+		if (!node.folderSourceManaged || !node.folderSourceOwnerId) return false;
+		const owner = this.plugin.viewsManager.getNode(view.id, node.folderSourceOwnerId);
+		if (owner?.folderSource?.location !== "outside") return false;
+		return !resolveOutsidePath(this.plugin.folderSourcePathStore.get(owner.id));
+	}
+
+	/** PR-5 (R3 fix): true for any node (not just the one the caller already has in hand) that an
+	 * Outside-Vault Folder source manages — looked up by id so `buildNodeDragPayload` can filter the
+	 * rest of a multi-select by id without needing each `ViewNode` object already in scope. */
+	private isOutsideManagedNodeId(viewId: string, nodeId: string): boolean {
+		const node = this.plugin.viewsManager.getNode(viewId, nodeId);
+		if (!node || !node.folderSourceManaged || !node.folderSourceOwnerId) return false;
+		const owner = this.plugin.viewsManager.getNode(viewId, node.folderSourceOwnerId);
+		return owner?.folderSource?.location === "outside";
 	}
 
 	// --- top-level render --------------------------------------------------------------------------
@@ -1086,7 +1385,7 @@ export class AtlasExplorerView extends ItemView {
 	 * renders individually — same "never let a filter match hide behind something else" principle
 	 * `renderFoldableChildren` already applies to collapsed folders (PR 9 issue 6), extended to cover
 	 * hide/truncate the same way. */
-	private async renderNodeList(nodes: ViewNode[], container: HTMLElement, view: View, depth: number, ancestors: StatusGovernance[]): Promise<void> {
+	private async renderNodeList(nodes: ViewNode[], container: HTMLElement, view: View, depth: number, ancestors: StatusGovernance[], apiOwner?: ViewNode): Promise<void> {
 		const sm = this.plugin.statusesManager;
 		const filterActive = !!this.filterText.trim();
 
@@ -1095,9 +1394,15 @@ export class AtlasExplorerView extends ItemView {
 			status: StatusDefinition | null;
 			governor: StatusGovernance | null;
 			bypass: boolean;
+			apiItem?: ApiItemState;
 		}
 		const resolved: Resolved[] = [];
 		for (const node of nodes) {
+			// R1/R2 fix: an Outside-Vault-managed child whose source doesn't currently resolve on this
+			// device renders as if it doesn't exist — the persisted tree keeps it intact (see
+			// `isOutsideManagedAndUnresolved`'s own doc comment) so it reappears exactly as it was the
+			// moment the path resolves again, with no separate "missing" row or hole in this list.
+			if (this.isOutsideManagedAndUnresolved(view, node)) continue;
 			const governor = sm.findGoverningAncestor(ancestors, node);
 			const status = governor ? sm.resolveNodeStatus(ancestors, node) : null;
 			let bypass = false;
@@ -1110,6 +1415,48 @@ export class AtlasExplorerView extends ItemView {
 				if (!bypass && node.children.length > 0 && (await this.subtreeHasMatch(node.children))) bypass = true;
 			}
 			resolved.push({ node, status, governor, bypass });
+		}
+
+		// G25: a Folder's own API item rows (`apiItemOrder`/`apiItemState`) are folded into this same
+		// `resolved` list, right behind its real children in build order — so the one sort-by-status
+		// pass and one hide/truncate/count pass below apply identically to both row kinds, instead of
+		// `renderApiItems` walking `apiItemOrder` on its own with no sort/truncate logic at all (the
+		// bug this closes). A stale/unmatched id in `apiItemOrder` (source renamed/removed from under
+		// it) is simply skipped here, same graceful degrade `renderApiItems` already did. Filter
+		// exclusion mirrors a real unit's own (`renderNode`'s `matchesFilter` early-return): a
+		// non-matching item is skipped entirely, before it can ever be sorted, counted, or truncated —
+		// a surviving match instead bypasses hide/truncate outright, same "a filter match is never
+		// folded away" rule real nodes already get.
+		if (apiOwner?.apiItemOrder) {
+			// R3 fix: a Folder-source-demoted row (`item.folderSourceDeleted`, carrying the real index
+			// its `ViewNode` occupied among `apiOwner`'s children at the moment it was deleted) is
+			// spliced back in among those real children at (approximately) that same position, instead
+			// of always landing after every one of them the way a genuine API/Table row still does —
+			// "append-mode row retains all other row data (title, metadata, position)". Collected
+			// separately and inserted after the real-children loop above so `realCount` reflects only
+			// those real children, never any already-inserted positioned row.
+			const realCount = resolved.length;
+			const positioned: { entry: Resolved; position: number }[] = [];
+			const trailing: Resolved[] = [];
+			for (const itemId of apiOwner.apiItemOrder) {
+				const item = apiOwner.apiItemState?.[itemId];
+				if (!item) continue;
+				if (filterActive && !apiItemMatchesFilter(this.filterText, item.label, item.secondary)) continue;
+				const pseudo = this.pseudoNodeForApiItem(item);
+				const governor = sm.findGoverningAncestor(ancestors, pseudo);
+				const status = governor ? sm.resolveNodeStatus(ancestors, pseudo) : null;
+				const entry: Resolved = { node: pseudo, status, governor, bypass: filterActive, apiItem: item };
+				if (item.folderSourceDeleted && typeof item.position === "number") {
+					positioned.push({ entry, position: Math.min(Math.max(item.position, 0), realCount) });
+				} else {
+					trailing.push(entry);
+				}
+			}
+			// Insert highest position first: splice(p, 0, x) only shifts indices >= p, so a later
+			// (lower-position) insertion's target index is never disturbed by an earlier one.
+			positioned.sort((a, b) => b.position - a.position);
+			for (const { entry, position } of positioned) resolved.splice(position, 0, entry);
+			resolved.push(...trailing);
 		}
 
 		// PR 22: sort-by-status — the nearest governor that reaches this list (same ancestor-walk
@@ -1148,7 +1495,7 @@ export class AtlasExplorerView extends ItemView {
 
 		const groupRowShown = new Set<string>();
 		for (const r of resolved) {
-			const { node, status, governor, bypass } = r;
+			const { node, status, governor, bypass, apiItem } = r;
 			if (!bypass && status && governor && isHidden(status, governor)) continue; // hide wins outright
 
 			if (!bypass && status && governor) {
@@ -1164,7 +1511,14 @@ export class AtlasExplorerView extends ItemView {
 				}
 			}
 
-			await this.renderNode(node, container, view, depth, ancestors);
+			if (apiItem) {
+				// G25: same row content/icon/click wiring as before the fix — only its position within
+				// the now-shared ordering/truncation pass is new (`apiOwner` is only set when this list
+				// has API rows to merge, so it's always defined here).
+				this.renderApiItemRow(apiItem, container, view, apiOwner as ViewNode, depth, ancestors);
+			} else {
+				await this.renderNode(node, container, view, depth, ancestors);
+			}
 		}
 	}
 
@@ -1318,7 +1672,13 @@ export class AtlasExplorerView extends ItemView {
 			this.selectionAnchor = nodeId;
 			this.selectionAnchorScope = "bucket";
 		}
-		return { kind: "node", nodeIds: [...this.selectedBucketNodeIds], viewId };
+		// R3 fix: an Outside-Vault-managed child can still be part of a shift/cmd-click multi-select
+		// (its own row never starts a drag — `renderNode`'s `outsideManaged` gate — but it can tag along
+		// in someone else's selection), so it must never ride along in the payload an ordinary row's drag
+		// actually moves. Filtered out of the payload, not the selection itself, so the highlight is
+		// unaffected and only the drop/move/nest behavior changes.
+		const nodeIds = [...this.selectedBucketNodeIds].filter((id) => !this.isOutsideManagedNodeId(viewId, id));
+		return { kind: "node", nodeIds, viewId };
 	}
 
 	/** PR 20: same idea as `buildNodeDragPayload`, for an inbox row — see its own doc comment for why
@@ -1399,12 +1759,12 @@ export class AtlasExplorerView extends ItemView {
 		// PR 17: `node` becomes the nearest ancestor for its own children — prepended, not replacing
 		// the chain, so a grandparent's `inheritToSubfolders` can still reach past `node` if `node`
 		// itself isn't a governor (or is, but doesn't itself reach — same walk either way).
-		await this.renderNodeList(node.children, childrenInner, view, depth + 1, [node, ...ancestors]);
-		// T2: was gated on `node.apiSource` alone, so "Remove data source" (which clears `apiSource`
-		// but deliberately keeps `apiItemState`/`apiItemOrder`, per G4) made this permanently false and
-		// hid the surviving static rows from the tree entirely, even though `renderApiItems` itself is
-		// already correctly gated on the rows, not the source (see its own comment above).
-		if (node.type === "meta" && nodeHasApiRows(node)) this.renderApiItems(node, childrenInner, view, depth + 1, [node, ...ancestors]);
+		// T2/G25: `node`'s own API item rows (gated on the rows existing, not on `apiSource` surviving
+		// — see `nodeHasApiRows`'s own doc comment) are passed in as `apiOwner` so they're merged into
+		// this same list's sort/truncate pass, right behind the real children, instead of a second
+		// `renderApiItems` pass with no sort/truncate logic of its own.
+		const apiOwner = node.type === "meta" && nodeHasApiRows(node) ? node : undefined;
+		await this.renderNodeList(node.children, childrenInner, view, depth + 1, [node, ...ancestors], apiOwner);
 
 		// Local optimistic state, not `node.collapsed` — real bug caught in review: `node.collapsed`
 		// only updates once the delayed `setNodeCollapsed` below actually runs, so a second click
@@ -1512,13 +1872,24 @@ export class AtlasExplorerView extends ItemView {
 			const iconEl = row.createDiv({ cls: "atlas-icon" });
 			this.renderRowIcon(iconEl, view, node, ancestors, "layers");
 			row.createSpan({ cls: "atlas-row-text", text: node.label ?? "" });
-			if (node.apiSource) {
-				// G11: connection dot — green ok / grey never-refreshed / red last-refresh-failed / amber
-				// (PR-3) waiting on an unanswered automatic delete confirmation.
+			if (node.apiSource || node.csvSource || node.markdownTableSource) {
+				// G11/PR-7/PR-8: connection dot — green ok / grey never-refreshed / red last-refresh-failed
+				// / amber (PR-3) waiting on an unanswered automatic delete confirmation. CSV and Markdown
+				// Table both share this exact dot: their controllers write the same `apiCache`/
+				// `apiAwaitingConfirmation` fields an API source does.
 				const dot = row.createSpan({
 					cls: `atlas-api-connection-dot atlas-api-dot-${dotStateFor(node.apiCache, node.apiAwaitingConfirmation)}`,
 				});
 				setTooltip(dot, dotTooltip(node.apiCache, Date.now(), node.apiAwaitingConfirmation));
+			}
+			if (node.folderSource?.location === "outside") {
+				// PR-5 (G6/G11): recomputed fresh on every render (same "no cached connection state
+				// anywhere" design as the modal's own dot) — load and focus-regain both already trigger a
+				// render via `queueRender`, so this alone satisfies the recheck-on-load/focus-regain
+				// requirement with no separate timer/poll (F10).
+				const resolved = resolveOutsidePath(this.plugin.folderSourcePathStore.get(node.id));
+				const dot = row.createSpan({ cls: `atlas-api-connection-dot atlas-api-dot-${resolved ? "green" : "red"}` });
+				setTooltip(dot, resolved ? "Path resolves on this device" : "Path does not resolve on this device");
 			}
 
 			// PR 20: a meta row's plain click never did anything before this (no open target) — safe
@@ -1540,7 +1911,8 @@ export class AtlasExplorerView extends ItemView {
 
 		const ref = node.ref;
 		if (!ref) return;
-		const info = await this.resolveRef(ref);
+		const outsideManaged = this.isOutsideManagedUnit(view, node);
+		const info = outsideManaged ? this.resolveOutsideManagedRowInfo(ref) : await this.resolveRef(ref);
 		if (!this.matchesFilter(info.text)) return;
 
 		const row = container.createDiv({ cls: "atlas-row atlas-row-unit" });
@@ -1549,7 +1921,9 @@ export class AtlasExplorerView extends ItemView {
 		row.dataset.selectKey = node.id;
 		row.toggleClass("is-selected", this.selectedBucketNodeIds.has(node.id));
 		row.style.paddingLeft = `${depth * 16}px`;
-		row.setAttr("draggable", "true");
+		// G8/F7: an Outside-Vault-managed child never drags (there is no real move/rename for it to
+		// perform — Obsidian's rename/move APIs only operate on vault paths).
+		row.setAttr("draggable", outsideManaged ? "false" : "true");
 
 		// PR 12: every row now gets a chevron slot, matching meta rows and the Module Contents modal
 		// (PR 10) — real content only if this unit has meta-nested children (a chevron appears only
@@ -1577,16 +1951,23 @@ export class AtlasExplorerView extends ItemView {
 		}
 		// PR 9 (issue 2): modules never expand inline anymore, in the bucket or the inbox — the icon
 		// opens the Module Contents modal instead. `ref.kind === "folder"` covers both folder-unit and
-		// promoted-folder (both are real folders on disk, per `unitToRef`).
-		if (!info.missing && ref.kind === "folder") this.wireModuleRow(row, iconEl, ref.path);
+		// promoted-folder (both are real folders on disk, per `unitToRef`). G8/F7: never wired for an
+		// Outside-Vault-managed child — its icon drop target would otherwise call `renameFile` with an
+		// absolute external path, which is exactly the "rename affordance" the spec requires absent.
+		if (!info.missing && !outsideManaged && ref.kind === "folder") this.wireModuleRow(row, iconEl, ref.path);
 
 		this.setPlacementTooltip(row, ref);
 		row.addEventListener("click", (evt) => {
 			const consumed = this.handleSelectionClick(evt, node.id, "bucket", this.bucketVisibleOrder());
-			if (!consumed) void this.openRef(ref);
+			// R9(c): `ref.path` here is a bare name relative to the Outside source's root, never a vault
+			// path — calling `openRef` would open (or create) a same-named vault-root file/module
+			// instead of doing nothing, which is what clicking an Outside row is supposed to do.
+			if (!consumed && !outsideManaged) void this.openRef(ref);
 		});
-		row.addEventListener("dragstart", () => (this.dragPayload = this.buildNodeDragPayload(node.id, view.id)));
-		this.makeDropZone(row, { kind: "node", nodeId: node.id, viewId: view.id });
+		if (!outsideManaged) {
+			row.addEventListener("dragstart", () => (this.dragPayload = this.buildNodeDragPayload(node.id, view.id)));
+			this.makeDropZone(row, { kind: "node", nodeId: node.id, viewId: view.id });
+		}
 		row.tabIndex = 0;
 		row.addEventListener("keydown", (evt) => this.handleRowKeydown(evt, node, view));
 		row.addEventListener("contextmenu", (evt) => {
@@ -2236,6 +2617,77 @@ export class AtlasExplorerView extends ItemView {
 						).open();
 					})
 			);
+		} else if (node.folderSource) {
+			// PR-4 (G10): reuses the exact same menu actions as an API source — "Refresh now" re-runs
+			// the (synchronous, disk-read-only) reconciliation; "Remove data source" just stops it,
+			// since the children it already placed are ordinary real units with nowhere else to go.
+			menu.addItem((item) =>
+				item
+					.setTitle("Refresh now")
+					.setIcon("refresh-cw")
+					.onClick(() => this.refreshFolderSource(view, node))
+			);
+			menu.addItem((item) =>
+				item
+					.setTitle("Remove data source")
+					.setIcon("unplug")
+					.onClick(() => {
+						new ConfirmModal(
+							this.plugin.app,
+							`Remove the data source from "${node.label}"? Its current children stay in place as plain units — it just stops refreshing.`,
+							"Remove",
+							() => this.plugin.viewsManager.setFolderSource(view.id, node.id, undefined)
+						).open();
+					})
+			);
+		} else if (node.csvSource) {
+			// PR-7: reuses the exact same menu actions as an API source — "Refresh now" re-reads+parses
+			// the file (no mobile guard, see `refreshCsvSource`'s own doc comment); "Remove data source"
+			// just stops it, same as an API source's own Remove (rows stay in place). CSV has no
+			// device-local headers store to clean up on removal.
+			menu.addItem((item) =>
+				item
+					.setTitle("Refresh now")
+					.setIcon("refresh-cw")
+					.onClick(() => this.refreshCsvSource(view, node, "manual"))
+			);
+			menu.addItem((item) =>
+				item
+					.setTitle("Remove data source")
+					.setIcon("unplug")
+					.onClick(() => {
+						new ConfirmModal(
+							this.plugin.app,
+							`Remove the data source from "${node.label}"? Its current rows stay in place as plain rows — it just stops refreshing.`,
+							"Remove",
+							() => this.plugin.viewsManager.setCsvSource(view.id, node.id, undefined)
+						).open();
+					})
+			);
+		} else if (node.markdownTableSource) {
+			// PR-8: reuses the exact same menu actions as a CSV source — "Refresh now" re-reads+parses
+			// the file (no mobile guard, see `refreshMarkdownTableSource`'s own doc comment); "Remove
+			// data source" just stops it, same as a CSV source's own Remove (rows stay in place).
+			// Markdown Table has no device-local headers store to clean up on removal.
+			menu.addItem((item) =>
+				item
+					.setTitle("Refresh now")
+					.setIcon("refresh-cw")
+					.onClick(() => this.refreshMarkdownTableSource(view, node, "manual"))
+			);
+			menu.addItem((item) =>
+				item
+					.setTitle("Remove data source")
+					.setIcon("unplug")
+					.onClick(() => {
+						new ConfirmModal(
+							this.plugin.app,
+							`Remove the data source from "${node.label}"? Its current rows stay in place as plain rows — it just stops refreshing.`,
+							"Remove",
+							() => this.plugin.viewsManager.setMarkdownTableSource(view.id, node.id, undefined)
+						).open();
+					})
+			);
 		}
 		menu.addSeparator();
 		menu.addItem((item) =>
@@ -2473,7 +2925,10 @@ export class AtlasExplorerView extends ItemView {
 	}
 
 	private handleRowKeydown(evt: KeyboardEvent, node: ViewNode, view: View): void {
-		if (evt.key === "Enter" && node.type === "unit" && node.ref) {
+		// R9(c): same reasoning as the row's click handler — an Outside-Vault-managed row's `ref.path`
+		// is root-relative, not a vault path, so Enter must no-op here too rather than opening (or
+		// creating) a same-named vault-root file/module.
+		if (evt.key === "Enter" && node.type === "unit" && node.ref && !this.isOutsideManagedUnit(view, node)) {
 			evt.preventDefault();
 			void this.openRef(node.ref);
 		} else if (evt.key === " " && (node.type === "meta" || node.children.length > 0)) {

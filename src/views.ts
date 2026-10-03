@@ -1,7 +1,30 @@
 import { App } from "obsidian";
 import type { UnitIndex } from "./unit-index";
 import { clampRefreshMinutes } from "./api-refresh-timer";
-import { ApiClickAction, ApiFieldMapping, ApiItemState, ApiSourceConfig, DEFAULT_VIEW_NAME, StatusGovernance, Unit, UnitRef, View, ViewNode, createEmptyView, rewriteRefPath, unitRefsEqual, unitToRef } from "./types";
+import { basenameForDeletedRef, buildFolderSourceChildren, reconcileFolderSourceChildDelete } from "./folder-source";
+import {
+	ApiClickAction,
+	ApiFieldMapping,
+	ApiItemState,
+	ApiSourceConfig,
+	CsvSourceConfig,
+	DEFAULT_VIEW_NAME,
+	FolderSourceConfig,
+	MarkdownTableSourceConfig,
+	PLACEHOLDER_ROW_KIND,
+	StatusGovernance,
+	Unit,
+	UnitRef,
+	View,
+	ViewNode,
+	createEmptyView,
+	rewritePathString,
+	rewriteRefKeyPath,
+	rewriteRefPath,
+	unitRefKey,
+	unitRefsEqual,
+	unitToRef,
+} from "./types";
 
 function generateNodeId(): string {
 	return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
@@ -32,7 +55,7 @@ function sanitizeApiItemState(raw: unknown, key: string): ApiItemState | null {
 	const item = raw as Partial<ApiItemState>;
 	if (typeof item.label !== "string") return null;
 
-	const sanitized: ApiItemState = { id: key, label: item.label };
+	const sanitized: ApiItemState = { id: key, label: item.label, kind: PLACEHOLDER_ROW_KIND };
 	if (typeof item.secondary === "string") sanitized.secondary = item.secondary;
 	if (typeof item.explicitStatusId === "string") sanitized.explicitStatusId = item.explicitStatusId;
 	if (isValidUnitRef(item.noteRef)) sanitized.noteRef = item.noteRef;
@@ -121,8 +144,14 @@ function sanitizeApiFields(node: ViewNode): void {
 
 	// G4: rows survive a source's removal as plain static rows — sanitize `apiItemState`/`apiItemOrder`
 	// whenever either is actually present (or a source exists to have produced them), rather than only
-	// when `apiSource` currently exists.
-	const hasApiState = !!node.apiSource || node.apiItemState !== undefined || node.apiItemOrder !== undefined;
+	// when `apiSource` currently exists. PR-7/PR-8: `csvSource`/`markdownTableSource` produce the exact
+	// same kind of rows, so this widens the same way for each.
+	const hasApiState =
+		!!node.apiSource ||
+		!!node.csvSource ||
+		!!node.markdownTableSource ||
+		node.apiItemState !== undefined ||
+		node.apiItemOrder !== undefined;
 	if (hasApiState) {
 		if (!node.apiItemState || typeof node.apiItemState !== "object" || Array.isArray(node.apiItemState)) {
 			node.apiItemState = {};
@@ -145,8 +174,10 @@ function sanitizeApiFields(node: ViewNode): void {
 	}
 
 	// Cache and the awaiting-confirmation flag are meaningless without a live source — G4's static rows
-	// never show a dot at all (that's `explorer-view.ts`'s job, gated on `apiSource`, not this).
-	if (node.apiSource) {
+	// never show a dot at all (that's `explorer-view.ts`'s job, gated on `apiSource`/`csvSource`/
+	// `markdownTableSource`, not this). PR-7/PR-8: `csvSource`/`markdownTableSource` share this exact
+	// same cache shape with `apiSource`.
+	if (node.apiSource || node.csvSource || node.markdownTableSource) {
 		if (!node.apiCache || typeof node.apiCache !== "object") node.apiCache = undefined;
 		if (typeof node.apiAwaitingConfirmation !== "boolean") node.apiAwaitingConfirmation = undefined;
 	} else {
@@ -154,7 +185,142 @@ function sanitizeApiFields(node: ViewNode): void {
 		node.apiAwaitingConfirmation = undefined;
 	}
 
+	sanitizeFolderSource(node);
+	sanitizeCsvSource(node);
+	sanitizeMarkdownTableSource(node);
+
 	for (const child of node.children) sanitizeApiFields(child);
+}
+
+/** PR-4 (G5/G16): `data.json` is free-form JSON — hand-edited or corrupted, `folderSource.path` can
+ * be missing/non-string, and `location`/`showFiles`/`showFolders`/the refresh fields can be any shape
+ * at all. A `folderSource` missing a usable `path` is dropped entirely (mirrors `apiSource`'s own
+ * "no usable mapping" rule — there's no safe path to invent); every other field falls back to its own
+ * spec'd default (G4: `location` "inside", both show-toggles on) rather than being rejected outright. */
+function sanitizeFolderSource(node: ViewNode): void {
+	if (!node.folderSource) return;
+	const raw = node.folderSource as Partial<FolderSourceConfig>;
+	if (typeof raw.path !== "string") {
+		node.folderSource = undefined;
+		return;
+	}
+	const rawMinutes = raw.refreshEveryMinutes;
+	const validMinutes = typeof rawMinutes === "number" && Number.isFinite(rawMinutes);
+	const refreshEveryMinutes = validMinutes ? clampRefreshMinutes(rawMinutes) : undefined;
+	const rawRemoved = raw.removedRefs;
+	node.folderSource = {
+		type: "folder",
+		location: raw.location === "outside" ? "outside" : "inside",
+		path: raw.path,
+		showFiles: typeof raw.showFiles === "boolean" ? raw.showFiles : true,
+		showFolders: typeof raw.showFolders === "boolean" ? raw.showFolders : true,
+		refreshOnViewLoad: !!raw.refreshOnViewLoad,
+		refreshEveryMinutesEnabled: !!raw.refreshEveryMinutesEnabled && refreshEveryMinutes !== undefined,
+		refreshEveryMinutes,
+		// R1 fix: `unitRefKey` strings the user has removed from this source's managed set — any
+		// non-string entry (hand-edited `data.json`) is dropped rather than rejecting the whole list.
+		removedRefs: Array.isArray(rawRemoved) ? rawRemoved.filter((key): key is string => typeof key === "string") : undefined,
+		// PR-6: same three-value `mode` as `ApiSourceConfig`, same "merge" default on anything else.
+		mode: raw.mode === "append" ? "append" : raw.mode === "overwrite" ? "overwrite" : "merge",
+	};
+}
+
+/** PR-7 (G17-G19): `data.json` is free-form JSON — hand-edited or corrupted, `csvSource.path`/
+ * `mapping` can be missing/non-string, same as `apiSource` above. A `csvSource` missing a usable
+ * `path`, or (in drag mode) a usable `mapping`, is dropped entirely — mirrors `sanitizeApiFields`'s
+ * own "no usable mapping" rule, since there's no safe id/label field to invent either way. */
+function sanitizeCsvSource(node: ViewNode): void {
+	if (!node.csvSource) return;
+	const raw = node.csvSource as Partial<CsvSourceConfig> & { mapping?: Partial<ApiFieldMapping> };
+	const mapping = raw.mapping;
+	const validMapping = !!mapping && typeof mapping.idField === "string" && typeof mapping.labelField === "string";
+	const isJsMode = raw.mappingMode === "js";
+	const validJsSource = typeof raw.jsSource === "string";
+	const mappingOrJsValid = isJsMode ? validJsSource : validMapping;
+	if (typeof raw.path !== "string" || !mappingOrJsValid) {
+		node.csvSource = undefined;
+		return;
+	}
+	const rawMinutes = raw.refreshEveryMinutes;
+	const validMinutes = typeof rawMinutes === "number" && Number.isFinite(rawMinutes);
+	const refreshEveryMinutes = validMinutes ? clampRefreshMinutes(rawMinutes) : undefined;
+	const rawExtras = mapping?.extraFields ?? (mapping as unknown as { extras?: unknown })?.extras;
+	const extraFields: Record<string, string> = {};
+	if (rawExtras && typeof rawExtras === "object" && !Array.isArray(rawExtras)) {
+		for (const [k, v] of Object.entries(rawExtras)) {
+			if (typeof k === "string" && typeof v === "string" && /^[a-zA-Z0-9_]+$/.test(k)) extraFields[k] = v;
+		}
+	}
+	const extraFieldsRecord = Object.keys(extraFields).length > 0 ? extraFields : undefined;
+	node.csvSource = {
+		type: "csv",
+		path: raw.path,
+		mapping: {
+			idField: typeof mapping?.idField === "string" ? mapping.idField : "",
+			labelField: typeof mapping?.labelField === "string" ? mapping.labelField : "",
+			secondaryField: typeof mapping?.secondaryField === "string" ? mapping.secondaryField : undefined,
+			extraFields: extraFieldsRecord,
+		},
+		mode: raw.mode === "append" ? "append" : raw.mode === "overwrite" ? "overwrite" : "merge",
+		refreshOnViewLoad: !!raw.refreshOnViewLoad,
+		refreshEveryMinutesEnabled: !!raw.refreshEveryMinutesEnabled && refreshEveryMinutes !== undefined,
+		refreshEveryMinutes,
+		keepOnEmpty: typeof raw.keepOnEmpty === "boolean" ? raw.keepOnEmpty : undefined,
+		confirmBeforeDelete: typeof raw.confirmBeforeDelete === "boolean" ? raw.confirmBeforeDelete : undefined,
+		mappingMode: isJsMode ? "js" : undefined,
+		jsSource: typeof raw.jsSource === "string" ? raw.jsSource : undefined,
+	};
+}
+
+/** PR-8 (G17-G20): `data.json` is free-form JSON — hand-edited or corrupted, `markdownTableSource.
+ * path`/`mapping`/`tableIndex` can be missing/non-string/non-numeric, same as `csvSource` above. A
+ * `markdownTableSource` missing a usable `path`, or (in drag mode) a usable `mapping`, is dropped
+ * entirely — mirrors `sanitizeCsvSource`'s own rule. `tableIndex` falls back to 0 (the only table a
+ * single-table file has) rather than being rejected outright — same "fall back to a safe default"
+ * treatment every other numeric field here gets, not a validation failure. */
+function sanitizeMarkdownTableSource(node: ViewNode): void {
+	if (!node.markdownTableSource) return;
+	const raw = node.markdownTableSource as Partial<MarkdownTableSourceConfig> & { mapping?: Partial<ApiFieldMapping> };
+	const mapping = raw.mapping;
+	const validMapping = !!mapping && typeof mapping.idField === "string" && typeof mapping.labelField === "string";
+	const isJsMode = raw.mappingMode === "js";
+	const validJsSource = typeof raw.jsSource === "string";
+	const mappingOrJsValid = isJsMode ? validJsSource : validMapping;
+	if (typeof raw.path !== "string" || !mappingOrJsValid) {
+		node.markdownTableSource = undefined;
+		return;
+	}
+	const rawMinutes = raw.refreshEveryMinutes;
+	const validMinutes = typeof rawMinutes === "number" && Number.isFinite(rawMinutes);
+	const refreshEveryMinutes = validMinutes ? clampRefreshMinutes(rawMinutes) : undefined;
+	const rawExtras = mapping?.extraFields ?? (mapping as unknown as { extras?: unknown })?.extras;
+	const extraFields: Record<string, string> = {};
+	if (rawExtras && typeof rawExtras === "object" && !Array.isArray(rawExtras)) {
+		for (const [k, v] of Object.entries(rawExtras)) {
+			if (typeof k === "string" && typeof v === "string" && /^[a-zA-Z0-9_]+$/.test(k)) extraFields[k] = v;
+		}
+	}
+	const extraFieldsRecord = Object.keys(extraFields).length > 0 ? extraFields : undefined;
+	const tableIndex = typeof raw.tableIndex === "number" && Number.isInteger(raw.tableIndex) && raw.tableIndex >= 0 ? raw.tableIndex : 0;
+	node.markdownTableSource = {
+		type: "markdown-table",
+		path: raw.path,
+		tableIndex,
+		mapping: {
+			idField: typeof mapping?.idField === "string" ? mapping.idField : "",
+			labelField: typeof mapping?.labelField === "string" ? mapping.labelField : "",
+			secondaryField: typeof mapping?.secondaryField === "string" ? mapping.secondaryField : undefined,
+			extraFields: extraFieldsRecord,
+		},
+		mode: raw.mode === "append" ? "append" : raw.mode === "overwrite" ? "overwrite" : "merge",
+		refreshOnViewLoad: !!raw.refreshOnViewLoad,
+		refreshEveryMinutesEnabled: !!raw.refreshEveryMinutesEnabled && refreshEveryMinutes !== undefined,
+		refreshEveryMinutes,
+		keepOnEmpty: typeof raw.keepOnEmpty === "boolean" ? raw.keepOnEmpty : undefined,
+		confirmBeforeDelete: typeof raw.confirmBeforeDelete === "boolean" ? raw.confirmBeforeDelete : undefined,
+		mappingMode: isJsMode ? "js" : undefined,
+		jsSource: typeof raw.jsSource === "string" ? raw.jsSource : undefined,
+	};
 }
 
 /** G9b: resolves the effective click action for a source, defaulting to "open-attachment". */
@@ -187,6 +353,28 @@ function cloneApiSource(source: ApiSourceConfig): ApiSourceConfig {
 	};
 }
 
+/** PR-7: same deep-copy reasoning as `cloneApiSource` above, applied to `csvSource`. */
+function cloneCsvSource(source: CsvSourceConfig): CsvSourceConfig {
+	return {
+		...source,
+		mapping: {
+			...source.mapping,
+			extraFields: source.mapping.extraFields ? { ...source.mapping.extraFields } : undefined,
+		},
+	};
+}
+
+/** PR-8: same deep-copy reasoning as `cloneApiSource` above, applied to `markdownTableSource`. */
+function cloneMarkdownTableSource(source: MarkdownTableSourceConfig): MarkdownTableSourceConfig {
+	return {
+		...source,
+		mapping: {
+			...source.mapping,
+			extraFields: source.mapping.extraFields ? { ...source.mapping.extraFields } : undefined,
+		},
+	};
+}
+
 export interface ApiSourceIdPair {
 	originalId: string;
 	cloneId: string;
@@ -207,6 +395,18 @@ export function collectApiSourceNodeIdPairs(original: ViewNode, clone: ViewNode)
 	return pairs;
 }
 
+/** PR-5 (G6/F6 mirror of R3/G7 above): an Outside-Vault Folder source's device-local absolute path
+ * (`FolderSourcePathStore`, keyed by node id) has no home in `duplicateNode`'s return value either —
+ * same id-pairing approach, scoped to `folderSource?.location === "outside"` instead of `apiSource`. */
+export function collectOutsideFolderSourceNodeIdPairs(original: ViewNode, clone: ViewNode): ApiSourceIdPair[] {
+	const pairs: ApiSourceIdPair[] = [];
+	if (original.folderSource?.location === "outside") pairs.push({ originalId: original.id, cloneId: clone.id });
+	for (let i = 0; i < original.children.length; i++) {
+		pairs.push(...collectOutsideFolderSourceNodeIdPairs(original.children[i], clone.children[i]));
+	}
+	return pairs;
+}
+
 /** G7 (extended to G4's static rows): a deep copy of a Folder's per-id row state — `noteRef` is itself
  * an object, so a shallow copy of the map would still leave both copies' rows pointing at (and able to
  * mutate) the very same `UnitRef`. */
@@ -220,9 +420,16 @@ function cloneApiItemState(state: Record<string, ApiItemState>): Record<string, 
 
 /** G4/T2: a Folder has API rows to show — either a live source (even before its first refresh
  * fills any rows) or static rows left behind by "Remove data source" — gated on this, never on
- * `apiSource` alone, so removing the source doesn't also hide the rows it leaves behind. */
-export function nodeHasApiRows(node: Pick<ViewNode, "apiSource" | "apiItemOrder">): boolean {
-	return Boolean(node.apiSource) || Boolean(node.apiItemOrder && node.apiItemOrder.length > 0);
+ * `apiSource` alone, so removing the source doesn't also hide the rows it leaves behind. PR-7:
+ * `csvSource` is the same kind of live source as `apiSource` for this purpose. PR-8: so is
+ * `markdownTableSource`. */
+export function nodeHasApiRows(node: Pick<ViewNode, "apiSource" | "csvSource" | "markdownTableSource" | "apiItemOrder">): boolean {
+	return (
+		Boolean(node.apiSource) ||
+		Boolean(node.csvSource) ||
+		Boolean(node.markdownTableSource) ||
+		Boolean(node.apiItemOrder && node.apiItemOrder.length > 0)
+	);
 }
 
 export interface MetaTarget {
@@ -342,12 +549,26 @@ export class ViewsManager {
 		return null;
 	}
 
-	private findUnitNode(nodes: ViewNode[], ref: UnitRef): FoundNode | null {
+	/** R9(b): an Outside-Vault-managed child's `ref.path` is a bare name relative to its source's
+	 * root (see `listOutsideChildrenWith`), not a vault path — it can collide with a real vault-root
+	 * unit of the same name. Every ref-identity walk below (`findUnitNode`/`allPathsToRef`) must skip
+	 * these nodes, or a real vault unit wrongly counts as "placed" (and vanishes from the Inbox)
+	 * whenever some Outside source happens to have a same-named child. `root` is the whole view's
+	 * tree, not just the subtree currently being walked, since a managed child can be dragged/nested
+	 * anywhere in the view (R1 fix) — its owner is looked up by id across the full tree, never assumed
+	 * to be an ancestor. */
+	private isOutsideOwned(root: ViewNode[], node: ViewNode): boolean {
+		if (!node.folderSourceManaged || !node.folderSourceOwnerId) return false;
+		const owner = this.findNode(root, node.folderSourceOwnerId);
+		return owner?.node.folderSource?.location === "outside";
+	}
+
+	private findUnitNode(nodes: ViewNode[], ref: UnitRef, root: ViewNode[] = nodes): FoundNode | null {
 		for (let i = 0; i < nodes.length; i++) {
-			if (nodes[i].type === "unit" && nodes[i].ref && unitRefsEqual(nodes[i].ref as UnitRef, ref)) {
+			if (nodes[i].type === "unit" && nodes[i].ref && unitRefsEqual(nodes[i].ref as UnitRef, ref) && !this.isOutsideOwned(root, nodes[i])) {
 				return { node: nodes[i], siblings: nodes, index: i };
 			}
-			const found = this.findUnitNode(nodes[i].children, ref);
+			const found = this.findUnitNode(nodes[i].children, ref, root);
 			if (found) return found;
 		}
 		return null;
@@ -384,15 +605,15 @@ export class ViewsManager {
 	 * PR 13: collects *every* match in the subtree instead of stopping at the first — a duplicated
 	 * unit can now legitimately appear more than once in the same view, including nested inside a
 	 * different placement of itself. */
-	private allPathsToRef(nodes: ViewNode[], ref: UnitRef, trail: string[]): string[][] {
+	private allPathsToRef(nodes: ViewNode[], ref: UnitRef, trail: string[], root: ViewNode[] = nodes): string[][] {
 		const out: string[][] = [];
 		for (const node of nodes) {
-			if (node.type === "unit" && node.ref && unitRefsEqual(node.ref, ref)) out.push(trail);
+			if (node.type === "unit" && node.ref && unitRefsEqual(node.ref, ref) && !this.isOutsideOwned(root, node)) out.push(trail);
 			if (node.type === "meta") {
-				out.push(...this.allPathsToRef(node.children, ref, [...trail, node.label ?? ""]));
+				out.push(...this.allPathsToRef(node.children, ref, [...trail, node.label ?? ""], root));
 			} else if (node.type === "unit" && node.ref && node.children.length > 0) {
 				const basename = node.ref.path.split("/").pop() ?? node.ref.path;
-				out.push(...this.allPathsToRef(node.children, ref, [...trail, basename]));
+				out.push(...this.allPathsToRef(node.children, ref, [...trail, basename], root));
 			}
 		}
 		return out;
@@ -450,10 +671,28 @@ export class ViewsManager {
 	 * `unplaceUnit`/`deleteMetaFolder`. */
 	unplaceNode(viewId: string, nodeId: string): void {
 		const view = this.getView(viewId);
-		const found = view && this.findNode(view.root, nodeId);
+		if (!view) return;
+		const found = this.findNode(view.root, nodeId);
 		if (!found) return;
+		this.rememberFolderSourceRemoval(view, found.node);
 		found.siblings.splice(found.index, 1, ...found.node.children);
 		this.save();
+	}
+
+	/** R1 fix: when a Folder-source-managed row is removed from the view entirely (not moved or
+	 * renested elsewhere, which `refreshFolderSource`'s whole-view search already tolerates without
+	 * this), remembers its ref on the owning source's `removedRefs` so the next refresh treats it as
+	 * "the user removed this," not "never resolved yet," and doesn't recreate it — the same permanence
+	 * any other removal in this codebase already has. No-op for a node that isn't Folder-source-managed,
+	 * or whose owning node no longer carries a Folder source. */
+	private rememberFolderSourceRemoval(view: View, node: ViewNode): void {
+		if (!node.folderSourceManaged || !node.ref || !node.folderSourceOwnerId) return;
+		const owner = this.findNode(view.root, node.folderSourceOwnerId);
+		const source = owner?.node.folderSource;
+		if (!source) return;
+		const key = unitRefKey(node.ref);
+		if (!source.removedRefs) source.removedRefs = [key];
+		else if (!source.removedRefs.includes(key)) source.removedRefs.push(key);
 	}
 
 	addMetaFolder(viewId: string, parentId: string | null, label: string): ViewNode | null {
@@ -533,12 +772,28 @@ export class ViewsManager {
 			clone.apiSource = cloneApiSource(node.apiSource);
 			clone.apiItemState = {};
 			clone.apiItemOrder = [];
+		} else if (node.csvSource) {
+			// PR-7: same reference-sharing hazard and "copy starts with grey dot, no rows until first
+			// refresh" rule as `apiSource` above.
+			clone.csvSource = cloneCsvSource(node.csvSource);
+			clone.apiItemState = {};
+			clone.apiItemOrder = [];
+		} else if (node.markdownTableSource) {
+			// PR-8: same reference-sharing hazard and "copy starts with grey dot, no rows until first
+			// refresh" rule as `apiSource`/`csvSource` above.
+			clone.markdownTableSource = cloneMarkdownTableSource(node.markdownTableSource);
+			clone.apiItemState = {};
+			clone.apiItemOrder = [];
 		} else if (node.apiItemState) {
 			clone.apiItemState = cloneApiItemState(node.apiItemState);
 			clone.apiItemOrder = node.apiItemOrder ? [...node.apiItemOrder] : [];
 		}
 		clone.apiCache = undefined;
 		clone.apiAwaitingConfirmation = undefined;
+
+		// PR-4: same reference-sharing hazard as `apiSource` above — a shallow `{...node}` spread
+		// would leave both nodes' `folderSource` pointing at the very same object.
+		clone.folderSource = node.folderSource ? { ...node.folderSource } : node.folderSource;
 
 		return clone;
 	}
@@ -731,17 +986,197 @@ export class ViewsManager {
 	 * live source, and it stops refreshing entirely — no more dot at all) but deliberately keeps
 	 * `apiItemState`/`apiItemOrder` untouched: the rows themselves, with whatever status/notes they
 	 * already had, survive as plain static rows. The device-local headers entry is a separate store the
-	 * caller owns (see `ApiHeadersStore`); this method only ever touches the synced view data. */
+	 * caller owns (see `ApiHeadersStore`); this method only ever touches the synced view data.
+	 *
+	 * R1 fix: `apiSource`, `csvSource`, and (PR-8) `markdownTableSource` share the same `apiCache`/
+	 * `apiAwaitingConfirmation` fields (all three produce the same kind of placeholder row), so setting
+	 * one live must clear the other two — otherwise they'd all keep refreshing into the same state and
+	 * stomp each other's rows. */
 	setApiSource(viewId: string, nodeId: string, source: ApiSourceConfig | undefined): void {
 		const view = this.getView(viewId);
 		const found = view && this.findNode(view.root, nodeId);
 		if (!found || found.node.type !== "meta") return;
+		const hadOtherSource = found.node.csvSource !== undefined || found.node.markdownTableSource !== undefined;
 		found.node.apiSource = source;
-		if (!source) {
+		if (source) {
+			found.node.csvSource = undefined;
+			found.node.markdownTableSource = undefined;
+		}
+		if (!source || hadOtherSource) {
 			found.node.apiCache = undefined;
 			found.node.apiAwaitingConfirmation = undefined;
 		}
 		this.save();
+	}
+
+	/** PR-7 (G17-G19/G22-G23): sets a Folder's CSV data source, or removes it (passing `undefined`) —
+	 * exact mirror of `setApiSource`, since a CSV source produces the same kind of placeholder rows and
+	 * the same "removal keeps the rows as static, drops only cache/confirmation" rule applies.
+	 *
+	 * R1 fix: mirrors `setApiSource`'s clearing of the other source types — see its doc comment. */
+	setCsvSource(viewId: string, nodeId: string, source: CsvSourceConfig | undefined): void {
+		const view = this.getView(viewId);
+		const found = view && this.findNode(view.root, nodeId);
+		if (!found || found.node.type !== "meta") return;
+		const hadOtherSource = found.node.apiSource !== undefined || found.node.markdownTableSource !== undefined;
+		found.node.csvSource = source;
+		if (source) {
+			found.node.apiSource = undefined;
+			found.node.markdownTableSource = undefined;
+		}
+		if (!source || hadOtherSource) {
+			found.node.apiCache = undefined;
+			found.node.apiAwaitingConfirmation = undefined;
+		}
+		this.save();
+	}
+
+	/** PR-8 (G17-G20/G22-G24): sets a Folder's Markdown Table data source, or removes it (passing
+	 * `undefined`) — exact mirror of `setApiSource`/`setCsvSource`, since a Markdown Table source
+	 * produces the same kind of placeholder rows and the same "removal keeps the rows as static, drops
+	 * only cache/confirmation" rule applies.
+	 *
+	 * R1 fix: mirrors `setApiSource`'s clearing of the other source types — see its doc comment. */
+	setMarkdownTableSource(viewId: string, nodeId: string, source: MarkdownTableSourceConfig | undefined): void {
+		const view = this.getView(viewId);
+		const found = view && this.findNode(view.root, nodeId);
+		if (!found || found.node.type !== "meta") return;
+		const hadOtherSource = found.node.apiSource !== undefined || found.node.csvSource !== undefined;
+		found.node.markdownTableSource = source;
+		if (source) {
+			found.node.apiSource = undefined;
+			found.node.csvSource = undefined;
+		}
+		if (!source || hadOtherSource) {
+			found.node.apiCache = undefined;
+			found.node.apiAwaitingConfirmation = undefined;
+		}
+		this.save();
+	}
+
+	/** PR-4 (G4/G5/G10): sets a Folder's Folder data source, or removes it (passing `undefined` —
+	 * "Remove data source"). Unlike `setApiSource`, removal needs no special-case cleanup: Folder-
+	 * source children are ordinary real `ViewNode` units (not placeholder rows tied to a live source),
+	 * so they simply stop being managed/refreshed and stay exactly where they are, like any other
+	 * manually-placed unit. */
+	setFolderSource(viewId: string, nodeId: string, source: FolderSourceConfig | undefined): void {
+		const view = this.getView(viewId);
+		const found = view && this.findNode(view.root, nodeId);
+		if (!found || found.node.type !== "meta") return;
+		found.node.folderSource = source;
+		this.save();
+	}
+
+	/** PR-4 (G3/G5/G10/G16): resolves the Folder source's target and reconciles this node's children
+	 * against it (adds newly-appeared children, drops any whose kind got toggled off, leaves
+	 * everything else — including a since-deleted managed child's now-missing ref — exactly as it
+	 * is; see `buildFolderSourceChildren`'s own doc comment for the full reconciliation contract). A
+	 * no-op if the node isn't a meta node with a Folder source. Read-only against the vault: this
+	 * never creates/moves/deletes anything on disk (F5). */
+	refreshFolderSource(viewId: string, nodeId: string, outsidePath?: string): void {
+		const view = this.getView(viewId);
+		if (!view) return;
+		const found = this.findNode(view.root, nodeId);
+		if (!found || found.node.type !== "meta" || !found.node.folderSource) return;
+		const ownerId = found.node.id;
+		found.node.children = buildFolderSourceChildren(
+			this.app.vault,
+			found.node.folderSource,
+			found.node.children,
+			(ref) => ({
+				id: generateNodeId(),
+				type: "unit",
+				ref,
+				children: [],
+				folderSourceManaged: true,
+				folderSourceOwnerId: ownerId,
+			}),
+			{ sourceNodeId: ownerId, viewRoot: view.root },
+			outsidePath
+		);
+		this.sweepFolderSourceDeletedPlaceholders(found.node);
+		this.save();
+	}
+
+	/** PR-6: the "next reconciliation pass" half of the mode-switch edge cases — re-applies
+	 * `reconcileFolderSourceChildDelete` to every placeholder this Folder source previously demoted a
+	 * deleted child into, using the source's *current* `mode` rather than whatever mode was active at
+	 * the moment each one was created. Switching to "overwrite" sweeps every one of them away with no
+	 * warning (G14, read at reconciliation time); switching between "merge"/"append" reshapes them in
+	 * place.
+	 *
+	 * R2 fix: only ever touches an entry already marked `folderSourceDeleted` — a node can carry
+	 * `apiItemState` rows that did NOT come from this demotion (e.g. it still has leftover entries
+	 * from when it was an `apiSource`, with `setApiSource`/`setFolderSource` each leaving the other's
+	 * state alone), and this sweep must never fold one of those into "not found"/append-link limbo
+	 * just because it happens to share the same node.
+	 *
+	 * R1 fix: passes every existing field (`secondary`, `noteRef`, `position`) through as `base`, not
+	 * just four of them, so a `noteRef`/`secondary` attached since the original delete (e.g. via "Add
+	 * note") survives this and every later sweep instead of being silently dropped. */
+	private sweepFolderSourceDeletedPlaceholders(node: ViewNode): void {
+		if (!node.folderSource || !node.apiItemState) return;
+		const mode = node.folderSource.mode ?? "merge";
+		for (const [id, item] of Object.entries(node.apiItemState)) {
+			if (!item.folderSourceDeleted) continue;
+			const base = {
+				id: item.id,
+				label: item.label,
+				lastSeenAt: item.lastSeenAt ?? new Date().toISOString(),
+				explicitStatusId: item.explicitStatusId,
+				secondary: item.secondary,
+				noteRef: item.noteRef,
+				position: item.position,
+			};
+			const reconciled = reconcileFolderSourceChildDelete(mode, base);
+			if (!reconciled) {
+				delete node.apiItemState[id];
+				if (node.apiItemOrder) node.apiItemOrder = node.apiItemOrder.filter((x) => x !== id);
+			} else {
+				node.apiItemState[id] = reconciled;
+			}
+		}
+	}
+
+	/** T1 fix: every ref currently managed by an Inside-Vault Folder source, across every view.
+	 * `main.ts` feeds this straight into `UnitIndex.setFolderSourceRefs` after every change
+	 * (`onChange`) so Folder-source children resolve through `ExplorerView.resolveRef`'s normal
+	 * `unitsByRefKey` lookup as real units (G3), instead of only existing as `ViewNode`s the index
+	 * never knew about and falling through to the generic missing-ref fallback. Walks every view (not
+	 * just the active one) since the index is shared/global, not per-view.
+	 *
+	 * R4 fix: an Outside-Vault-managed child's `ref.path` is now just an entry name relative to its
+	 * source's root (never the absolute device path — see `listOutsideChildrenWith`'s own doc
+	 * comment), which makes it exactly the kind of short, ordinary-looking string a real vault path
+	 * could also be, or that two different Outside sources could each produce. `UnitIndex`'s global
+	 * `unitsByRefKey`-shaped map has no notion of "which source owns this," so folding these in here
+	 * would risk colliding with a real vault unit, or with another Outside source's same-named child.
+	 * `ExplorerView.resolveOutsideManagedRowInfo` already bypasses the index entirely for these rows
+	 * (G8's own doc comment), so excluding them here costs nothing — they were never looked up through
+	 * this path. */
+	getFolderSourceManagedRefs(): UnitRef[] {
+		const refs: UnitRef[] = [];
+		for (const view of this.views) {
+			const byId = new Map<string, ViewNode>();
+			const index = (nodes: ViewNode[]): void => {
+				for (const node of nodes) {
+					byId.set(node.id, node);
+					index(node.children);
+				}
+			};
+			index(view.root);
+			const walk = (nodes: ViewNode[]): void => {
+				for (const node of nodes) {
+					if (node.type === "unit" && node.folderSourceManaged && node.ref) {
+						const owner = node.folderSourceOwnerId ? byId.get(node.folderSourceOwnerId) : undefined;
+						if (owner?.folderSource?.location !== "outside") refs.push(node.ref);
+					}
+					walk(node.children);
+				}
+			};
+			walk(view.root);
+		}
+		return refs;
 	}
 
 	/** G8: sets one API item's own explicit status — the item has no real `ViewNode`, so
@@ -765,6 +1200,35 @@ export class ViewsManager {
 		this.save();
 	}
 
+	/** G26/G29: removes a placeholder row's `apiItemState` entry outright — gated by the caller on
+	 * the row's shared placeholder tag plus `notFound` (E6: removal still proceeds even if the row
+	 * flipped back to found between menu-open and click, since this method itself never re-checks
+	 * `notFound`). No bulk variant exists (F3) and there is no undo (F4) — this is the only way an
+	 * entry is deleted here. */
+	removeApiItem(viewId: string, nodeId: string, itemId: string): void {
+		const view = this.getView(viewId);
+		const found = view && this.findNode(view.root, nodeId);
+		if (!found?.node.apiItemState || !(itemId in found.node.apiItemState)) return;
+		delete found.node.apiItemState[itemId];
+		if (found.node.apiItemOrder) {
+			found.node.apiItemOrder = found.node.apiItemOrder.filter((id) => id !== itemId);
+		}
+		this.save();
+	}
+
+	/** G28/G29: manual backstop that clears only a placeholder row's stale `noteRef`, independent of
+	 * whether G27's vault-delete auto-clear already ran (or ever could) — usable for any reason the
+	 * reference went stale. The row's other fields (`notFound`/`lastSeenAt` included) are untouched.
+	 * A no-op, safely, if `noteRef` is already unset. */
+	clearApiItemNoteRef(viewId: string, nodeId: string, itemId: string): void {
+		const view = this.getView(viewId);
+		const found = view && this.findNode(view.root, nodeId);
+		const item = found?.node.apiItemState?.[itemId];
+		if (!item) return;
+		item.noteRef = undefined;
+		this.save();
+	}
+
 	/** G1/G6/G11: for callers (`ApiSourceController`) that mutate a node's `apiCache`/`apiItemState`
 	 * fields directly rather than through a dedicated setter — persists and notifies the same as any
 	 * other change here. */
@@ -776,15 +1240,18 @@ export class ViewsManager {
 	onVaultRename(oldPath: string, newPath: string): void {
 		let changed = false;
 		for (const view of this.views) {
-			if (this.rewriteTree(view.root, oldPath, newPath)) changed = true;
+			if (this.rewriteTree(view.root, oldPath, newPath, view.root)) changed = true;
 		}
 		if (changed) this.save();
 	}
 
-	private rewriteTree(nodes: ViewNode[], oldPath: string, newPath: string): boolean {
+	private rewriteTree(nodes: ViewNode[], oldPath: string, newPath: string, root: ViewNode[]): boolean {
 		let changed = false;
 		for (const node of nodes) {
-			if (node.type === "unit" && node.ref) {
+			// R9(a): an Outside-Vault-managed child's `ref.path` is a bare name relative to its source's
+			// root, not a vault path — it must never be rewritten just because it happens to collide
+			// with a renamed vault-root path (see `isOutsideOwned`'s own doc comment).
+			if (node.type === "unit" && node.ref && !this.isOutsideOwned(root, node)) {
 				const rewritten = rewriteRefPath(node.ref, oldPath, newPath);
 				if (rewritten !== node.ref) {
 					node.ref = rewritten;
@@ -804,7 +1271,145 @@ export class ViewsManager {
 					}
 				}
 			}
-			if (this.rewriteTree(node.children, oldPath, newPath)) changed = true;
+			// PR-4 (G5): `folderSource.path` is a plain vault-relative string, not a `UnitRef` — same
+			// rename-integrity rule, via the same shared helper `rewriteRefPath` itself now delegates to.
+			// PR-4 (R8): `folderSource.removedRefs` is a set of `unitRefKey` strings, each embedding a
+			// path of its own — they go stale on the same rename unless rewritten the same way, or a
+			// removed row's key stops matching and the row comes back on the next refresh.
+			// R9(a): both fields are meaningless while `location` is "outside" (the device-local path
+			// lives in `FolderSourcePathStore`, and `removedRefs` keys are root-relative Outside names,
+			// never vault paths) — rewriting either on a rename would corrupt them for no reason.
+			if (node.folderSource && node.folderSource.location !== "outside") {
+				const rewrittenPath = rewritePathString(node.folderSource.path, oldPath, newPath);
+				const removedRefs = node.folderSource.removedRefs;
+				const rewrittenRemovedRefs = removedRefs?.map((key) => rewriteRefKeyPath(key, oldPath, newPath));
+				const removedRefsChanged =
+					!!removedRefs && !!rewrittenRemovedRefs && removedRefs.some((key, i) => key !== rewrittenRemovedRefs[i]);
+				if (rewrittenPath !== node.folderSource.path || removedRefsChanged) {
+					node.folderSource = { ...node.folderSource, path: rewrittenPath, removedRefs: rewrittenRemovedRefs };
+					changed = true;
+				}
+			}
+			// PR-7 (G18): `csvSource.path` is the same kind of plain vault-relative string as
+			// `folderSource.path` — same rename-integrity rule via the same shared helper.
+			if (node.csvSource) {
+				const rewrittenCsvPath = rewritePathString(node.csvSource.path, oldPath, newPath);
+				if (rewrittenCsvPath !== node.csvSource.path) {
+					node.csvSource = { ...node.csvSource, path: rewrittenCsvPath };
+					changed = true;
+				}
+			}
+			// PR-8 (G18): `markdownTableSource.path` is the same kind of plain vault-relative string as
+			// `csvSource.path` — same rename-integrity rule via the same shared helper.
+			if (node.markdownTableSource) {
+				const rewrittenMdPath = rewritePathString(node.markdownTableSource.path, oldPath, newPath);
+				if (rewrittenMdPath !== node.markdownTableSource.path) {
+					node.markdownTableSource = { ...node.markdownTableSource, path: rewrittenMdPath };
+					changed = true;
+				}
+			}
+			if (this.rewriteTree(node.children, oldPath, newPath, root)) changed = true;
+		}
+		return changed;
+	}
+
+	/** G27: a vault `delete` event clears any placeholder row's `noteRef` that pointed at the
+	 * deleted path — additive alongside `unitIndex.onVaultDelete`/`graduation.handleDelete`
+	 * (`main.ts`), independent of `onVaultRename`'s path-rewrite logic above (rename rewrites;
+	 * delete clears, since there is no new path to rewrite to). Only the `noteRef` field is cleared;
+	 * the `apiItemState` entry itself survives untouched (E5: a path matching nothing is a no-op;
+	 * clears every matching entry across every node/view, not just the first). Exact-path match
+	 * only — a single deleted file, not a deleted folder's whole subtree — so a delete immediately
+	 * followed (same tick) by a recreate at the same path, where the `noteRef` was already rewritten
+	 * elsewhere to a different path, is never mistaken for this file's reference. */
+	onVaultDelete(path: string): void {
+		let changed = false;
+		const nowIso = new Date().toISOString();
+		// PR-6 (G12-G14): demote any Folder-source-managed child at `path` into a placeholder on its
+		// owning Folder node *before* the clear sweep below, so an append-mode placeholder's freshly
+		// attached `noteRef` (deliberately pointed at the just-deleted path so G27's existing clear
+		// mechanism picks it up) is cleared within this same call — genuine reuse of that mechanism,
+		// not a second copy of it.
+		for (const view of this.views) {
+			if (this.reconcileFolderSourceDeletesForPath(view.root, path, nowIso)) changed = true;
+		}
+		for (const view of this.views) {
+			if (this.clearNoteRefsForPath(view.root, path)) changed = true;
+		}
+		if (changed) this.save();
+	}
+
+	/** PR-6 (G12-G14): the delete-time half of the mode-reconciliation rule — finds every real
+	 * `ViewNode` this view's Folder sources manage whose `ref.path` is the just-deleted `path`, lifts
+	 * its own children up one level (same contract as any other removal here), and demotes it per its
+	 * owning source's *current* `mode` via `reconcileFolderSourceChildDelete` (shared with the later
+	 * reconciliation-time sweep in `sweepFolderSourceDeletedPlaceholders`, so this stays the one
+	 * parameterized rule rather than its own ad-hoc branch). An Outside-Vault-owned child is skipped
+	 * outright — its `ref.path` is a bare root-relative name, never a real vault path, and Outside
+	 * deletions are PR-5's own unresolved-path contract, not a vault `delete` event. */
+	private reconcileFolderSourceDeletesForPath(root: ViewNode[], path: string, nowIso: string): boolean {
+		const byId = new Map<string, ViewNode>();
+		const indexIds = (nodes: ViewNode[]): void => {
+			for (const node of nodes) {
+				byId.set(node.id, node);
+				indexIds(node.children);
+			}
+		};
+		indexIds(root);
+
+		type Match = { list: ViewNode[]; index: number; node: ViewNode };
+		const matches: Match[] = [];
+		const collect = (list: ViewNode[]): void => {
+			for (let i = 0; i < list.length; i++) {
+				const node = list[i];
+				if (node.type === "unit" && node.folderSourceManaged && node.ref && node.ref.path === path) {
+					matches.push({ list, index: i, node });
+				}
+				collect(node.children);
+			}
+		};
+		collect(root);
+		if (matches.length === 0) return false;
+
+		// Highest index first within each list, so splicing one match never shifts another's index.
+		matches.sort((a, b) => b.index - a.index);
+		for (const { list, index, node } of matches) {
+			const owner = node.folderSourceOwnerId ? byId.get(node.folderSourceOwnerId) : undefined;
+			if (owner?.folderSource?.location === "outside") continue;
+			const ref = node.ref as UnitRef;
+			const mode = owner?.folderSource?.mode ?? "merge";
+			// R3 fix: strip the extension off a file's basename (matching what the row displayed while
+			// the file still existed), rather than the raw last path segment — "a.md" showing where "a"
+			// used to be was the bug.
+			const label = basenameForDeletedRef(ref);
+			// R3 fix: `index` is this node's slot among `owner`'s real children right now, before the
+			// splice below removes it — `renderNodeList` uses it to put the resulting row back in
+			// (approximately) that same slot instead of always appending it after every real child.
+			const base = { id: unitRefKey(ref), label, lastSeenAt: nowIso, explicitStatusId: node.explicitStatusId, position: index };
+			const placeholder = reconcileFolderSourceChildDelete(mode, base, ref);
+			list.splice(index, 1, ...node.children);
+			if (placeholder && owner) {
+				if (!owner.apiItemState) owner.apiItemState = {};
+				if (!owner.apiItemOrder) owner.apiItemOrder = [];
+				owner.apiItemState[placeholder.id] = placeholder;
+				if (!owner.apiItemOrder.includes(placeholder.id)) owner.apiItemOrder.push(placeholder.id);
+			}
+		}
+		return true;
+	}
+
+	private clearNoteRefsForPath(nodes: ViewNode[], path: string): boolean {
+		let changed = false;
+		for (const node of nodes) {
+			if (node.apiItemState) {
+				for (const item of Object.values(node.apiItemState)) {
+					if (item.noteRef && item.noteRef.path === path) {
+						item.noteRef = undefined;
+						changed = true;
+					}
+				}
+			}
+			if (this.clearNoteRefsForPath(node.children, path)) changed = true;
 		}
 		return changed;
 	}

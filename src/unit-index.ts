@@ -24,6 +24,14 @@ export class UnitIndex {
 	private promotedFiles = new Map<string, Unit>();
 	private promotedFolders = new Map<string, Unit>();
 	private promotedBlocks = new Map<string, Unit>();
+	/** PR-4 (T1): every ref any Folder source currently manages (`ViewsManager.getFolderSourceManagedRefs`),
+	 * lifted into the same `promoted-*` shape a manual/link promotion gets — so a Folder-source child
+	 * (an ordinary nested file/folder, never a vault-root folder) resolves through `getUnits()`/
+	 * `ExplorerView.resolveRef`'s normal lookup instead of falling through to the missing-ref fallback.
+	 * Kept separate from `manualPromotions` (never persisted as one — `main.ts` only ever persists
+	 * `getManualPromotions()`) since this set is derived fresh from the current view tree on every
+	 * change, not a standing user choice. */
+	private folderSourceUnits = new Map<string, Unit>();
 	private manualPromotions: UnitRef[];
 	/** PR-2: per-view dismiss state — view id -> dismissed refs for that view. A global dismiss is
 	 * never enumerated into these; see `dismissedGlobal`. */
@@ -72,6 +80,8 @@ export class UnitIndex {
 			...this.promotedFiles.values(),
 			...this.promotedFolders.values(),
 			...this.promotedBlocks.values(),
+			// Folder-source units sit in `base` so the R3 and R1 rules below treat them like any other promoted unit.
+			...this.folderSourceUnits.values(),
 		].filter((unit) => !(unit.type === "promoted-file" && addedRefKeys.has(unitRefKey(unitToRef(unit)))));
 		// R1 (E4): dedup the added-file overlay by *file-kind ref*, not by bare path — a promoted-block
 		// unit's `.path` is its containing file's path (it's still kind "block" per `unitToRef`), so it
@@ -85,6 +95,26 @@ export class UnitIndex {
 			.map((item) => ({ type: "added-file", path: item.ref.path }));
 		const all = [...base, ...added];
 		return this.held.size === 0 ? all : all.filter((unit) => !this.held.has(unit.path));
+	}
+
+	/** PR-4 (T1): replaces the whole set of Folder-source-managed refs with `refs` (the caller —
+	 * `main.ts`, fed by `ViewsManager.getFolderSourceManagedRefs` — always passes the complete
+	 * current list), so a ref no longer managed by any source drops out on its own rather than
+	 * needing an explicit remove call. */
+	setFolderSourceRefs(refs: UnitRef[]): void {
+		const next = new Map<string, Unit>();
+		for (const ref of refs) {
+			const topLevelFolder = this.topLevelFolderFor(ref.path) ?? "";
+			if (ref.kind === "file") {
+				next.set(`file:${ref.path}`, { type: "promoted-file", path: ref.path, topLevelFolder });
+			} else if (ref.kind === "folder") {
+				next.set(`folder:${ref.path}`, { type: "promoted-folder", path: ref.path, topLevelFolder });
+			} else {
+				next.set(`block:${ref.path}#${ref.subpath}`, { type: "promoted-block", path: ref.path, subpath: ref.subpath });
+			}
+		}
+		this.folderSourceUnits = next;
+		this.notifyChange();
 	}
 
 	/** Keeps the unit at `path` out of `getUnits` until the returned release is called (once; extra
