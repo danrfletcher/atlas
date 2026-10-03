@@ -67,6 +67,8 @@ interface RowInfo {
 	secondary?: string;
 	icon: string;
 	promoted: boolean;
+	/** PR-3 (G3): renders an "added" badge in place of "promoted" — the two are mutually exclusive. */
+	added: boolean;
 	missing: boolean;
 }
 
@@ -98,6 +100,40 @@ export class MetaFolderSuggestModal extends FuzzySuggestModal<MetaTarget> {
 	onChooseItem(target: MetaTarget): void {
 		this.onChoose(target);
 	}
+}
+
+/** PR-3 (G2): the "+" inbox-add modal. Deliberately broader than auto-promotion eligibility — its
+ * list source is every vault file, not the "references outside the module" rule (F3) — narrowed only
+ * by `candidateFilesForAdd`'s already-a-unit-somewhere exclusion. */
+export class AddFileSuggestModal extends FuzzySuggestModal<TFile> {
+	constructor(app: AtlasPlugin["app"], private files: TFile[], private onChoose: (file: TFile) => void) {
+		super(app);
+	}
+	getItems(): TFile[] {
+		return this.files;
+	}
+	getItemText(file: TFile): string {
+		return file.path;
+	}
+	onChooseItem(file: TFile): void {
+		this.onChoose(file);
+	}
+}
+
+/** PR-3 (G2, E4): every vault file minus any file already a unit somewhere (auto-promoted, manually
+ * promoted, already added) or already placed/nested as a node in any view — so picking one from the
+ * modal can never produce a duplicate inbox row. List-level exclusion only: no runtime dedupe is
+ * exercised once a file is chosen. */
+export function candidateFilesForAdd(allFiles: TFile[], units: Unit[], isPlacedAnywhere: (ref: UnitRef) => boolean): TFile[] {
+	// R2: only a *file-kind* ref counts as "the file already present as a unit" (G2) — a promoted-block
+	// unit's `.path` is its containing file's path even though it's kind "block" (per `unitToRef`), so
+	// comparing bare paths wrongly excluded a file whose only unit is a promoted block from this list.
+	const fileRefKeys = new Set(
+		units.filter((unit) => unitToRef(unit).kind === "file").map((unit) => unitRefKey(unitToRef(unit)))
+	);
+	return allFiles.filter(
+		(file) => !fileRefKeys.has(unitRefKey({ kind: "file", path: file.path })) && !isPlacedAnywhere({ kind: "file", path: file.path })
+	);
 }
 
 /** PR 9 (issue 2): replaces inline fold/unfold for modules with a browsable read-only tree of the
@@ -260,6 +296,11 @@ export class AtlasExplorerView extends ItemView {
 	private sortMode: "manual" | "alphabetical" = "manual";
 	private bucketCollapsed = false;
 	private inboxCollapsed = true;
+	/** PR-5 (G7/G8): whether dismissed inbox rows render inline, tagged "hidden". Mirrors
+	 * `inboxCollapsed` — a single instance field rather than per-view, matching this view's existing
+	 * convention that transient section-header UI state is shared across view switches within the
+	 * same explorer instance, not stored per `View`. Off by default on fresh load, same as collapse. */
+	private showDismissed = false;
 	/** PR 9: filter input is hidden behind a reveal toggle now instead of always shown. */
 	private filterRevealed = false;
 	/** One-shot: set when the reveal toggle is clicked open, consumed by the very next
@@ -940,11 +981,25 @@ export class AtlasExplorerView extends ItemView {
 		const unit = this.unitsByRefKey.get(unitRefKey(ref));
 		if (unit) {
 			const resolved = await resolveUnit(this.plugin.app, this.plugin.settings, unit, this.plugin.freeBlockTextCache);
-			if (resolved) return { text: resolved.text, secondary: resolved.secondary, icon: resolved.icon, promoted: resolved.promoted, missing: false };
+			if (resolved)
+				return {
+					text: resolved.text,
+					secondary: resolved.secondary,
+					icon: resolved.icon,
+					promoted: resolved.promoted,
+					added: resolved.added,
+					missing: false,
+				};
 		}
 		// F9: refs are never deleted automatically — render greyed as missing rather than crash.
 		const fallbackText = ref.kind === "block" ? ref.subpath : (ref.path.split("/").pop() ?? ref.path);
-		return { text: fallbackText, icon: ref.kind === "folder" ? "folder" : ref.kind === "block" ? "quote" : "file", promoted: false, missing: true };
+		return {
+			text: fallbackText,
+			icon: ref.kind === "folder" ? "folder" : ref.kind === "block" ? "quote" : "file",
+			promoted: false,
+			added: false,
+			missing: true,
+		};
 	}
 
 	/** PR-5 (G8): an Outside-Vault-managed child's `ref.path` is an absolute filesystem path, never
@@ -958,7 +1013,7 @@ export class AtlasExplorerView extends ItemView {
 	 * vouches for. */
 	private resolveOutsideManagedRowInfo(ref: UnitRef): RowInfo {
 		const text = ref.kind === "block" ? ref.subpath : (ref.path.split("/").pop() ?? ref.path);
-		return { text, icon: ref.kind === "folder" ? "folder" : "file", promoted: false, missing: false };
+		return { text, icon: ref.kind === "folder" ? "folder" : "file", promoted: false, added: false, missing: false };
 	}
 
 	/** PR-5 (G8/F7): true only for a `type: "unit"` node that a specifically Outside-Vault Folder
@@ -1068,9 +1123,15 @@ export class AtlasExplorerView extends ItemView {
 		const bucketEl = container.createDiv({ cls: "atlas-section atlas-bucket" });
 		await this.renderBucketSection(bucketEl, view);
 
-		const inboxUnits = this.plugin.viewsManager.getInboxUnits(allUnits, view.id, view.inboxMode);
+		const inboxUnits = this.plugin.viewsManager.getInboxUnits(allUnits, view.id, view.inboxMode, this.plugin.unitIndex);
+		// PR-5 (G8): only resolved while the toggle is active — otherwise dismissed rows never enter
+		// the merged/sorted list at all, matching G8's "renders inline in the existing list" via an
+		// extra input set rather than a post-filter that would still momentarily touch every dismissed row.
+		const dismissedUnits = this.showDismissed
+			? this.plugin.viewsManager.getDismissedInboxUnits(allUnits, view.id, view.inboxMode, this.plugin.unitIndex)
+			: [];
 		const inboxEl = container.createDiv({ cls: "atlas-section atlas-inbox" });
-		await this.renderInboxSection(inboxEl, view, inboxUnits, inboxViewportScrollTop);
+		await this.renderInboxSection(inboxEl, view, inboxUnits, dismissedUnits, inboxViewportScrollTop);
 
 		if (activeRowKey) {
 			const restored = container.querySelector<HTMLElement>(`[data-select-key="${CSS.escape(activeRowKey)}"]`);
@@ -1876,6 +1937,7 @@ export class AtlasExplorerView extends ItemView {
 		this.renderRowIcon(iconEl, view, node, ancestors, info.icon);
 		row.createSpan({ cls: "atlas-row-text", text: info.text });
 		if (info.promoted) row.createSpan({ cls: "atlas-badge", text: "promoted" });
+		if (info.added) row.createSpan({ cls: "atlas-badge", text: "added" });
 		if (info.secondary) row.createSpan({ cls: "atlas-row-secondary", text: info.secondary });
 		if (info.missing) {
 			row.createSpan({ cls: "atlas-row-secondary", text: "(missing)" });
@@ -1918,12 +1980,26 @@ export class AtlasExplorerView extends ItemView {
 
 	// --- inbox -----------------------------------------------------------------------------------
 
-	private async renderInboxSection(container: HTMLElement, view: View, units: Unit[], viewportScrollTop: number): Promise<void> {
+	private async renderInboxSection(
+		container: HTMLElement,
+		view: View,
+		units: Unit[],
+		dismissedUnits: Unit[],
+		viewportScrollTop: number
+	): Promise<void> {
 		const header = container.createDiv({ cls: "atlas-section-header" });
 		const chevron = header.createDiv({ cls: "atlas-chevron" });
 		setIcon(chevron, this.inboxCollapsed ? "chevron-right" : "chevron-down");
 		header.createSpan({ text: "Inbox" });
+		// PR-5: the count badge reflects the real (undismissed) inbox size regardless of whether
+		// dismissed rows are currently revealed — "Show Dismissed" is a temporary peek, not a change
+		// to what's actually in the inbox, so the count shouldn't jump around as it's toggled.
 		header.createSpan({ cls: "atlas-badge atlas-count-badge", text: String(units.length) });
+		// PR-5 (G7): additive — the header's existing collapse `click` listener below is untouched.
+		header.addEventListener("contextmenu", (evt) => {
+			evt.preventDefault();
+			this.showInboxHeaderMenu(evt);
+		});
 
 		const modeToggle = header.createDiv({ cls: "atlas-inbox-mode" });
 		for (const mode of ["view", "global"] as const) {
@@ -1934,6 +2010,18 @@ export class AtlasExplorerView extends ItemView {
 				this.plugin.viewsManager.setInboxMode(view.id, mode);
 			});
 		}
+
+		// PR-3 (G1): a sibling of `modeToggle`, not nested inside it — `.atlas-inbox-mode` already
+		// carries its own `margin-left: auto` to push the toggle to the row's right edge, so this only
+		// needs `.atlas-section-header`'s existing flex `gap` to sit beside it without a second
+		// competing auto margin.
+		const addBtn = header.createDiv({ cls: "atlas-inbox-add-btn" });
+		setIcon(addBtn, "plus");
+		setTooltip(addBtn, "Add file to inbox");
+		addBtn.addEventListener("click", (evt) => {
+			evt.stopPropagation();
+			this.openAddFileModal();
+		});
 
 		// PR 11: same fix as the bucket section and the meta-folder chevron — content always renders
 		// into a dedicated wrapper so the collapse is a CSS transition, not a hard snap between
@@ -1952,8 +2040,14 @@ export class AtlasExplorerView extends ItemView {
 		const listEl = sectionInner.createDiv({ cls: "atlas-node-list" });
 		this.makeDropZone(listEl, { kind: "inbox-area", viewId: view.id });
 
+		// PR-5 (G8): dismissed rows are merged into the exact same input list the rest of this
+		// function already sorts/selects/virtualizes — never a second container or render path.
+		const combined = [
+			...units.map((unit) => ({ unit, hidden: false })),
+			...dismissedUnits.map((unit) => ({ unit, hidden: true })),
+		];
 		const resolved = await Promise.all(
-			units.map(async (unit) => ({ unit, ref: unitToRef(unit), info: await this.resolveRef(unitToRef(unit)) }))
+			combined.map(async ({ unit, hidden }) => ({ unit, ref: unitToRef(unit), hidden, info: await this.resolveRef(unitToRef(unit)) }))
 		);
 		const filtered = resolved.filter((r) => this.matchesFilter(r.info.text));
 		const sorted =
@@ -1978,7 +2072,7 @@ export class AtlasExplorerView extends ItemView {
 		// The non-virtualized fallback this used to need for expanded folder-unit internals is gone —
 		// PR 9 (issue 2) replaced inline inbox expansion with the Module Contents modal, so every
 		// inbox row is now fixed-height and the virtualized path always applies.
-		this.renderVirtualizedInboxRows(listEl, sorted, viewportScrollTop);
+		this.renderVirtualizedInboxRows(listEl, sorted, viewportScrollTop, view);
 
 		let localCollapsed = this.inboxCollapsed;
 		let pendingPersist: number | undefined;
@@ -1996,7 +2090,22 @@ export class AtlasExplorerView extends ItemView {
 		});
 	}
 
-	private renderInboxRow(container: HTMLElement, ref: UnitRef, info: RowInfo): HTMLElement {
+	/** PR-3 (G2, G3): opens the "+" modal over every vault file minus whatever's already a unit or
+	 * placed somewhere, and on selection marks it "added" (terminal state — see `markAdded`) and
+	 * persists immediately, matching the click-driven-action convention `promoteAndPlace` uses. */
+	private openAddFileModal(): void {
+		const units = this.plugin.unitIndex.getUnits();
+		const candidates = candidateFilesForAdd(this.plugin.app.vault.getFiles(), units, (ref) =>
+			this.plugin.viewsManager.isPlacedAnywhere(ref)
+		);
+		new AddFileSuggestModal(this.plugin.app, candidates, (file) => {
+			this.plugin.unitIndex.markAdded({ kind: "file", path: file.path });
+			void this.plugin.flushSave();
+			void this.render();
+		}).open();
+	}
+
+	private renderInboxRow(container: HTMLElement, ref: UnitRef, info: RowInfo, view: View, hidden = false): HTMLElement {
 		const row = container.createDiv({ cls: "atlas-row atlas-row-unit" });
 		const key = unitRefKey(ref);
 		row.dataset.refKey = key;
@@ -2007,6 +2116,10 @@ export class AtlasExplorerView extends ItemView {
 		setIcon(iconEl, info.icon);
 		row.createSpan({ cls: "atlas-row-text", text: info.text });
 		if (info.promoted) row.createSpan({ cls: "atlas-badge", text: "promoted" });
+		if (info.added) row.createSpan({ cls: "atlas-badge", text: "added" });
+		// PR-5 (G8): independent of the promoted/added spans above — a unit can carry both at once
+		// without either clobbering the other, since each is just its own sibling span.
+		if (hidden) row.createSpan({ cls: "atlas-badge", text: "hidden" });
 		if (info.secondary) row.createSpan({ cls: "atlas-row-secondary", text: info.secondary });
 		// PR 9 (issue 2): modules never expand inline anymore, in the inbox or the bucket — the icon
 		// opens the Module Contents modal instead (see `wireModuleRow`).
@@ -2021,7 +2134,7 @@ export class AtlasExplorerView extends ItemView {
 		row.tabIndex = 0;
 		row.addEventListener("contextmenu", (evt) => {
 			evt.preventDefault();
-			this.showInboxUnitMenu(evt, ref);
+			this.showInboxUnitMenu(evt, ref, view);
 		});
 		return row;
 	}
@@ -2033,8 +2146,9 @@ export class AtlasExplorerView extends ItemView {
 	 * and bucket section on every frame. */
 	private renderVirtualizedInboxRows(
 		listEl: HTMLElement,
-		sorted: { ref: UnitRef; info: RowInfo; unit: Unit }[],
-		viewportScrollTop: number
+		sorted: { ref: UnitRef; info: RowInfo; unit: Unit; hidden: boolean }[],
+		viewportScrollTop: number,
+		view: View
 	): void {
 		const viewport = listEl.createDiv({ cls: "atlas-inbox-viewport" });
 		const spacer = viewport.createDiv({ cls: "atlas-inbox-spacer" });
@@ -2055,8 +2169,8 @@ export class AtlasExplorerView extends ItemView {
 			const count = Math.ceil(viewportHeight / INBOX_ROW_HEIGHT) + INBOX_OVERSCAN * 2;
 			const end = Math.min(sorted.length, start + count);
 			for (let i = start; i < end; i++) {
-				const { ref, info } = sorted[i];
-				const row = this.renderInboxRow(spacer, ref, info);
+				const { ref, info, hidden } = sorted[i];
+				const row = this.renderInboxRow(spacer, ref, info, view, hidden);
 				row.addClass("atlas-row-virtual");
 				row.style.top = `${i * INBOX_ROW_HEIGHT}px`;
 			}
@@ -2370,7 +2484,25 @@ export class AtlasExplorerView extends ItemView {
 		).open();
 	}
 
-	private showInboxUnitMenu(evt: MouseEvent, ref: UnitRef): void {
+	/** PR-5 (G7): the inbox section header's own right-click menu — a single toggle item, same
+	 * `Menu`/`showAtMouseEvent` construction as the toolbar view-name menu and the row menus below.
+	 * Toggling flips the instance-level `showDismissed` flag and re-renders; no persisted write, same
+	 * as `inboxCollapsed`. */
+	private showInboxHeaderMenu(evt: MouseEvent): void {
+		const menu = new Menu();
+		menu.addItem((item) =>
+			item
+				.setTitle(this.showDismissed ? "Hide Dismissed" : "Show Dismissed")
+				.setIcon(this.showDismissed ? "eye-off" : "eye")
+				.onClick(() => {
+					this.showDismissed = !this.showDismissed;
+					void this.render();
+				})
+		);
+		menu.showAtMouseEvent(evt);
+	}
+
+	private showInboxUnitMenu(evt: MouseEvent, ref: UnitRef, view: View): void {
 		const menu = new Menu();
 		menu.addItem((item) => item.setTitle("Open").setIcon("file").onClick(() => void this.openRef(ref)));
 		menu.addItem((item) => item.setTitle("Open in new tab").setIcon("file-plus").onClick(() => void this.openRef(ref, true)));
@@ -2394,6 +2526,26 @@ export class AtlasExplorerView extends ItemView {
 		menu.addItem((item) => item.setTitle("Copy link").setIcon("link").onClick(() => void this.copyLink(ref)));
 		menu.addSeparator();
 		menu.addItem((item) => item.setTitle("Place in view…").setIcon("arrow-right-left").onClick(() => this.placeInViewFlow(ref)));
+		// PR-4 (G4-G6): the only removal mechanism for any inbox row, auto-promoted or manually-added
+		// (PR-3) alike — there is no separate "remove"/"un-add" item anywhere in this menu (F1). Outside
+		// Global view this only ever touches the current view's own dismiss set; invoked while the
+		// explorer is showing Global view it writes the single global-scope entry instead (G5), which
+		// `getInboxUnits`' dismissed-OR-check (view-scope reads global-or-own-view, global-scope reads
+		// only the global set) then applies at render time for every view, including ones never opened.
+		menu.addItem((item) =>
+			item
+				.setTitle("Dismiss")
+				.setIcon("x")
+				.onClick(() => {
+					if (view.inboxMode === "global") {
+						this.plugin.unitIndex.setDismissed(ref, "global", true);
+					} else {
+						this.plugin.unitIndex.setDismissed(ref, "view", true, view.id);
+					}
+					void this.plugin.flushSave();
+					void this.render();
+				})
+		);
 		menu.showAtMouseEvent(evt);
 	}
 

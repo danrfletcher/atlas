@@ -825,11 +825,38 @@ export class ViewsManager {
 		return true;
 	}
 
-	getInboxUnits(allUnits: Unit[], viewId: string, mode: "view" | "global"): Unit[] {
-		if (mode === "global") {
-			return allUnits.filter((u) => !this.isPlacedAnywhere(unitToRef(u)));
-		}
-		return allUnits.filter((u) => !this.isPlaced(viewId, unitToRef(u)));
+	/** PR-4 (G4/G5): `unitIndex` is optional only so existing callers/tests that predate dismiss state
+	 * keep compiling unchanged — every real caller passes it. A row is excluded once dismissed per the
+	 * OR-check `UnitIndex.isDismissed` already implements: global mode only ever reads the global
+	 * dismiss set (so a non-Global dismiss never hides a row from Global, per G4's "no over-broad
+	 * write"), while view mode reads that view's own set OR'd with the global set (so a Global-view
+	 * dismiss cascades here without this method needing to enumerate views itself). */
+	getInboxUnits(allUnits: Unit[], viewId: string, mode: "view" | "global", unitIndex?: UnitIndex): Unit[] {
+		const placed =
+			mode === "global"
+				? allUnits.filter((u) => !this.isPlacedAnywhere(unitToRef(u)))
+				: allUnits.filter((u) => !this.isPlaced(viewId, unitToRef(u)));
+		if (!unitIndex) return placed;
+		return placed.filter((u) => {
+			const ref = unitToRef(u);
+			return mode === "global" ? !unitIndex.isDismissed(ref, "global") : !unitIndex.isDismissed(ref, "view", viewId);
+		});
+	}
+
+	/** PR-5 (G8): the complement of `getInboxUnits` — same placed-filter, but returns only units
+	 * dismissed for this scope, so "Show Dismissed" can reveal exactly the rows the plain inbox
+	 * excludes. Shares the same mode semantics as `getInboxUnits` (global reads only the global
+	 * dismiss set; view reads that view's own set OR'd with global), so toggling never reveals a row
+	 * that `getInboxUnits` wouldn't otherwise have hidden for the same `(viewId, mode)`. */
+	getDismissedInboxUnits(allUnits: Unit[], viewId: string, mode: "view" | "global", unitIndex: UnitIndex): Unit[] {
+		const placed =
+			mode === "global"
+				? allUnits.filter((u) => !this.isPlacedAnywhere(unitToRef(u)))
+				: allUnits.filter((u) => !this.isPlaced(viewId, unitToRef(u)));
+		return placed.filter((u) => {
+			const ref = unitToRef(u);
+			return mode === "global" ? unitIndex.isDismissed(ref, "global") : unitIndex.isDismissed(ref, "view", viewId);
+		});
 	}
 
 	setNodeCollapsed(viewId: string, nodeId: string, collapsed: boolean): void {

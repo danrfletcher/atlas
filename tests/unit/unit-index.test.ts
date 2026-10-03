@@ -4,8 +4,9 @@ import type { CachedMetadata } from "obsidian";
 import { DEFAULT_SETTINGS } from "../../src/settings";
 import type { AtlasSettings } from "../../src/settings";
 import { UnitIndex } from "../../src/unit-index";
+import { ViewsManager } from "../../src/views";
 import { seedRoot } from "../helpers";
-import type { UnitRef } from "../../src/types";
+import type { AddedItem, UnitRef } from "../../src/types";
 
 /** Wires `getFileCache`/`getFirstLinkpathDest` so `computePromotions()`'s link-scanning loop sees
  * exactly the caches and resolved destinations given here, independent of path-resolution rules. */
@@ -28,11 +29,12 @@ function makeIndex(
 	resolve: Record<string, string>,
 	manualPromotions: UnitRef[] = [],
 	settingsOverride: Partial<AtlasSettings> = {},
+	addedItems: AddedItem[] = [],
 ): { app: App; index: UnitIndex } {
 	const app = new App();
 	seedRoot(app, files, folders);
 	stubLinks(app, caches, resolve);
-	const index = new UnitIndex(app, { ...DEFAULT_SETTINGS, ...settingsOverride }, manualPromotions);
+	const index = new UnitIndex(app, { ...DEFAULT_SETTINGS, ...settingsOverride }, manualPromotions, {}, [], addedItems);
 	index.rebuild();
 	return { app, index };
 }
@@ -85,6 +87,29 @@ describe("UnitIndex.computePromotions — block/heading references (bug 1, E5/E5
 			{ Other: "ModuleB/Other.md" },
 		);
 		expect(promotedBlockPaths(index)).toEqual(["ModuleB/Other.md#^abc123"]);
+	});
+});
+
+describe("UnitIndex.getUnits() — added-file survives a later block reference to the same file (R1)", () => {
+	it("a file added via \"+\" keeps its added-file row when another note later links a block/heading inside it — dedup is by file-kind ref, not bare path", () => {
+		const { index } = makeIndex(
+			["ModuleA/Source.md", "Areas/Added.md"],
+			["ModuleA", "Areas"],
+			{
+				"ModuleA/Source.md": {
+					links: [{ link: "Added#^abc123", original: "[[Added#^abc123]]" } as never],
+				},
+			},
+			{ Added: "Areas/Added.md" },
+			[],
+			{},
+			[{ ref: { kind: "file", path: "Areas/Added.md" }, tag: "added" }],
+		);
+		// The block reference promotes a block unit (same path, kind "block") — it must not shadow
+		// the file's own added-file row, which would otherwise disappear (R1) and, if the file were
+		// also placed in a view, render greyed as "(missing)" there.
+		const units = index.getUnits().filter((u) => u.path === "Areas/Added.md");
+		expect(units.map((u) => u.type).sort()).toEqual(["added-file", "promoted-block"]);
 	});
 });
 
@@ -360,5 +385,33 @@ describe("UnitIndex.computePromotions — block references to module-less target
 			{ excludedFolders: ["_pool"] },
 		);
 		expect(promotedBlockPaths(index)).toEqual(["_pool/Def.md#^xyz"]);
+	});
+});
+
+describe("UnitIndex dismiss state vs. re-promotion — dismiss always wins (G10)", () => {
+	it("dismiss state survives a live link-cache recompute that newly promotes the dismissed ref (its outside-module link count going from zero to nonzero), and the plain inbox keeps excluding it", () => {
+		const caches: Record<string, CachedMetadata> = {};
+		const resolve: Record<string, string> = {};
+		const { app, index } = makeIndex(["ModuleA/Source.md", "ModuleB/Target.md"], ["ModuleA", "ModuleB"], caches, resolve);
+
+		// Nothing links to Target.md yet, so it has zero outside-module links and isn't promoted.
+		expect(promotedFilePaths(index)).toEqual([]);
+
+		const targetRef: UnitRef = { kind: "file", path: "ModuleB/Target.md" };
+		index.setDismissed(targetRef, "global", true);
+		expect(index.isDismissed(targetRef, "global")).toBe(true);
+
+		// A cross-module link now appears (e.g. the user edited Source.md) — Target.md's
+		// outside-module link count goes from zero to nonzero, which would promote it.
+		caches["ModuleA/Source.md"] = { links: [{ link: "Target", original: "[[Target]]" } as never] };
+		resolve["Target"] = "ModuleB/Target.md";
+		index.onMetadataResolved();
+
+		expect(promotedFilePaths(index)).toEqual(["ModuleB/Target.md"]);
+		expect(index.isDismissed(targetRef, "global")).toBe(true);
+
+		const views = new ViewsManager(app, [], "v1", () => {});
+		expect(views.getInboxUnits(index.getUnits(), "v1", "global", index).map((u) => u.path)).not.toContain("ModuleB/Target.md");
+		expect(views.getDismissedInboxUnits(index.getUnits(), "v1", "global", index).map((u) => u.path)).toContain("ModuleB/Target.md");
 	});
 });
