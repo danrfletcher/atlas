@@ -137,6 +137,10 @@ function sanitizeApiFields(node: ViewNode): void {
 				rawAction === "none" || rawAction === "run-command" || rawAction === "open-attachment" ? rawAction : undefined;
 			const command = typeof raw.command === "string" ? raw.command : undefined;
 			node.apiSource = {
+				// PR-3 R1 fix: stamp the discriminant on every load, not only when the modal builds a
+				// fresh config — without it, every API source had `type === undefined` after a reload,
+				// which narrows to DataSourceConfig's `else` branch instead of `type === "api"`.
+				type: "api",
 				url: raw.url,
 				method: "GET",
 				mapping: {
