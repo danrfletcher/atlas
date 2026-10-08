@@ -1301,7 +1301,15 @@ export class ViewsManager {
 		// PR-1.F2 (G4): only a change to the rules is a definition that flags rows. An unchanged save, or a
 		// mode change alone, leaves every flag as it was.
 		const rulesBefore = JSON.stringify(found.node.folderSource?.filters ?? null);
-		found.node.folderSource = source;
+		// PR-4 R11 fix: `removedRefs` keys only make sense within the target this source was pointed at
+		// when they were recorded — retargeting to a different folder, or switching Inside/Outside
+		// (an entirely different ref namespace, PR-4 R8), makes the old keys meaningless. Without this,
+		// a user who removed a row from one folder and later repoints the same source elsewhere would
+		// find rows silently missing there too, with no way back short of deleting and recreating the
+		// source.
+		const previous = found.node.folderSource;
+		const retargeted = !!previous && !!source && (previous.path !== source.path || previous.location !== source.location);
+		found.node.folderSource = retargeted ? { ...source, removedRefs: undefined } : source;
 		if (source) {
 			found.node.apiSource = undefined;
 			found.node.csvSource = undefined;

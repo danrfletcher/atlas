@@ -356,6 +356,59 @@ describe("PR-4 R3 — setFolderSource is mutually exclusive with api/csv/markdow
 	});
 });
 
+describe("PR-4 R11 — removedRefs resets when a Folder source is retargeted", () => {
+	it("re-pointing the same source at a different path clears removedRefs — a row removed under the old target isn't silently missing from the new one", () => {
+		const app = new MockApp();
+		app.vault.seedFolder("Projects");
+		app.vault.seedFile("Projects/a.md");
+		app.vault.seedFolder("Archive");
+		app.vault.seedFile("Archive/b.md");
+		const vm = new ViewsManager(app as unknown as App, [], "", () => {});
+		const view = vm.getViews()[0];
+		const folder = vm.addMetaFolder(view.id, null, "Folder")!;
+		vm.setFolderSource(view.id, folder.id, folderSource());
+		vm.refreshFolderSource(view.id, folder.id);
+		vm.unplaceNode(view.id, vm.getNode(view.id, folder.id)!.children[0].id);
+		expect(vm.getNode(view.id, folder.id)!.folderSource?.removedRefs).toEqual(["file:Projects/a.md"]);
+
+		vm.setFolderSource(view.id, folder.id, folderSource({ path: "Archive" }));
+
+		expect(vm.getNode(view.id, folder.id)!.folderSource?.removedRefs).toBeUndefined();
+	});
+
+	it("switching Inside/Outside at the same path still clears removedRefs — the two locations use different ref namespaces", () => {
+		const vm = makeManager();
+		const view = vm.getViews()[0];
+		const folder = vm.addMetaFolder(view.id, null, "Folder")!;
+		vm.setFolderSource(view.id, folder.id, folderSource({ removedRefs: ["file:Projects/a.md"] }));
+
+		vm.setFolderSource(view.id, folder.id, folderSource({ location: "outside", removedRefs: ["file:Projects/a.md"] }));
+
+		expect(vm.getNode(view.id, folder.id)!.folderSource?.removedRefs).toBeUndefined();
+	});
+
+	it("re-saving the same source unchanged (e.g. toggling a Show option) leaves removedRefs untouched", () => {
+		const vm = makeManager();
+		const view = vm.getViews()[0];
+		const folder = vm.addMetaFolder(view.id, null, "Folder")!;
+		vm.setFolderSource(view.id, folder.id, folderSource({ removedRefs: ["file:Projects/a.md"] }));
+
+		vm.setFolderSource(view.id, folder.id, folderSource({ removedRefs: ["file:Projects/a.md"], showFolders: false }));
+
+		expect(vm.getNode(view.id, folder.id)!.folderSource?.removedRefs).toEqual(["file:Projects/a.md"]);
+	});
+
+	it("setting a Folder source for the first time (no prior source) is unaffected — nothing to retarget from", () => {
+		const vm = makeManager();
+		const view = vm.getViews()[0];
+		const folder = vm.addMetaFolder(view.id, null, "Folder")!;
+
+		vm.setFolderSource(view.id, folder.id, folderSource({ removedRefs: ["file:Projects/a.md"] }));
+
+		expect(vm.getNode(view.id, folder.id)!.folderSource?.removedRefs).toEqual(["file:Projects/a.md"]);
+	});
+});
+
 describe("G7 — Duplicate Folder deep-copies source, never cache, with no shared references", () => {
 	it("a duplicate of an API-sourced Folder gets its own deep-copied source, a fresh grey dot, and no rows yet", () => {
 		const vm = makeManager();
