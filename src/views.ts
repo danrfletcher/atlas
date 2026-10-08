@@ -1494,7 +1494,7 @@ export class ViewsManager {
 		const view = this.getView(viewId);
 		const found = view && this.findNode(view.root, nodeId);
 		const item = found?.node.apiItemState?.[itemId];
-		if (!item) return;
+		if (!item?.noteRef) return;
 		item.noteRef = undefined;
 		this.save();
 	}
@@ -1600,14 +1600,14 @@ export class ViewsManager {
 	}
 
 	/** G27: a vault `delete` event clears any placeholder row's `noteRef` that pointed at the
-	 * deleted path — additive alongside `unitIndex.onVaultDelete`/`graduation.handleDelete`
-	 * (`main.ts`), independent of `onVaultRename`'s path-rewrite logic above (rename rewrites;
-	 * delete clears, since there is no new path to rewrite to). Only the `noteRef` field is cleared;
-	 * the `apiItemState` entry itself survives untouched (E5: a path matching nothing is a no-op;
-	 * clears every matching entry across every node/view, not just the first). Exact-path match
-	 * only — a single deleted file, not a deleted folder's whole subtree — so a delete immediately
-	 * followed (same tick) by a recreate at the same path, where the `noteRef` was already rewritten
-	 * elsewhere to a different path, is never mistaken for this file's reference. */
+	 * deleted path (or a path under it, for a folder delete) — additive alongside
+	 * `unitIndex.onVaultDelete`/`graduation.handleDelete` (`main.ts`), independent of
+	 * `onVaultRename`'s path-rewrite logic above (rename rewrites; delete clears, since there is no
+	 * new path to rewrite to). Only the `noteRef` field is cleared; the `apiItemState` entry itself
+	 * survives untouched (E5: a path matching nothing is a no-op; clears every matching entry across
+	 * every node/view, not just the first). This runs synchronously on the vault's `delete` event, so
+	 * there is no race to guard against: a path deleted and then recreated is two separate events,
+	 * each handled as it arrives (this one clearing stale refs, a later `create` re-indexing). */
 	onVaultDelete(path: string): void {
 		let changed = false;
 		const nowIso = new Date().toISOString();
@@ -1747,11 +1747,15 @@ export class ViewsManager {
 	}
 
 	private clearNoteRefsForPath(nodes: ViewNode[], path: string): boolean {
+		// PR-2 R1: Obsidian can fire a single `delete` for a folder rather than one per child file —
+		// match the same `${path}/` subtree prefix `unitIndex.onVaultDelete` already does, not only an
+		// exact path, or a noteRef to a file inside the deleted folder survives stale.
+		const prefix = `${path}/`;
 		let changed = false;
 		for (const node of nodes) {
 			if (node.apiItemState) {
 				for (const item of Object.values(node.apiItemState)) {
-					if (item.noteRef && item.noteRef.path === path) {
+					if (item.noteRef && (item.noteRef.path === path || item.noteRef.path.startsWith(prefix))) {
 						item.noteRef = undefined;
 						changed = true;
 					}
