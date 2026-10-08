@@ -227,6 +227,32 @@ describe("buildFolderSourceChildren — G16/E1", () => {
 		expect(result[0].ref).toEqual({ kind: "folder", path: "Gone" });
 	});
 
+	it("PR-4 R10: a managed row dragged elsewhere in the view (not a direct child of this source) still suppresses the missing-target sentinel", () => {
+		const renested = unitNode({ kind: "file", path: "Projects/a.md" }, { folderSourceManaged: true, folderSourceOwnerId: "src1" });
+		const unrelatedParent = unitNode({ kind: "folder", path: "Elsewhere" }, { children: [renested] });
+		const result = buildFolderSourceChildren(
+			{ getAbstractFileByPath: () => null },
+			source({ path: "Gone" }),
+			[],
+			(ref) => unitNode(ref, { folderSourceManaged: true }),
+			{ sourceNodeId: "src1", viewRoot: [unrelatedParent] }
+		);
+		expect(result).toEqual([]);
+	});
+
+	it("PR-4 R10: a managed row owned by a different Folder source does not suppress this source's missing-target sentinel", () => {
+		const otherOwners = unitNode({ kind: "file", path: "Projects/a.md" }, { folderSourceManaged: true, folderSourceOwnerId: "src2" });
+		const result = buildFolderSourceChildren(
+			{ getAbstractFileByPath: () => null },
+			source({ path: "Gone" }),
+			[],
+			(ref) => unitNode(ref, { folderSourceManaged: true }),
+			{ sourceNodeId: "src1", viewRoot: [otherOwners] }
+		);
+		expect(result).toHaveLength(1);
+		expect(result[0].ref).toEqual({ kind: "folder", path: "Gone" });
+	});
+
 	it("PR-4 R4: once the target folder reappears, the stale missing-target sentinel is dropped instead of rendering the folder as a child of its own source", () => {
 		const vault = new Vault();
 		vault.seedFolder("Projects");

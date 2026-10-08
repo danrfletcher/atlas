@@ -187,7 +187,12 @@ export function buildFolderSourceChildren(
 	const target = vault.getAbstractFileByPath(source.path);
 	const sentinelKey = unitRefKey({ kind: "folder", path: source.path });
 	if (!(target instanceof TFolder)) {
+		// PR-4 R10 fix: a managed row dragged or renested elsewhere in the view is still a managed row —
+		// scanning only `existingChildren` (this source's direct children) misses it and would wrongly
+		// append a second, redundant sentinel. Fall back to the same whole-view owner scan the
+		// resolved-target branch below already relies on.
 		if (existingChildren.some((child) => child.folderSourceManaged)) return existingChildren;
+		if (collectManagedRefKeys(context.viewRoot, context.sourceNodeId).size > 0) return existingChildren;
 		// PR-4 R4 fix: a sentinel the user has already removed (its key remembered in `removedRefs`, same
 		// as any other managed-row removal) must stay gone — otherwise every refresh while the target is
 		// still missing would recreate it right back.
