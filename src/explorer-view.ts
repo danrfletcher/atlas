@@ -1873,10 +1873,22 @@ export class AtlasExplorerView extends ItemView {
 					trailing.push(entry);
 				}
 			}
-			// Insert highest position first: splice(p, 0, x) only shifts indices >= p, so a later
-			// (lower-position) insertion's target index is never disturbed by an earlier one.
-			positioned.sort((a, b) => b.position - a.position);
-			for (const { entry, position } of positioned) resolved.splice(position, 0, entry);
+			// `position` is an index into the ORIGINAL (pre-deletion) child list, so inserting
+			// highest-first was backwards: a later (lower-position) insertion's splice target can
+			// still be disturbed by an earlier (higher-position) one landing ahead of it. Sort
+			// ascending instead, splicing into the array as it grows — `splice` naturally resolves
+			// each subsequent target against the already-widened array. Two rows recorded at the
+			// same position (e.g. deleted one after another, so each saw the other still in the
+			// list) would still land in reverse order via plain ascending splice, since the second
+			// splice at an unchanged index lands ahead of the first — track how many have already
+			// landed at each position and offset by that count so ties come out in apiItemOrder.
+			positioned.sort((a, b) => a.position - b.position);
+			const insertedAtPosition = new Map<number, number>();
+			for (const { entry, position } of positioned) {
+				const already = insertedAtPosition.get(position) ?? 0;
+				resolved.splice(position + already, 0, entry);
+				insertedAtPosition.set(position, already + 1);
+			}
 			resolved.push(...trailing);
 		}
 
@@ -1897,7 +1909,13 @@ export class AtlasExplorerView extends ItemView {
 				if (!r.status) return Number.POSITIVE_INFINITY;
 				return sm.rankOf(setId, r.status.id) ?? Number.POSITIVE_INFINITY;
 			};
-			resolved.sort((a, b) => (sortGovernor.sortReverse ? rankOf(b) - rankOf(a) : rankOf(a) - rankOf(b)));
+			// Two unranked rows both rank POSITIVE_INFINITY; subtracting them is NaN, so compare
+			// explicitly instead of relying on `Infinity - Infinity` (stable in V8 by accident, but not
+			// a real comparator contract).
+			const compareRank = (x: number, y: number): number => (x === y ? 0 : x - y);
+			resolved.sort((a, b) =>
+				sortGovernor.sortReverse ? compareRank(rankOf(b), rankOf(a)) : compareRank(rankOf(a), rankOf(b))
+			);
 		}
 
 		const isHidden = (status: StatusDefinition, governor: StatusGovernance): boolean =>
