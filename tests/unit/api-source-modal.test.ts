@@ -597,6 +597,65 @@ describe("PR-3 — source type dropdown and modal-body switching", () => {
 	});
 });
 
+describe("PR-3 R2 — edge cases with no prior direct coverage", () => {
+	it("an existing API config loads with 'api' pre-selected on the dropdown and its fields populated", () => {
+		const modal = new ApiSourceModal({} as any, validConfig(), [], vi.fn());
+		(modal as any).onOpen();
+
+		expect(settingNamed(modal, "Source type").components[0].value).toBe("api");
+		expect(settingNamed(modal, "URL").components[0].value).toBe("https://api.example.com/items");
+		expect((modal as any).mapping).toEqual({ idField: "id", labelField: "name" });
+	});
+
+	it("selecting a different type after opening never mutates the config object the caller passed in", () => {
+		const initial = validConfig();
+		const initialCopy = { ...initial, mapping: { ...initial.mapping } };
+		const modal = new ApiSourceModal({} as any, initial, [], vi.fn());
+		(modal as any).onOpen();
+
+		settingNamed(modal, "URL").components[0].type("https://changed.example.com/items");
+		settingNamed(modal, "Source type").components[0].select("folder");
+		settingNamed(modal, "Source type").components[0].select("markdown-table");
+
+		// Nothing writes outside save() — cancelling (never clicking Save) must leave the original
+		// config exactly as the caller handed it over, however many types were tried in between.
+		expect(initial).toEqual(initialCopy);
+	});
+
+	it("reopening a never-saved source (a fresh modal instance) starts unselected again, unaffected by a prior instance's selection", () => {
+		const first = new ApiSourceModal({} as any, null, [], vi.fn());
+		(first as any).onOpen();
+		settingNamed(first, "Source type").components[0].select("folder");
+		expect(settingNamed(first, "Source type").components[0].value).toBe("folder");
+
+		const reopened = new ApiSourceModal({} as any, null, [], vi.fn());
+		(reopened as any).onOpen();
+		expect(settingNamed(reopened, "Source type").components[0].value).toBe("");
+	});
+
+	it("switching through every type in one session leaves no stale fields behind at any step", () => {
+		const modal = new ApiSourceModal({} as any, null, [], vi.fn());
+		(modal as any).onOpen();
+
+		settingNamed(modal, "Source type").components[0].select("api");
+		settingNamed(modal, "URL").components[0].type("https://one.example.com");
+
+		settingNamed(modal, "Source type").components[0].select("folder");
+		expect(settingNamed(modal, "URL")).toBeUndefined();
+		settingNamed(modal, "Folder").components[0].type("Projects");
+
+		settingNamed(modal, "Source type").components[0].select("csv");
+		expect(settingNamed(modal, "Folder")).toBeUndefined();
+		settingNamed(modal, "CSV file").components[0].type("data.csv");
+
+		settingNamed(modal, "Source type").components[0].select("markdown-table");
+		expect(settingNamed(modal, "CSV file")).toBeUndefined();
+
+		settingNamed(modal, "Source type").components[0].select("api");
+		expect(settingNamed(modal, "URL").components[0].value).toBe("");
+	});
+});
+
 describe("R1 — Markdown Table: no auto-pick of the first table when there's a genuine choice", () => {
 	function twoTables() {
 		return [
