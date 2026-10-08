@@ -6,7 +6,7 @@ import type { App } from "obsidian";
 import { App as MockApp, TFile, TFolder, Vault } from "../../tests/mocks/obsidian";
 import { buildFolderSourceChildren, folderToRows, isAncestorOrSelf, reconcileManagedChildren } from "../../src/folder-source";
 import { ViewsManager } from "../../src/views";
-import { FolderSourceConfig, UnitRef, ViewNode } from "../../src/types";
+import { FolderSourceConfig, UnitRef, ViewNode, unitRefKey } from "../../src/types";
 
 function source(overrides: Partial<FolderSourceConfig> = {}): FolderSourceConfig {
 	return {
@@ -205,6 +205,55 @@ describe("buildFolderSourceChildren — G16/E1", () => {
 		vault.seedFolder("Projects/Sub");
 		expect(isAncestorOrSelf("Projects", "Projects")).toBe(true);
 		expect(() => buildFolderSourceChildren(vault, source({ path: "Projects" }), [], (ref) => unitNode(ref, { folderSourceManaged: true }))).not.toThrow();
+	});
+
+	it("PR-4 R4: a user-removed sentinel (its key remembered in removedRefs) is not recreated while the target stays missing", () => {
+		const removedKey = "folder:Gone";
+		const result = buildFolderSourceChildren(
+			{ getAbstractFileByPath: () => null },
+			source({ path: "Gone", removedRefs: [removedKey] }),
+			[],
+			(ref) => unitNode(ref, { folderSourceManaged: true })
+		);
+		expect(result).toEqual([]);
+	});
+
+	it("PR-4 R4: a sentinel from an unrelated removedRefs entry is unaffected (only its own key suppresses it)", () => {
+		const result = buildFolderSourceChildren(
+			{ getAbstractFileByPath: () => null },
+			source({ path: "Gone", removedRefs: ["file:Projects/a.md"] }),
+			[],
+			(ref) => unitNode(ref, { folderSourceManaged: true })
+		);
+		expect(result).toHaveLength(1);
+		expect(result[0].ref).toEqual({ kind: "folder", path: "Gone" });
+	});
+
+	it("PR-4 R4: once the target folder reappears, the stale missing-target sentinel is dropped instead of rendering the folder as a child of its own source", () => {
+		const vault = new Vault();
+		vault.seedFolder("Projects");
+		vault.seedFile("Projects/a.md");
+		const sentinel = unitNode({ kind: "folder", path: "Projects" }, { folderSourceManaged: true });
+
+		const result = buildFolderSourceChildren(vault, source({ path: "Projects" }), [sentinel], (ref) => unitNode(ref, { folderSourceManaged: true }));
+
+		expect(result.some((n) => n.ref && unitRefKey(n.ref) === "folder:Projects")).toBe(false);
+		expect(result).toEqual([expect.objectContaining({ ref: { kind: "file", path: "Projects/a.md" }, folderSourceManaged: true })]);
+	});
+
+	it("PR-4 R4: dropping the stale sentinel on reappearance leaves other hand-nested rows untouched", () => {
+		const vault = new Vault();
+		vault.seedFolder("Projects");
+		vault.seedFile("Projects/a.md");
+		const sentinel = unitNode({ kind: "folder", path: "Projects" }, { folderSourceManaged: true });
+		const handPlaced = unitNode({ kind: "file", path: "keep-me.md" });
+
+		const result = buildFolderSourceChildren(vault, source({ path: "Projects" }), [sentinel, handPlaced], (ref) =>
+			unitNode(ref, { folderSourceManaged: true })
+		);
+
+		expect(result).toContain(handPlaced);
+		expect(result.some((n) => n.ref && unitRefKey(n.ref) === "folder:Projects")).toBe(false);
 	});
 
 	it("R2: keeps existing managed rows as-is when the target folder stops resolving, instead of collapsing them into a sentinel", () => {
