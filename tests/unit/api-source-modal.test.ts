@@ -786,6 +786,63 @@ describe("PR-4 — Folder source config section", () => {
 	});
 });
 
+describe("PR-4 R5 — the folder suggester's free-text field is normalized on Save", () => {
+	it("strips a leading slash so an absolute-looking path is stored vault-relative", () => {
+		const onSave = vi.fn();
+		const modal = new ApiSourceModal({} as any, null, [], onSave);
+		(modal as any).onOpen();
+		settingNamed(modal, "Source type").components[0].select("folder");
+
+		settingNamed(modal, "Folder").components[0].type("/Projects/Active");
+		(modal as any).saveButton.simulateClick();
+
+		expect(onSave).toHaveBeenCalledWith(
+			expect.objectContaining({ source: expect.objectContaining({ path: "Projects/Active" }) })
+		);
+	});
+
+	it("strips a trailing slash and surrounding whitespace", () => {
+		const onSave = vi.fn();
+		const modal = new ApiSourceModal({} as any, null, [], onSave);
+		(modal as any).onOpen();
+		settingNamed(modal, "Source type").components[0].select("folder");
+
+		settingNamed(modal, "Folder").components[0].type("  Projects/Active/  ");
+		(modal as any).saveButton.simulateClick();
+
+		expect(onSave).toHaveBeenCalledWith(
+			expect.objectContaining({ source: expect.objectContaining({ path: "Projects/Active" }) })
+		);
+	});
+
+	it("a path typed as just '/' normalizes to the vault root, same as picking root from the suggester list", () => {
+		const onSave = vi.fn();
+		const modal = new ApiSourceModal({} as any, null, [], onSave);
+		(modal as any).onOpen();
+		settingNamed(modal, "Source type").components[0].select("folder");
+
+		settingNamed(modal, "Folder").components[0].type("/");
+		(modal as any).saveButton.simulateClick();
+
+		expect(onSave).toHaveBeenCalledWith(expect.objectContaining({ source: expect.objectContaining({ path: "" }) }));
+	});
+
+	it("a nonexistent folder is still accepted, just normalized (E8: an unresolved path can recover later)", () => {
+		const onSave = vi.fn();
+		const modal = new ApiSourceModal({} as any, null, [], onSave);
+		(modal as any).onOpen();
+		settingNamed(modal, "Source type").components[0].select("folder");
+
+		settingNamed(modal, "Folder").components[0].type("/Nonexistent/Folder/");
+		expect((modal as any).saveButton.disabled).toBe(false);
+		(modal as any).saveButton.simulateClick();
+
+		expect(onSave).toHaveBeenCalledWith(
+			expect.objectContaining({ source: expect.objectContaining({ path: "Nonexistent/Folder" }) })
+		);
+	});
+});
+
 describe("PR-1 (G1) — refresh toggles per source type", () => {
 	const TOGGLE_NAMES = ["Refresh when Atlas view loads", "Refresh every"];
 

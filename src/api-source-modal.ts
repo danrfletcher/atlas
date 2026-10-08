@@ -32,6 +32,16 @@ export type ApiSourceModalResult =
 	| { type: "csv"; source: CsvSourceConfig }
 	| { type: "markdown-table"; source: MarkdownTableSourceConfig };
 
+/** PR-4 R5 fix: the folder suggester (`renderFolderPathSuggester`) is a free-text field with a click
+ * list alongside it — any string is still typeable and savable, not just a picked suggestion. G5's
+ * "stored relative to the vault root" only actually holds once Save normalizes that typed text the
+ * same way a picked suggestion already looks: no leading/trailing slashes, no stray whitespace. A
+ * folder that doesn't currently exist is still accepted after normalizing (E8 already treats an
+ * unresolved path as valid and recoverable later, e.g. once it's created or a drive remounts). */
+function normalizeVaultFolderPath(raw: string): string {
+	return raw.trim().replace(/^\/+/, "").replace(/\/+$/, "");
+}
+
 const SOURCE_TYPE_OPTIONS: { value: DataSourceType; label: string }[] = [
 	{ value: "api", label: "API" },
 	{ value: "folder", label: "Folder" },
@@ -1349,7 +1359,7 @@ export class ApiSourceModal extends Modal {
 				location: this.folderLocation,
 				// G6: `path` stays vault-relative-only — the Outside-Vault absolute path never reaches
 				// this (synced) shape at all, only the modal result's own `outsidePath` field.
-				path: this.folderLocation === "inside" ? this.folderPath.trim() : "",
+				path: this.folderLocation === "inside" ? normalizeVaultFolderPath(this.folderPath) : "",
 				showFiles: this.showFiles,
 				showFolders: this.showFolders,
 				removedRefs: this.removedRefs,
