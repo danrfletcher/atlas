@@ -62,14 +62,6 @@ export function folderToRows(
 	return refs;
 }
 
-/** Edge case: "selecting a target folder that is an ancestor of, or identical to, the source
- * Folder's own location does not crash the explorer." Kept as a standalone pure function, not wired
- * into any live code path in this PR — a meta node (the only place `folderSource` ever lives) has no
- * disk path of its own to compare against, so there is nothing meaningful to call this with yet. */
-export function isAncestorOrSelf(candidateAncestorPath: string, path: string): boolean {
-	return path === candidateAncestorPath || path.startsWith(`${candidateAncestorPath}/`);
-}
-
 /** G7/G9/E2: reconciles a Folder source's current *direct* children against the folder's current
  * listing, touching only nodes this source itself manages (`folderSourceManaged`). Anything else
  * already in `existingChildren` (the user nesting something by hand alongside the managed rows) is

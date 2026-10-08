@@ -250,6 +250,15 @@ vi.mock("obsidian", () => {
 		constructor(_message?: string) {}
 	}
 
+	// PR-4 R6: minimal stand-in for `listVaultFolders`'s narrow `TFolder`/`children` surface — real
+	// Obsidian's root folder has `path === "/"`, same as this fake, so `instanceof` checks in
+	// `api-source-modal.ts` work against a plain vault.getRoot() fixture without pulling in the full
+	// vault mock (which this file's own `vi.mock("obsidian", ...)` already shadows).
+	class FakeTFolder {
+		path = "";
+		children: unknown[] = [];
+	}
+
 	return {
 		App: class {},
 		ButtonComponent: FakeButtonComponent,
@@ -257,11 +266,13 @@ vi.mock("obsidian", () => {
 		Notice: FakeNotice,
 		Platform: { isMobile: false },
 		Setting: FakeSetting,
+		TFolder: FakeTFolder,
 		requestUrl: async () => mockHttpResponse,
 		setTooltip: vi.fn(),
 	};
 });
 
+import { TFolder } from "obsidian";
 import { ApiSourceModal } from "../../src/api-source-modal";
 import { ApiSourceConfig } from "../../src/types";
 
@@ -840,6 +851,20 @@ describe("PR-4 R5 — the folder suggester's free-text field is normalized on Sa
 		expect(onSave).toHaveBeenCalledWith(
 			expect.objectContaining({ source: expect.objectContaining({ path: "Nonexistent/Folder" }) })
 		);
+	});
+});
+
+describe("PR-4 R6 — folder suggester with no subfolders to offer", () => {
+	it("a vault containing only its root folder renders zero items in the suggester list", () => {
+		const root = new TFolder();
+		(root as any).path = "/";
+		(root as any).children = [];
+		const modal = new ApiSourceModal({ vault: { getRoot: () => root } } as any, null, [], vi.fn());
+		(modal as any).onOpen();
+		settingNamed(modal, "Source type").components[0].select("folder");
+
+		const [listEl] = findAllByClass((modal as any).contentEl, "atlas-folder-suggest-list");
+		expect(listEl.children).toHaveLength(0);
 	});
 });
 
