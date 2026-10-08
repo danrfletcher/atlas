@@ -443,6 +443,42 @@ describe("G7 — Duplicate Folder deep-copies source, never cache, with no share
 		expect(clone.apiItemState).toBeUndefined();
 		expect(clone.apiItemOrder).toBeUndefined();
 	});
+
+	it("PR-4 R9: a Folder source's removedRefs is a genuinely independent copy — removing a row under the clone never hides it in the original too", () => {
+		const app = new MockApp();
+		app.vault.seedFolder("Projects");
+		app.vault.seedFile("Projects/a.md");
+		const vm = new ViewsManager(app as unknown as App, [], "", () => {});
+		const view = vm.getViews()[0];
+		const folder = vm.addMetaFolder(view.id, null, "Folder")!;
+		vm.setFolderSource(view.id, folder.id, folderSource());
+		vm.refreshFolderSource(view.id, folder.id);
+
+		const clone = vm.duplicateNode(view.id, folder.id)!;
+		const clonedChild = clone.children[0];
+
+		vm.unplaceNode(view.id, clonedChild.id);
+
+		const original = vm.getNode(view.id, folder.id)!;
+		expect(vm.getNode(view.id, clone.id)!.folderSource?.removedRefs).toEqual(["file:Projects/a.md"]);
+		expect(original.folderSource?.removedRefs ?? []).toEqual([]);
+	});
+
+	it("PR-4 R9: a cloned Folder source's managed children are re-stamped with the clone's own id, not the original's", () => {
+		const app = new MockApp();
+		app.vault.seedFolder("Projects");
+		app.vault.seedFile("Projects/a.md");
+		const vm = new ViewsManager(app as unknown as App, [], "", () => {});
+		const view = vm.getViews()[0];
+		const folder = vm.addMetaFolder(view.id, null, "Folder")!;
+		vm.setFolderSource(view.id, folder.id, folderSource());
+		vm.refreshFolderSource(view.id, folder.id);
+
+		const clone = vm.duplicateNode(view.id, folder.id)!;
+
+		expect(clone.children[0].folderSourceOwnerId).toBe(clone.id);
+		expect(vm.getNode(view.id, folder.id)!.children[0].folderSourceOwnerId).toBe(folder.id);
+	});
 });
 
 describe("E6 — deleting a Folder removes its itemState along with source/cache", () => {
