@@ -135,18 +135,19 @@ describe("G11a — every source setter accepts every bucket node kind", () => {
 });
 
 describe("E-d — one source type per node, on a unit as on a meta node", () => {
-	// R1 covers API, CSV and markdown-table only; a folder source may sit alongside them (types.ts `folderSourceDeleted`).
-	const R1_SETTERS = SETTERS.filter((s) => s.field !== "folderSource");
+	// PR-4 R3 fix: setFolderSource now joins the other three setters' mutual exclusion (previously a
+	// folder source could sit alongside api/csv/markdown-table — see source-lifecycle PR-4 R3 tests
+	// below for the regression coverage of that specific gap).
 	for (const kind of NODE_KINDS) {
-		it(`setting each R1 source clears the other two on a ${kind.name}`, () => {
+		it(`setting each source clears the other three on a ${kind.name}`, () => {
 			const vm = makeManager();
 			const viewId = vm.getViews()[0].id;
 			const nodeId = kind.make(vm, viewId);
-			for (const setter of R1_SETTERS) {
+			for (const setter of SETTERS) {
 				setter.set(vm, viewId, nodeId);
 				const node = vm.getNode(viewId, nodeId)!;
 				expect(node[setter.field]).toBeDefined();
-				for (const other of R1_SETTERS) {
+				for (const other of SETTERS) {
 					if (other !== setter) expect(node[other.field]).toBeUndefined();
 				}
 			}
@@ -255,6 +256,103 @@ describe("R1 — setApiSource/setCsvSource are mutually exclusive on the same no
 		const after = vm.getNode(view.id, folder.id)!;
 		expect(after.csvSource).toBeUndefined();
 		expect(after.apiSource).toBeUndefined();
+	});
+});
+
+describe("PR-4 R3 — setFolderSource is mutually exclusive with api/csv/markdown-table, and vice versa", () => {
+	it("setFolderSource clears a live apiSource (and its cache/confirmation flag)", () => {
+		const vm = makeManager();
+		const view = vm.getViews()[0];
+		const folder = vm.addMetaFolder(view.id, null, "Folder")!;
+		vm.setApiSource(view.id, folder.id, makeSource());
+		const node = vm.getNode(view.id, folder.id)!;
+		node.apiCache = { fetchedAt: 1, ok: true, error: null, rows: [], skippedCount: 0, truncated: false };
+		node.apiAwaitingConfirmation = true;
+
+		vm.setFolderSource(view.id, folder.id, folderSource());
+
+		const after = vm.getNode(view.id, folder.id)!;
+		expect(after.folderSource).toEqual(folderSource());
+		expect(after.apiSource).toBeUndefined();
+		expect(after.apiCache).toBeUndefined();
+		expect(after.apiAwaitingConfirmation).toBeUndefined();
+	});
+
+	it("setApiSource clears a live folderSource", () => {
+		const vm = makeManager();
+		const view = vm.getViews()[0];
+		const folder = vm.addMetaFolder(view.id, null, "Folder")!;
+		vm.setFolderSource(view.id, folder.id, folderSource());
+
+		vm.setApiSource(view.id, folder.id, makeSource());
+
+		const after = vm.getNode(view.id, folder.id)!;
+		expect(after.apiSource).toEqual(makeSource());
+		expect(after.folderSource).toBeUndefined();
+	});
+
+	it("setCsvSource and setMarkdownTableSource also clear a live folderSource", () => {
+		const vm = makeManager();
+		const view = vm.getViews()[0];
+		const folderForCsv = vm.addMetaFolder(view.id, null, "Folder A")!;
+		vm.setFolderSource(view.id, folderForCsv.id, folderSource());
+		vm.setCsvSource(view.id, folderForCsv.id, makeCsvSource());
+		expect(vm.getNode(view.id, folderForCsv.id)!.folderSource).toBeUndefined();
+
+		const folderForMd = vm.addMetaFolder(view.id, null, "Folder B")!;
+		vm.setFolderSource(view.id, folderForMd.id, folderSource());
+		vm.setMarkdownTableSource(view.id, folderForMd.id, {
+			path: "Notes/t.md",
+			tableIndex: 0,
+			mapping: { idField: "id", labelField: "name" },
+			mode: "merge",
+			refreshOnViewLoad: false,
+		});
+		expect(vm.getNode(view.id, folderForMd.id)!.folderSource).toBeUndefined();
+	});
+
+	it("a Folder-source's managed children survive switching to API as ordinary units, same as 'Remove data source'", () => {
+		const app = new MockApp();
+		app.vault.seedFolder("Projects");
+		app.vault.seedFile("Projects/a.md");
+		const vm = new ViewsManager(app as unknown as App, [], "", () => {});
+		const view = vm.getViews()[0];
+		const folder = vm.addMetaFolder(view.id, null, "Folder")!;
+		vm.setFolderSource(view.id, folder.id, folderSource());
+		vm.refreshFolderSource(view.id, folder.id);
+		expect(vm.getNode(view.id, folder.id)!.children.length).toBe(1);
+
+		vm.setApiSource(view.id, folder.id, makeSource());
+
+		expect(vm.getNode(view.id, folder.id)!.children.length).toBe(1);
+	});
+
+	it("removing a Folder source untouched by any prior API source does not disturb apiSource (stays undefined, no-op clear)", () => {
+		const vm = makeManager();
+		const view = vm.getViews()[0];
+		const folder = vm.addMetaFolder(view.id, null, "Folder")!;
+		vm.setFolderSource(view.id, folder.id, folderSource());
+
+		vm.setFolderSource(view.id, folder.id, undefined);
+
+		const after = vm.getNode(view.id, folder.id)!;
+		expect(after.folderSource).toBeUndefined();
+		expect(after.apiSource).toBeUndefined();
+	});
+
+	it("self-heals legacy data.json where both apiSource and folderSource were saved together before this fix, api taking precedence", () => {
+		const legacyRaw = {
+			id: "root",
+			type: "meta" as const,
+			label: "Folder",
+			children: [],
+			apiSource: makeSource(),
+			folderSource: folderSource(),
+		};
+		const vm = new ViewsManager({} as App, [{ id: "v1", name: "Default", inboxMode: "view", root: [legacyRaw] }], "v1", () => {});
+		const node = vm.getNode("v1", "root")!;
+		expect(node.apiSource).toBeDefined();
+		expect(node.folderSource).toBeUndefined();
 	});
 });
 

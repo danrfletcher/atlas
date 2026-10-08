@@ -1035,7 +1035,13 @@ export class AtlasExplorerView extends ItemView {
 			headers,
 			(result) => {
 				if (result.type === "folder") {
+					// PR-4 R3 fix: same device-local-headers cleanup as the CSV/Markdown Table branches
+					// below, for switching away from API into Folder (setFolderSource's own mutual-
+					// exclusion fix clears the synced apiSource, but the device-local headers entry is
+					// this view's own store to clean up, same as every other switch-away-from-API path).
+					const hadApiSource = node.apiSource !== undefined;
 					this.plugin.viewsManager.setFolderSource(view.id, node.id, result.source);
+					if (hadApiSource) this.plugin.apiHeadersStore.delete(node.id);
 					// G6/acceptance: Inside<->Outside toggling (or clearing the field outright) clears
 					// the previously stored path rather than leaving a stale device-local entry behind.
 					if (result.source.location === "outside" && result.outsidePath) {
@@ -1052,8 +1058,12 @@ export class AtlasExplorerView extends ItemView {
 					// otherwise they linger in ApiHeadersStore and silently pre-fill the next time the
 					// user switches back to API, same as "Remove data source" already does for them.
 					const hadApiSource = node.apiSource !== undefined;
+					// PR-4 R3 fix: same idea for a Folder source's own device-local entry, now that
+					// setCsvSource also clears folderSource.
+					const hadOutsideFolderSource = node.folderSource?.location === "outside";
 					this.plugin.viewsManager.setCsvSource(view.id, node.id, result.source);
 					if (hadApiSource) this.plugin.apiHeadersStore.delete(node.id);
+					if (hadOutsideFolderSource) this.plugin.folderSourcePathStore.delete(node.id);
 					this.refreshCsvSource(view, node, "manual");
 					return;
 				}
@@ -1061,13 +1071,19 @@ export class AtlasExplorerView extends ItemView {
 					// PR-8: same device-local-headers cleanup as the CSV branch above, for switching away
 					// from API into Markdown Table.
 					const hadApiSource = node.apiSource !== undefined;
+					const hadOutsideFolderSource = node.folderSource?.location === "outside";
 					this.plugin.viewsManager.setMarkdownTableSource(view.id, node.id, result.source);
 					if (hadApiSource) this.plugin.apiHeadersStore.delete(node.id);
+					if (hadOutsideFolderSource) this.plugin.folderSourcePathStore.delete(node.id);
 					this.refreshMarkdownTableSource(view, node, "manual");
 					return;
 				}
+				// PR-4 R3 fix: switching into "api" from an Outside-Vault Folder source likewise drops
+				// that source's now-orphaned device-local path entry.
+				const hadOutsideFolderSource = node.folderSource?.location === "outside";
 				this.plugin.apiHeadersStore.set(node.id, result.headers);
 				this.plugin.viewsManager.setApiSource(view.id, node.id, result.source);
+				if (hadOutsideFolderSource) this.plugin.folderSourcePathStore.delete(node.id);
 				this.refreshApiSource(view, node, "manual");
 			},
 			node.folderSource ?? null,

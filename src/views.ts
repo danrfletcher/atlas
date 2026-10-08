@@ -212,6 +212,22 @@ function sanitizeApiFields(node: ViewNode): void {
 	sanitizeCsvSource(node);
 	sanitizeMarkdownTableSource(node);
 
+	// PR-4 R3 fix: data.json saved by a build predating the setApiSource/setCsvSource/
+	// setMarkdownTableSource/setFolderSource mutual-exclusion fix can have more than one source field
+	// set at once. Self-heal on load with the same api > folder > csv > markdown-table precedence the
+	// modal constructor's own `initial ? "api" : initialFolderSource ? "folder" : ...` already uses, so
+	// a reload never shows more than one data source for a node the live setters can no longer produce.
+	if (node.apiSource) {
+		node.folderSource = undefined;
+		node.csvSource = undefined;
+		node.markdownTableSource = undefined;
+	} else if (node.folderSource) {
+		node.csvSource = undefined;
+		node.markdownTableSource = undefined;
+	} else if (node.csvSource) {
+		node.markdownTableSource = undefined;
+	}
+
 	for (const child of node.children) sanitizeApiFields(child);
 }
 
@@ -1194,7 +1210,12 @@ export class ViewsManager {
 	 * R1 fix: `apiSource`, `csvSource`, and (PR-8) `markdownTableSource` share the same `apiCache`/
 	 * `apiAwaitingConfirmation` fields (all three produce the same kind of placeholder row), so setting
 	 * one live must clear the other two — otherwise they'd all keep refreshing into the same state and
-	 * stomp each other's rows. */
+	 * stomp each other's rows.
+	 *
+	 * PR-4 R3 fix: a live source is also mutually exclusive with `folderSource` — without this, a
+	 * Folder the user switches from "Folder" to "API" kept reconciling its old folderSource children
+	 * alongside the new API placeholder rows, and the modal's own `initial ? "api" : ...` precedence in
+	 * its constructor would misread the stale `apiSource` as still current on next open. */
 	setApiSource(viewId: string, nodeId: string, source: ApiSourceConfig | undefined): void {
 		const view = this.getView(viewId);
 		const found = view && this.findNode(view.root, nodeId);
@@ -1204,6 +1225,7 @@ export class ViewsManager {
 		if (source) {
 			found.node.csvSource = undefined;
 			found.node.markdownTableSource = undefined;
+			found.node.folderSource = undefined;
 		}
 		if (!source || hadOtherSource) {
 			found.node.apiCache = undefined;
@@ -1216,7 +1238,8 @@ export class ViewsManager {
 	 * exact mirror of `setApiSource`, since a CSV source produces the same kind of placeholder rows and
 	 * the same "removal keeps the rows as static, drops only cache/confirmation" rule applies.
 	 *
-	 * R1 fix: mirrors `setApiSource`'s clearing of the other source types — see its doc comment. */
+	 * R1 fix: mirrors `setApiSource`'s clearing of the other source types — see its doc comment.
+	 * PR-4 R3 fix: also mirrors its clearing of `folderSource` — see `setApiSource`'s doc comment. */
 	setCsvSource(viewId: string, nodeId: string, source: CsvSourceConfig | undefined): void {
 		const view = this.getView(viewId);
 		const found = view && this.findNode(view.root, nodeId);
@@ -1226,6 +1249,7 @@ export class ViewsManager {
 		if (source) {
 			found.node.apiSource = undefined;
 			found.node.markdownTableSource = undefined;
+			found.node.folderSource = undefined;
 		}
 		if (!source || hadOtherSource) {
 			found.node.apiCache = undefined;
@@ -1239,7 +1263,8 @@ export class ViewsManager {
 	 * produces the same kind of placeholder rows and the same "removal keeps the rows as static, drops
 	 * only cache/confirmation" rule applies.
 	 *
-	 * R1 fix: mirrors `setApiSource`'s clearing of the other source types — see its doc comment. */
+	 * R1 fix: mirrors `setApiSource`'s clearing of the other source types — see its doc comment.
+	 * PR-4 R3 fix: also mirrors its clearing of `folderSource` — see `setApiSource`'s doc comment. */
 	setMarkdownTableSource(viewId: string, nodeId: string, source: MarkdownTableSourceConfig | undefined): void {
 		const view = this.getView(viewId);
 		const found = view && this.findNode(view.root, nodeId);
@@ -1249,6 +1274,7 @@ export class ViewsManager {
 		if (source) {
 			found.node.apiSource = undefined;
 			found.node.csvSource = undefined;
+			found.node.folderSource = undefined;
 		}
 		if (!source || hadOtherSource) {
 			found.node.apiCache = undefined;
@@ -1261,7 +1287,13 @@ export class ViewsManager {
 	 * "Remove data source"). Unlike `setApiSource`, removal needs no special-case cleanup: Folder-
 	 * source children are ordinary real `ViewNode` units (not placeholder rows tied to a live source),
 	 * so they simply stop being managed/refreshed and stay exactly where they are, like any other
-	 * manually-placed unit. */
+	 * manually-placed unit.
+	 *
+	 * PR-4 R3 fix: mirrors `setApiSource`'s mutual exclusion the other direction — a live Folder source
+	 * clears `apiSource`/`csvSource`/`markdownTableSource` (and their shared cache/confirmation fields)
+	 * the same way setting one of those already clears `folderSource`. Without this, a Folder the user
+	 * switched from "API" to "Folder" kept fetching and rendering its old API placeholder rows next to
+	 * the new real children. */
 	setFolderSource(viewId: string, nodeId: string, source: FolderSourceConfig | undefined): void {
 		const view = this.getView(viewId);
 		const found = view && this.findNode(view.root, nodeId);
@@ -1270,6 +1302,13 @@ export class ViewsManager {
 		// mode change alone, leaves every flag as it was.
 		const rulesBefore = JSON.stringify(found.node.folderSource?.filters ?? null);
 		found.node.folderSource = source;
+		if (source) {
+			found.node.apiSource = undefined;
+			found.node.csvSource = undefined;
+			found.node.markdownTableSource = undefined;
+			found.node.apiCache = undefined;
+			found.node.apiAwaitingConfirmation = undefined;
+		}
 		if (view && rulesBefore !== JSON.stringify(source?.filters ?? null)) this.applyRulesToHiddenAtSave(view, nodeId, source);
 		this.save();
 	}
