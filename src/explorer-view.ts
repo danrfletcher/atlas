@@ -179,7 +179,9 @@ interface RowInfo {
 	secondary?: string;
 	icon: string;
 	promoted: boolean;
-	/** PR-3 (G3): renders an "added" badge in place of "promoted" — the two are mutually exclusive. */
+	/** PR-3 (G3): renders an "added" badge in place of "promoted" — the two are mutually exclusive.
+	 * PR-1 (polish): both badges are inbox-only (renderInboxRow); renderNode (bucket rows) never
+	 * renders either, even when this flag is true. */
 	added: boolean;
 	missing: boolean;
 }
@@ -243,14 +245,19 @@ export class AddFileSuggestModal extends FuzzySuggestModal<TFile | TFolder> {
 /** PR-3 (G2, E4): every vault file minus any file already a unit somewhere (auto-promoted, manually
  * promoted, already added) or already placed/nested as a node in any view — so picking one from the
  * modal can never produce a duplicate inbox row. List-level exclusion only: no runtime dedupe is
- * exercised once a file is chosen. PR-1.F1 (G12): an added folder's interface note (`<Folder>/<Folder>.md`)
- * is excluded too, until that folder is dismissed for good (`isGloballyDismissed`); a promoted folder's
- * note is still offered. */
+ * exercised once a file is chosen. PR-1.F1 (G12): an added folder's interface note is excluded too,
+ * until that folder is dismissed for good (`isGloballyDismissed`); a promoted folder's note is still
+ * offered. PR-1.F1 R2: `interfaceNotePathFor` defaults to the bare `<Folder>/<Folder>.md` convention
+ * (every existing caller/test keeps compiling and behaving unchanged), but the real call site resolves
+ * through `findInterfaceNote` instead, so an `index.md`/`README.md` alt name (when
+ * `interfaceNoteAcceptAltNames` is on) is excluded the same way the conventional name is. */
 export function candidateFilesForAdd(
 	allFiles: TFile[],
 	units: Unit[],
 	isPlacedAnywhere: (ref: UnitRef) => boolean,
-	isGloballyDismissed: (ref: UnitRef) => boolean = () => false
+	isGloballyDismissed: (ref: UnitRef) => boolean = () => false,
+	interfaceNotePathFor: (folderPath: string) => string | null = (folderPath) =>
+		`${folderPath}/${folderPath.slice(folderPath.lastIndexOf("/") + 1)}.md`
 ): TFile[] {
 	// R2: only a *file-kind* ref counts as "the file already present as a unit" (G2) — a promoted-block
 	// unit's `.path` is its containing file's path even though it's kind "block" (per `unitToRef`), so
@@ -261,8 +268,8 @@ export function candidateFilesForAdd(
 	for (const unit of units) {
 		if (unit.type !== "added-folder") continue;
 		if (isGloballyDismissed({ kind: "folder", path: unit.path })) continue;
-		const folderName = unit.path.slice(unit.path.lastIndexOf("/") + 1);
-		fileRefKeys.add(unitRefKey({ kind: "file", path: `${unit.path}/${folderName}.md` }));
+		const notePath = interfaceNotePathFor(unit.path);
+		if (notePath) fileRefKeys.add(unitRefKey({ kind: "file", path: notePath }));
 	}
 	return allFiles.filter(
 		(file) => !fileRefKeys.has(unitRefKey({ kind: "file", path: file.path })) && !isPlacedAnywhere({ kind: "file", path: file.path })
@@ -489,10 +496,23 @@ function addSwapItems(menu: Menu, host: SwapMenuHost, view: View, node: ViewNode
 /** PR-1 (G11e): the Statuses, Data source…, Refresh now and Remove data source items, shared by the
  * Atlas-folder menu and the unit menu so a sourced unit offers exactly what a sourced folder does.
  * Statuses shows when the node has children or source rows; Refresh now and Remove data source
- * show only when that kind of source exists. Adds no trailing separator — the caller owns it. */
-function addSourceAndStatusItems(menu: Menu, plugin: AtlasPlugin, host: SourceMenuHost, view: View, node: ViewNode): void {
-	if (node.children.length > 0 || nodeHasApiRows(node)) {
+ * show only when that kind of source exists. Adds no trailing separator — the caller owns it.
+ * PR-1 R2: always separates the preceding group from Data source…, even when Statuses doesn't show —
+ * unless the caller already placed its own separator immediately before this call (`separatorAlreadyAdded`),
+ * in which case skipping avoids a doubled-up separator. */
+function addSourceAndStatusItems(
+	menu: Menu,
+	plugin: AtlasPlugin,
+	host: SourceMenuHost,
+	view: View,
+	node: ViewNode,
+	separatorAlreadyAdded = false
+): void {
+	const hasStatuses = node.children.length > 0 || nodeHasApiRows(node);
+	if (hasStatuses) {
 		menu.addItem((item) => item.setTitle("Statuses").setIcon("circle-dot").onClick(() => host.openStatusesModal(view, node.id)));
+	}
+	if (hasStatuses || !separatorAlreadyAdded) {
 		menu.addSeparator();
 	}
 	menu.addItem((item) =>
@@ -627,7 +647,6 @@ export class AtlasExplorerView extends ItemView {
 	/** PR-1.F1: bumped by every header click, so a title scroll still waiting for an expansion is
 	 * dropped once a newer click supersedes it (E4, chevron-then-title). */
 	private sectionClickSeq = 0;
-	private stickyFrameQueued = false;
 	/** Redraws the inbox's virtual window for the current render. Null between renders and after
 	 * close, so a stale scroll/resize callback from a previous render can never draw into the DOM. */
 	private inboxRedraw: (() => void) | null = null;
@@ -701,6 +720,11 @@ export class AtlasExplorerView extends ItemView {
 	 * so a DOM query would silently miss whatever's currently scrolled out of view. */
 	private inboxSelectOrder: string[] = [];
 	private inboxRefByKey = new Map<string, UnitRef>();
+	/** PR-1.F2 R1: keys of the inbox's currently-missing added rows (G10), from the same render pass
+	 * as `inboxRefByKey`. A missing row stays clickable/shift-selectable (so Remove still works from
+	 * a range selection), but its ref is never let into a drag payload — dropping a missing ref onto
+	 * a module icon would otherwise place a ref with no real file behind it into the bucket. */
+	private missingAddedInboxKeys = new Set<string>();
 	private dragPayload: DragPayload | null = null;
 	/** Review follow-up (retroactive PR 9 finding): cancels whichever module row's dwell timer is
 	 * currently pending, if any — invoked from the window-level `dragend` backstop below. At most
@@ -709,6 +733,10 @@ export class AtlasExplorerView extends ItemView {
 	 * own `cancelDwell` while its timer is live and clears it again once the timer fires or cancels
 	 * normally via `dragleave`/`drop`. */
 	private cancelActiveDwell: (() => void) | null = null;
+	/** PR-1.S1 R3: which row `cancelActiveDwell` belongs to, if any — lets `drawWindow` tell a dwell on
+	 * a bucket module icon (which stays in the DOM through an inbox redraw) apart from one on an inbox
+	 * row it's about to tear down. Set/cleared alongside `cancelActiveDwell` in `wireModuleRow`. */
+	private activeDwellRow: HTMLElement | null = null;
 	/** G5a: fires refresh-on-view-load exactly once per open/return of this leaf, not on every
 	 * unrelated re-render. */
 	private viewLoadTrigger = new ViewLoadTrigger();
@@ -776,6 +804,14 @@ export class AtlasExplorerView extends ItemView {
 		// timer) whenever a drag ends, regardless of how.
 		this.registerDomEvent(window, "dragend", () => {
 			this.dragPayload = null;
+			// PR-1.S1 R5: if the drag ends while the row is scrolled out of the window, it's sitting
+			// hidden (`display:none`) in the spacer purely so the browser's drag source survived it
+			// scrolling off-screen (F11/E8) — nothing needs it kept around once the drag itself is over,
+			// so drop it now instead of leaving a hidden leftover for `drawWindow`'s next unrelated window
+			// change to clean up. A row still visible in the current window is left alone: it's exactly
+			// the row the next real render would draw again anyway, so removing it here would just be an
+			// unnecessary flash before that render replaces it.
+			if (this.inboxDragRowEl?.style.display === "none") this.inboxDragRowEl.remove();
 			this.inboxDragRowEl = null;
 			this.cancelActiveDwell?.();
 			// PR 20 follow-up (reviewer-caught, A27): a successful drop already repaints via
@@ -1362,6 +1398,14 @@ export class AtlasExplorerView extends ItemView {
 		// body is rebuilt, and reset to 0 only on a genuine view switch (below). If another render is
 		// still in flight, its target wins: the live body may not have been restored yet.
 		const scrollTop = this.pendingScrollTop ?? container.querySelector<HTMLElement>(".atlas-explorer-scroll")?.scrollTop ?? 0;
+		if (this.inboxDragRowEl) {
+			// PR-1.S1 R4 hardening: `container.empty()` below is about to detach the dragged row (an
+			// index refresh mid-drag, say). Once it's detached, the window-level `dragend` backstop
+			// (registered in `onOpen`) never fires on it, so the drag would otherwise leak as a live,
+			// orphaned payload that outlives the gesture. Clear it here too, same as that backstop does.
+			this.dragPayload = null;
+			this.cancelActiveDwell?.();
+		}
 		this.inboxLayoutObserver?.disconnect();
 		this.inboxLayoutObserver = null;
 		this.inboxRedraw = null;
@@ -1426,40 +1470,58 @@ export class AtlasExplorerView extends ItemView {
 
 		const scrollBody = container.createDiv({ cls: "atlas-explorer-scroll" });
 		const bucketEl = scrollBody.createDiv({ cls: "atlas-section atlas-bucket" });
-		await this.renderBucketSection(bucketEl, view);
-		if (!isCurrent()) return;
+		try {
+			await this.renderBucketSection(bucketEl, view);
+			if (!isCurrent()) return;
+			// PR-1.S1 R2: restored here too, straight after the bucket is built, not only inside
+			// `renderVirtualizedInboxRows` below — if the inbox's `resolveRef` calls it awaits ever wait
+			// on real I/O, a frame could otherwise paint at scrollTop 0 before the inbox section jumps
+			// back (the window doesn't have its full scroll height yet at this point, so this can still
+			// get clamped short; `renderVirtualizedInboxRows` sets it again once the inbox spacer gives
+			// the body its true height).
+			scrollBody.scrollTop = restoreScrollTop;
 
-		const inboxUnits = this.plugin.viewsManager.getInboxUnits(allUnits, view.id, view.inboxMode, this.plugin.unitIndex);
-		// PR-5 (G8): only resolved while the toggle is active — otherwise dismissed rows never enter
-		// the merged/sorted list at all, matching G8's "renders inline in the existing list" via an
-		// extra input set rather than a post-filter that would still momentarily touch every dismissed row.
-		const dismissedUnits = this.showDismissed
-			? this.plugin.viewsManager.getDismissedInboxUnits(allUnits, view.id, view.inboxMode, this.plugin.unitIndex)
-			: [];
-		const inboxEl = scrollBody.createDiv({ cls: "atlas-section atlas-inbox" });
-		await this.renderInboxSection(inboxEl, view, inboxUnits, dismissedUnits, scrollBody, restoreScrollTop, isCurrent);
-		if (!isCurrent()) return;
-		// The body has been restored by now (`renderVirtualizedInboxRows` runs inside the await above),
-		// so later renders can read it from the DOM again.
-		this.pendingScrollTop = null;
-		// Both sections always render their header; a render without them has nothing to stack.
-		const bucketHeader = bucketEl.querySelector<HTMLElement>(":scope > .atlas-section-header");
-		const inboxHeader = inboxEl.querySelector<HTMLElement>(":scope > .atlas-section-header");
-		this.stickyEls = bucketHeader && inboxHeader ? { body: scrollBody, bucketEl, bucketHeader, inboxEl, inboxHeader } : null;
-		this.observeInboxLayout(container, scrollBody, bucketEl);
-		this.updateStickyHeaders();
+			const inboxUnits = this.plugin.viewsManager.getInboxUnits(allUnits, view.id, view.inboxMode, this.plugin.unitIndex);
+			// PR-5 (G8): only resolved while the toggle is active — otherwise dismissed rows never enter
+			// the merged/sorted list at all, matching G8's "renders inline in the existing list" via an
+			// extra input set rather than a post-filter that would still momentarily touch every dismissed row.
+			const dismissedUnits = this.showDismissed
+				? this.plugin.viewsManager.getDismissedInboxUnits(allUnits, view.id, view.inboxMode, this.plugin.unitIndex)
+				: [];
+			const inboxEl = scrollBody.createDiv({ cls: "atlas-section atlas-inbox" });
+			await this.renderInboxSection(inboxEl, view, inboxUnits, dismissedUnits, scrollBody, restoreScrollTop, isCurrent);
+			if (!isCurrent()) return;
+			// The body has been restored by now (`renderVirtualizedInboxRows` runs inside the await above),
+			// so later renders can read it from the DOM again.
+			this.pendingScrollTop = null;
+			// Both sections always render their header; a render without them has nothing to stack.
+			const bucketHeader = bucketEl.querySelector<HTMLElement>(":scope > .atlas-section-header");
+			const inboxHeader = inboxEl.querySelector<HTMLElement>(":scope > .atlas-section-header");
+			this.stickyEls = bucketHeader && inboxHeader ? { body: scrollBody, bucketEl, bucketHeader, inboxEl, inboxHeader } : null;
+			this.observeInboxLayout(container, scrollBody, bucketEl);
+			this.updateStickyHeaders();
 
-		if (activeRowKey) {
-			const restored = container.querySelector<HTMLElement>(`[data-select-key="${CSS.escape(activeRowKey)}"]`);
-			// `preventScroll` — this row's own visible position (and the scroll position that shows
-			// it) was already restored above/in `renderVirtualizedInboxRows`; a plain `.focus()` here
-			// would otherwise fight that by scrolling to whatever the browser's own default
-			// focus-into-view behavior decides, undoing the fix just above it.
-			restored?.focus({ preventScroll: true });
+			if (activeRowKey) {
+				const restored = container.querySelector<HTMLElement>(`[data-select-key="${CSS.escape(activeRowKey)}"]`);
+				// `preventScroll` — this row's own visible position (and the scroll position that shows
+				// it) was already restored above/in `renderVirtualizedInboxRows`; a plain `.focus()` here
+				// would otherwise fight that by scrolling to whatever the browser's own default
+				// focus-into-view behavior decides, undoing the fix just above it.
+				restored?.focus({ preventScroll: true });
+			}
+
+			this.updateActiveHighlight();
+			this.syncRefreshTimers(view);
+		} finally {
+			// PR-1.S1 R6: if `renderBucketSection`/`renderInboxSection` throws (a rejected `resolveRef`,
+			// say) between setting `pendingScrollTop` above and clearing it above, it would otherwise
+			// stay set forever — every later render restoring that one stale value instead of the
+			// user's live scroll position. Guarded on `isCurrent()`: a superseded render's `finally` must
+			// not clear the field out from under whichever later render is still relying on it as its
+			// own restore target (see the comment where `pendingScrollTop` is read, at the top of this
+			// method).
+			if (isCurrent()) this.pendingScrollTop = null;
 		}
-
-		this.updateActiveHighlight();
-		this.syncRefreshTimers(view);
 	}
 
 	/** PR-1.S1: a ResizeObserver on the fixed part of the panel, the scroll body and the bucket. Those
@@ -1481,22 +1543,17 @@ export class AtlasExplorerView extends ItemView {
 			observer.observe(this.stickyEls.inboxHeader);
 		}
 		this.inboxLayoutObserver = observer;
-		scrollBody.addEventListener("scroll", () => this.scheduleStickyUpdate());
-	}
-
-	private scheduleStickyUpdate(): void {
-		if (this.stickyFrameQueued) return;
-		this.stickyFrameQueued = true;
-		window.requestAnimationFrame(() => {
-			this.stickyFrameQueued = false;
-			this.updateStickyHeaders();
-		});
+		// PR-1.F1 R1: synchronous, not rAF-scheduled — `scroll` already fires at most once per frame
+		// (the compositor-driven scroll itself is what's already a frame ahead of this handler), so
+		// queuing the header move into a further rAF only adds a second frame of lag behind the content,
+		// visible as jitter during fast trackpad scrolls.
+		scrollBody.addEventListener("scroll", () => this.updateStickyHeaders());
 	}
 
 	/** PR-1.F1 (G3, G4, E2): moves the two section headers for the body's current scroll. Headers stay
 	 * in normal flow and are shifted with a transform, so section layout and the inbox window never
-	 * change. Also keeps `scroll-padding-top` at the stacked header height, so a programmatic scroll
-	 * never hides a row behind them. */
+	 * change. Also keeps `scroll-padding-top`/`scroll-padding-bottom` clear of whichever headers are
+	 * currently stuck over the content, so a programmatic scroll never hides a row behind them. */
 	private updateStickyHeaders(): void {
 		const s = this.stickyEls;
 		if (!s || !s.body.isConnected) return;
@@ -1517,7 +1574,14 @@ export class AtlasExplorerView extends ItemView {
 		});
 		s.bucketHeader.style.transform = layout.bucketY === bucketTop ? "" : `translateY(${layout.bucketY - bucketTop}px)`;
 		s.inboxHeader.style.transform = layout.inboxY === inboxTop ? "" : `translateY(${layout.inboxY - inboxTop}px)`;
-		s.body.style.scrollPaddingTop = layout.stuck ? `${bucketHeaderHeight + inboxHeaderHeight}px` : "0px";
+		// PR-1.F1 R2: the bucket header is the only one stuck over the top of the content in the
+		// "pinned" and (unstuck-inbox) "flow" sub-states — the stacked height only applies while the
+		// inbox header has *also* moved to sit directly under it. A pinned inbox header instead covers
+		// content at the bottom edge, so that's a bottom padding, not a (too-large) top one.
+		const topPadding = !layout.stuck ? 0 : layout.inboxPosition === "stacked" ? bucketHeaderHeight + inboxHeaderHeight : bucketHeaderHeight;
+		const bottomPadding = layout.stuck && layout.inboxPosition === "pinned" ? inboxHeaderHeight : 0;
+		s.body.style.scrollPaddingTop = `${topPadding}px`;
+		s.body.style.scrollPaddingBottom = `${bottomPadding}px`;
 	}
 
 	/** PR-1.F1 (G5): where a section's header belongs once stuck: the bucket at the top, the inbox
@@ -1555,7 +1619,15 @@ export class AtlasExplorerView extends ItemView {
 
 	/** PR-1.F1 (G6, G7): only the chevron collapses or expands its section. Collapsing while the panel
 	 * is scrolled past the section's stuck position settles it there, so no landing mid-inbox. Expanding
-	 * doesn't scroll. */
+	 * doesn't scroll.
+	 *
+	 * PR-1.F1 R3: the settle is always instant, never smooth. The section's own CSS collapse transition
+	 * (grid-template-rows, COLLAPSE_TRANSITION_MS) is shrinking the scrollable content under the browser's
+	 * feet at the same time a `behavior: "smooth"` scroll would be easing toward the target. The browser
+	 * clamps scrollTop to the shrinking max every frame of that transition regardless of what our smooth
+	 * scroll wants, so the two fight and the panel can settle below the target (inbox header pinned at the
+	 * bottom edge) instead of at it (stacked under the bucket header), with the clamp making the smooth
+	 * scroll look like a snap anyway. Jumping straight there has no such race. */
 	private onSectionChevronClick(key: SectionKey, parts: SectionParts): void {
 		this.sectionClickSeq++;
 		const collapsed = !this.isSectionCollapsed(key);
@@ -1563,7 +1635,7 @@ export class AtlasExplorerView extends ItemView {
 		if (!collapsed) return;
 		// `min`: a section collapsed while the panel is above its stuck position stays where it is.
 		const current = this.stickyEls?.body.scrollTop ?? 0;
-		this.scrollSectionsTo(Math.min(current, this.sectionStuckTarget(key)), prefersReducedMotion());
+		this.scrollSectionsTo(Math.min(current, this.sectionStuckTarget(key)), true);
 	}
 
 	/** PR-1.F1 (G5, E4, GP4-GP7): a title click scrolls its section to the stuck position. A collapsed
@@ -2135,7 +2207,10 @@ export class AtlasExplorerView extends ItemView {
 	}
 
 	/** PR 20: same idea as `buildNodeDragPayload`, for an inbox row — see its own doc comment for why
-	 * this deliberately never calls `render()` from inside a `dragstart` handler. */
+	 * this deliberately never calls `render()` from inside a `dragstart` handler. PR-1.F2 R1: a
+	 * missing added row's key never makes it into the payload, even when it's part of the current
+	 * multi-selection — only `missingAddedInboxKeys` is consulted, not draggability, since this ref
+	 * never started the drag itself. */
 	private buildInboxDragPayload(ref: UnitRef): DragPayload {
 		const key = unitRefKey(ref);
 		if (!this.selectedInboxRefKeys.has(key) || this.selectedInboxRefKeys.size <= 1) {
@@ -2145,7 +2220,10 @@ export class AtlasExplorerView extends ItemView {
 			this.selectionAnchor = key;
 			this.selectionAnchorScope = "inbox";
 		}
-		const refs = [...this.selectedInboxRefKeys].map((k) => this.inboxRefByKey.get(k)).filter((r): r is UnitRef => !!r);
+		const refs = [...this.selectedInboxRefKeys]
+			.filter((k) => !this.missingAddedInboxKeys.has(k))
+			.map((k) => this.inboxRefByKey.get(k))
+			.filter((r): r is UnitRef => !!r);
 		return { kind: "inbox", refs: refs.length > 0 ? refs : [ref] };
 	}
 
@@ -2320,6 +2398,31 @@ export class AtlasExplorerView extends ItemView {
 		});
 	}
 
+	/** PR-1 R4: the API/CSV/markdown-table and Outside-path connection dots, shared by a meta folder's
+	 * row and a unit's row — a unit can hold the exact same kinds of data source (after Create or
+	 * Swap), and needs the same ok/grey/red/amber signal, not just a meta folder's `renderNode` branch. */
+	private renderConnectionDots(row: HTMLElement, node: ViewNode): void {
+		if (node.apiSource || node.csvSource || node.markdownTableSource) {
+			// G11/PR-7/PR-8: connection dot — green ok / grey never-refreshed / red last-refresh-failed
+			// / amber (PR-3) waiting on an unanswered automatic delete confirmation. CSV and Markdown
+			// Table both share this exact dot: their controllers write the same `apiCache`/
+			// `apiAwaitingConfirmation` fields an API source does.
+			const dot = row.createSpan({
+				cls: `atlas-api-connection-dot atlas-api-dot-${dotStateFor(node.apiCache, node.apiAwaitingConfirmation)}`,
+			});
+			setTooltip(dot, dotTooltip(node.apiCache, Date.now(), node.apiAwaitingConfirmation));
+		}
+		if (node.folderSource?.location === "outside") {
+			// PR-5 (G6/G11): recomputed fresh on every render (same "no cached connection state
+			// anywhere" design as the modal's own dot) — load and focus-regain both already trigger a
+			// render via `queueRender`, so this alone satisfies the recheck-on-load/focus-regain
+			// requirement with no separate timer/poll (F10).
+			const resolved = resolveOutsidePath(this.plugin.folderSourcePathStore.get(node.id));
+			const dot = row.createSpan({ cls: `atlas-api-connection-dot atlas-api-dot-${resolved ? "green" : "red"}` });
+			setTooltip(dot, resolved ? "Path resolves on this device" : "Path does not resolve on this device");
+		}
+	}
+
 	private async renderNode(node: ViewNode, container: HTMLElement, view: View, depth: number, ancestors: StatusGovernance[]): Promise<void> {
 		if (node.type === "meta") {
 			const row = container.createDiv({ cls: "atlas-row atlas-row-meta" });
@@ -2331,25 +2434,7 @@ export class AtlasExplorerView extends ItemView {
 			const iconEl = row.createDiv({ cls: "atlas-icon" });
 			this.renderRowIcon(iconEl, view, node, ancestors, "layers");
 			row.createSpan({ cls: "atlas-row-text", text: node.label ?? "" });
-			if (node.apiSource || node.csvSource || node.markdownTableSource) {
-				// G11/PR-7/PR-8: connection dot — green ok / grey never-refreshed / red last-refresh-failed
-				// / amber (PR-3) waiting on an unanswered automatic delete confirmation. CSV and Markdown
-				// Table both share this exact dot: their controllers write the same `apiCache`/
-				// `apiAwaitingConfirmation` fields an API source does.
-				const dot = row.createSpan({
-					cls: `atlas-api-connection-dot atlas-api-dot-${dotStateFor(node.apiCache, node.apiAwaitingConfirmation)}`,
-				});
-				setTooltip(dot, dotTooltip(node.apiCache, Date.now(), node.apiAwaitingConfirmation));
-			}
-			if (node.folderSource?.location === "outside") {
-				// PR-5 (G6/G11): recomputed fresh on every render (same "no cached connection state
-				// anywhere" design as the modal's own dot) — load and focus-regain both already trigger a
-				// render via `queueRender`, so this alone satisfies the recheck-on-load/focus-regain
-				// requirement with no separate timer/poll (F10).
-				const resolved = resolveOutsidePath(this.plugin.folderSourcePathStore.get(node.id));
-				const dot = row.createSpan({ cls: `atlas-api-connection-dot atlas-api-dot-${resolved ? "green" : "red"}` });
-				setTooltip(dot, resolved ? "Path resolves on this device" : "Path does not resolve on this device");
-			}
+			this.renderConnectionDots(row, node);
 
 			// PR 20: a meta row's plain click never did anything before this (no open target) — safe
 			// to bind unconditionally, since the previous behavior ("nothing happens") is preserved
@@ -2401,6 +2486,9 @@ export class AtlasExplorerView extends ItemView {
 		const iconEl = row.createDiv({ cls: "atlas-icon" });
 		this.renderRowIcon(iconEl, view, node, ancestors, info.icon);
 		row.createSpan({ cls: "atlas-row-text", text: info.text });
+		// PR-1 R4: a unit (not just a meta folder) can hold a data source after Create or Swap, and
+		// needs the same ok/failed/awaiting-confirmation signal.
+		this.renderConnectionDots(row, node);
 		if (info.secondary) row.createSpan({ cls: "atlas-row-secondary", text: info.secondary });
 		if (info.missing) row.createSpan({ cls: "atlas-row-secondary", text: "(missing)" });
 		// PR-1.F2 (G5/G7): "filtered out" takes the place of "last seen". Remove works the same way as on a
@@ -2529,6 +2617,9 @@ export class AtlasExplorerView extends ItemView {
 		// whatever's presently painted.
 		this.inboxSelectOrder = sorted.map((r) => unitRefKey(r.ref));
 		this.inboxRefByKey = new Map(sorted.map((r) => [unitRefKey(r.ref), r.ref]));
+		this.missingAddedInboxKeys = new Set(
+			sorted.filter((r) => r.info.missing && this.plugin.unitIndex.isAdded(r.ref)).map((r) => unitRefKey(r.ref))
+		);
 
 		// F11: the inbox can be thousands of rows (5,000 files + 2,000 free blocks scale target).
 		// The non-virtualized fallback this used to need for expanded folder-unit internals is gone —
@@ -2550,8 +2641,19 @@ export class AtlasExplorerView extends ItemView {
 		// PR-1.F1: one placed-set per open, shared by the file and folder candidate lists.
 		const placed = viewsManager.placedRefKeys();
 		const isPlacedAnywhere = (ref: UnitRef): boolean => placed.has(unitRefKey(ref));
+		const interfaceNotePathFor = (folderPath: string): string | null => {
+			const folder = app.vault.getAbstractFileByPath(folderPath);
+			if (!(folder instanceof TFolder)) return null;
+			return findInterfaceNote(app, folder, settings)?.path ?? null;
+		};
 		const candidates: (TFile | TFolder)[] = [
-			...candidateFilesForAdd(app.vault.getFiles(), units, isPlacedAnywhere, (ref) => unitIndex.isDismissed(ref, "global")),
+			...candidateFilesForAdd(
+				app.vault.getFiles(),
+				units,
+				isPlacedAnywhere,
+				(ref) => unitIndex.isDismissed(ref, "global"),
+				interfaceNotePathFor
+			),
 			...candidateFoldersForAdd(app.vault.getAllLoadedFiles(), units, placed, settings),
 		];
 		new AddFileSuggestModal(app, candidates, (item) => {
@@ -2662,12 +2764,18 @@ export class AtlasExplorerView extends ItemView {
 			drawnStart = start;
 			drawnEnd = end;
 
-			// A row's module-icon dwell timer dies with its element, and `dragleave` never fires for a
-			// removed node, so cancel any pending dwell before the rows it belongs to are swapped out.
-			this.cancelActiveDwell?.();
 			// The row being dragged is kept in the DOM even when it scrolls out of the window (hidden),
 			// so the browser's drag source survives. Everything else is rebuilt for the new window.
 			const dragged = this.inboxDragRowEl;
+			// A row's module-icon dwell timer dies with its element, and `dragleave` never fires for a
+			// removed node, so cancel any pending dwell before the rows it belongs to are swapped out.
+			// PR-1.S1 R3: only when the dwell actually belongs to a row in this spacer (and isn't the
+			// kept-alive dragged row) — a dwell on a bucket module icon stays valid, since the bucket
+			// isn't touched here, and cancelling it anyway during an inbox-row drag with edge
+			// auto-scroll could drop a dwell the user is legitimately still hovering.
+			if (this.activeDwellRow && this.activeDwellRow !== dragged && spacer.contains(this.activeDwellRow)) {
+				this.cancelActiveDwell?.();
+			}
 			for (const child of Array.from(spacer.children)) {
 				if (child !== dragged) child.remove();
 			}
@@ -2928,7 +3036,8 @@ export class AtlasExplorerView extends ItemView {
 		// itself — an item with no children has nothing for the option to apply to, so it's hidden
 		// entirely rather than offered and doing nothing when toggled.
 		// PR-1 (G11e): same Statuses / Data source… / Refresh now / Remove data source items as an Atlas folder.
-		addSourceAndStatusItems(menu, this.plugin, this, view, node);
+		// The separator above is already in place, so tell the helper not to double it up.
+		addSourceAndStatusItems(menu, this.plugin, this, view, node, true);
 		menu.addSeparator();
 		// PR 13: clones this row (and its whole meta-nested subtree, if it has one) as a new sibling
 		// right after it — same underlying unit, no disk duplicate, no naming scheme (two rows with
@@ -2985,18 +3094,24 @@ export class AtlasExplorerView extends ItemView {
 	}
 
 	/** PR-2 (G6): the "Swap with…" picker over every vault file and folder plus every known block, minus
-	 * excluded and dot-folders and the item being replaced. Block labels need their text resolved first,
-	 * so this is async; the picker itself is opened once the list is ready. */
+	 * excluded and dot-folders and the item being replaced. PR-2 R4: free-block labels are read from
+	 * `freeBlockTextCache` only — it's kept current by vault events from plugin load, so this needs no
+	 * disk read even on a vault with thousands of free blocks. Promoted blocks have no equivalent cache
+	 * (per `resolveUnit`'s own doc comment, a smaller, bounded-impact gap — they're typically far fewer
+	 * in a real vault), so those still resolve async before the picker opens. */
 	async openSwapPicker(view: View, node: ViewNode): Promise<void> {
 		const { plugin } = this;
 		const units = plugin.unitIndex.getUnits();
-		const blockUnits = units.filter((unit) => unit.type === "free-block" || unit.type === "promoted-block");
-		const blocks = await Promise.all(
-			blockUnits.map(async (unit) => {
+		const freeBlockUnits = units.filter((unit) => unit.type === "free-block");
+		const promotedBlockUnits = units.filter((unit) => unit.type === "promoted-block");
+		const freeBlocks = freeBlockUnits.map((unit) => ({ ref: unitToRef(unit), text: plugin.freeBlockTextCache?.get(unit.path) ?? "" }));
+		const promotedBlocks = await Promise.all(
+			promotedBlockUnits.map(async (unit) => {
 				const resolved = await resolveUnit(plugin.app, plugin.settings, unit, plugin.freeBlockTextCache);
 				return { ref: unitToRef(unit), text: resolved?.text ?? "" };
 			})
 		);
+		const blocks = [...freeBlocks, ...promotedBlocks];
 		const vault = plugin.app.vault;
 		const candidates = buildSwapCandidates({
 			files: vault.getFiles().map((file) => ({ path: file.path, name: file.name })),
@@ -3027,8 +3142,13 @@ export class AtlasExplorerView extends ItemView {
 			new Notice(`Couldn't find ${candidate.name}, nothing changed.`);
 			return;
 		}
-		if (!known) plugin.unitIndex.addManualPromotion(candidate.ref);
+		// PR-2 R3: promote only once the swap has actually succeeded — swapNodeWithUnit's own checks
+		// (node still exists, isn't folderSourceManaged, isn't already this ref) don't depend on the
+		// candidate being a known unit, so calling it first costs nothing and never leaves a permanent
+		// manual promotion behind for a swap that didn't happen (e.g. the spot was removed, or its view
+		// deleted, while the picker or block-text resolution was pending).
 		if (!plugin.viewsManager.swapNodeWithUnit(view.id, node.id, candidate.ref)) return;
+		if (!known) plugin.unitIndex.addManualPromotion(candidate.ref);
 		await plugin.flushSave();
 		this.queueRender();
 	}
@@ -3336,14 +3456,19 @@ export class AtlasExplorerView extends ItemView {
 			if (dwellTimer === undefined) return;
 			window.clearTimeout(dwellTimer);
 			dwellTimer = undefined;
-			if (this.cancelActiveDwell === cancelDwell) this.cancelActiveDwell = null;
+			if (this.cancelActiveDwell === cancelDwell) {
+				this.cancelActiveDwell = null;
+				this.activeDwellRow = null;
+			}
 		};
 		const startDwell = () => {
 			if (!this.dragPayload || dwellTimer !== undefined) return;
 			this.cancelActiveDwell = cancelDwell;
+			this.activeDwellRow = row;
 			dwellTimer = window.setTimeout(() => {
 				dwellTimer = undefined;
 				this.cancelActiveDwell = null;
+				this.activeDwellRow = null;
 				this.openModuleContentsModalForDrag(folderPath);
 			}, MODULE_HOVER_DWELL_MS);
 		};
@@ -3457,10 +3582,11 @@ export class AtlasExplorerView extends ItemView {
 		if (evt.key === "Enter" && node.type === "unit" && node.ref && !this.isOutsideManagedUnit(view, node)) {
 			evt.preventDefault();
 			void this.openRef(node.ref);
-		} else if (evt.key === " " && (node.type === "meta" || node.children.length > 0)) {
+		} else if (evt.key === " " && (node.type === "meta" || node.children.length > 0 || nodeHasApiRows(node))) {
 			// PR 12: keyboard parity for the new unit-node chevrons — same fold/unfold toggle meta
 			// folders already had, now also reachable without a mouse for a unit that's gained
-			// meta-nested children.
+			// meta-nested children. PR-1 R5: a unit with source rows but no children is foldable too,
+			// same as PR-1 (G11c)'s renderFoldableChildren gate.
 			evt.preventDefault();
 			this.plugin.viewsManager.setNodeCollapsed(view.id, node.id, !node.collapsed);
 		} else if (evt.key === "Delete") {
