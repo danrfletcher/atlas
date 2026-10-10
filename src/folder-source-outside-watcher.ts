@@ -72,6 +72,11 @@ export interface FolderSourceOutsideWatchersDeps {
 export class FolderSourceOutsideWatchers {
 	private entries = new Map<string, OutsideWatchEntry>();
 	private sourcePaths = new Map<string, string>();
+	/** PR-1 R1 fix: the raw (pre-normalize) path last seen for each source. `sync` runs on every views
+	 * change, so re-resolving + re-realpath-ing every source's path on every call made those sync disk
+	 * calls fire far more often than a source's path actually changes. Keyed by node id; cleared in
+	 * `release` alongside `sourcePaths`. */
+	private rawPaths = new Map<string, string>();
 	private debounce: FolderLiveRefresh;
 	private watch: OutsideWatchFn;
 
@@ -83,9 +88,18 @@ export class FolderSourceOutsideWatchers {
 	/** Brings the registry in line with `sources` (node id → device-local path, possibly blank or
 	 * unresolved). Sources that left are released; new ones are retained. PR-2 R5 fix: normalized here,
 	 * once, so every downstream comparison/key (`sourcePaths`, `entries`) stays in the same canonical
-	 * space regardless of which textual spelling a source was configured with. */
+	 * space regardless of which textual spelling a source was configured with. PR-1 R1 fix: a source
+	 * whose raw path is unchanged since the last `sync` reuses its last normalized result instead of
+	 * re-running `path.resolve`/`fs.realpathSync`. */
 	sync(sources: Map<string, string>): void {
-		const normalized = new Map(Array.from(sources, ([nodeId, path]) => [nodeId, normalizeOutsidePath(path)]));
+		const normalized = new Map(
+			Array.from(sources, ([nodeId, rawPath]) => {
+				const reusable = this.rawPaths.get(nodeId) === rawPath ? this.sourcePaths.get(nodeId) : undefined;
+				const path = reusable ?? normalizeOutsidePath(rawPath);
+				this.rawPaths.set(nodeId, rawPath);
+				return [nodeId, path] as const;
+			})
+		);
 		for (const [nodeId, path] of Array.from(this.sourcePaths)) {
 			if (normalized.get(nodeId) !== path) this.release(nodeId);
 		}
@@ -110,6 +124,7 @@ export class FolderSourceOutsideWatchers {
 		}
 		this.entries.clear();
 		this.sourcePaths.clear();
+		this.rawPaths.clear();
 	}
 
 	private retain(nodeId: string, path: string): void {
@@ -127,6 +142,7 @@ export class FolderSourceOutsideWatchers {
 		const path = this.sourcePaths.get(nodeId);
 		if (path === undefined) return;
 		this.sourcePaths.delete(nodeId);
+		this.rawPaths.delete(nodeId);
 		const entry = this.entries.get(path);
 		if (!entry) return;
 		entry.nodeIds.delete(nodeId);

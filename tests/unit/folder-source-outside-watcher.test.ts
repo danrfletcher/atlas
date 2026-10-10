@@ -5,6 +5,23 @@ import * as os from "node:os";
 import { EventEmitter } from "node:events";
 import { FolderSourceOutsideWatchers, OUTSIDE_WATCH_DEBOUNCE_MS, isIgnoredOutsideEvent } from "../../src/folder-source-outside-watcher";
 
+/** PR-1 R1: the module under test imports the `"fs"` specifier (not `"node:fs"`), so mocking it here
+ * leaves the test file's own `"node:fs"` imports (`mkdtempSync` etc.) untouched. */
+const realpathSyncSpy = vi.fn();
+vi.mock("fs", async (importOriginal) => {
+	const actual = await importOriginal<typeof import("fs")>();
+	return {
+		...actual,
+		realpathSync: Object.assign(
+			(...args: Parameters<typeof actual.realpathSync>) => {
+				realpathSyncSpy(...args);
+				return (actual.realpathSync as (...a: typeof args) => unknown)(...args);
+			},
+			actual.realpathSync
+		),
+	};
+});
+
 /** A small EventEmitter standing in for the `FSWatcher` `fs.watch` returns. */
 class MockWatcher extends EventEmitter {
 	close = vi.fn();
@@ -162,15 +179,20 @@ describe("folder-source-outside-watcher — two sources, one watcher (E4 guard, 
 
 describe("folder-source-outside-watcher — PR-2 R5: keyed by resolved path, not raw text (G9)", () => {
 	let dir: string;
+	let alias: string | undefined;
 
 	beforeEach(() => {
 		vi.useFakeTimers();
 		dir = mkdtempSync(join(os.tmpdir(), "atlas-outside-watcher-"));
+		alias = undefined;
 	});
 
 	afterEach(() => {
 		vi.useRealTimers();
 		rmSync(dir, { recursive: true, force: true });
+		// PR-1 R4 fix: cleaning this up here, not inline after the test's own `expect`, means a failing
+		// assertion still removes the alias instead of leaking it in tmpdir.
+		if (alias) rmSync(alias, { force: true });
 	});
 
 	it("a trailing slash on one source's path is still the same folder as the other's — one watcher, not two", () => {
@@ -185,7 +207,7 @@ describe("folder-source-outside-watcher — PR-2 R5: keyed by resolved path, not
 	});
 
 	it("a symlinked alias of the same real folder shares the one watcher its target already has", () => {
-		const alias = `${dir}-alias`;
+		alias = `${dir}-alias`;
 		symlinkSync(dir, alias, "dir");
 		const { registry, watch } = setup();
 
@@ -197,7 +219,46 @@ describe("folder-source-outside-watcher — PR-2 R5: keyed by resolved path, not
 		);
 
 		expect(watch).toHaveBeenCalledTimes(1);
-		rmSync(alias, { force: true });
+	});
+});
+
+describe("folder-source-outside-watcher — PR-1 R1: path normalization is cached per source (G9)", () => {
+	let dir: string;
+
+	beforeEach(() => {
+		vi.useFakeTimers();
+		dir = mkdtempSync(join(os.tmpdir(), "atlas-outside-watcher-"));
+		realpathSyncSpy.mockClear();
+	});
+
+	afterEach(() => {
+		vi.useRealTimers();
+		rmSync(dir, { recursive: true, force: true });
+	});
+
+	it("a source whose raw path is unchanged across sync() calls is not re-resolved/re-realpath'd", () => {
+		const { registry } = setup();
+
+		registry.sync(new Map([["node-a", dir]]));
+		expect(realpathSyncSpy).toHaveBeenCalledTimes(1);
+
+		registry.sync(new Map([["node-a", dir]]));
+		registry.sync(new Map([["node-a", dir]]));
+		expect(realpathSyncSpy).toHaveBeenCalledTimes(1);
+	});
+
+	it("a source whose raw path changes is re-resolved, and the new value still opens one watcher", () => {
+		const other = mkdtempSync(join(os.tmpdir(), "atlas-outside-watcher-"));
+		const { registry, watch } = setup();
+
+		registry.sync(new Map([["node-a", dir]]));
+		expect(realpathSyncSpy).toHaveBeenCalledTimes(1);
+
+		registry.sync(new Map([["node-a", other]]));
+		expect(realpathSyncSpy).toHaveBeenCalledTimes(2);
+		expect(watch.mock.calls.map((c) => c[0])).toEqual([dir, other]);
+
+		rmSync(other, { recursive: true, force: true });
 	});
 });
 
