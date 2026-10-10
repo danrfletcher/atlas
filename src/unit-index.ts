@@ -17,6 +17,13 @@ function isUsableAddedItem(item: AddedItem): boolean {
 	return !!ref && (ref.kind === "file" || ref.kind === "folder" || ref.kind === "block") && typeof ref.path === "string";
 }
 
+/** PR-1.S1 R3: true for a vault-root path (no `/`). Only vault-root folders are base units (README
+ * "Only vault-root folders are base units"), so a folder rewritten onto one of these paths is no
+ * longer an addable item — it already surfaces as a `folder-unit` with its own placement. */
+function isRootFolderPath(path: string): boolean {
+	return !path.includes("/");
+}
+
 /**
  * In-memory index of every unit in the vault (F2). Rebuilt fully on load, then kept current by
  * two separate incremental paths: vault structure events (create/delete/rename — cheap, O(1) per
@@ -50,6 +57,12 @@ export class UnitIndex {
 	private changeListeners = new Set<() => void>();
 	/** Paths whose units are kept out of `getUnits` (a count each, so overlapping holds are safe). */
 	private held = new Map<string, number>();
+	/** R2: memoises `normalizeNoAutoPromoteFolders` by the settings array's own identity, so the
+	 * per-unit inbox filter (`isLinkOnlyInNoAutoPromoteFolder`) normalises once per settings change
+	 * rather than once per unit per render. Every writer replaces the array rather than mutating it
+	 * in place (load, the settings-tab save, and the rename rewrite all assign a fresh array), so
+	 * reference equality is a safe cache key. */
+	private noAutoPromoteFoldersCache: { raw: string[]; poolFolder: string; normalized: string[] } | null = null;
 
 	constructor(
 		private app: App,
@@ -219,11 +232,22 @@ export class UnitIndex {
 	 * Read by the inbox lists only: promotion itself is unchanged, so placed items keep resolving. */
 	isLinkOnlyInNoAutoPromoteFolder(unit: Unit): boolean {
 		if (unit.type !== "promoted-file" && unit.type !== "promoted-folder" && unit.type !== "promoted-block") return false;
-		const folders = normalizeNoAutoPromoteFolders(this.settings.noAutoPromoteFolders, this.settings.poolFolder);
-		if (!isCoveredByNoAutoPromote(unit.path, folders)) return false;
+		if (!isCoveredByNoAutoPromote(unit.path, this.getNormalizedNoAutoPromoteFolders())) return false;
 		const ref = unitToRef(unit);
 		if (this.isAdded(ref)) return false;
 		return !this.manualPromotions.some((manual) => unitRefsEqual(manual, ref));
+	}
+
+	/** R2: the memoised read side of `noAutoPromoteFoldersCache` — recomputes only when the settings
+	 * array or pool folder has actually changed since the last call. */
+	private getNormalizedNoAutoPromoteFolders(): string[] {
+		const raw = this.settings.noAutoPromoteFolders;
+		const poolFolder = this.settings.poolFolder;
+		const cache = this.noAutoPromoteFoldersCache;
+		if (cache && cache.raw === raw && cache.poolFolder === poolFolder) return cache.normalized;
+		const normalized = normalizeNoAutoPromoteFolders(raw, poolFolder);
+		this.noAutoPromoteFoldersCache = { raw, poolFolder, normalized };
+		return normalized;
 	}
 
 	/** No corresponding "unmark added" — per F1, dismiss is still the only removal write for every
@@ -238,7 +262,7 @@ export class UnitIndex {
 
 	/** PR-1.F2 (G10): drops the `addedItems` entry for `ref` (file or folder kind) and nothing else —
 	 * other entries and every dismissal are left as they are, and an unknown ref is a no-op. Only the
-	 * inbox's "(missing)" Remove calls this. Adds to the in-memory list only: the caller persists. */
+	 * inbox's "(missing)" Remove calls this. Changes the in-memory list only: the caller persists. */
 	removeAdded(ref: UnitRef): void {
 		this.addedItems = this.addedItems.filter((item) => !(isUsableAddedItem(item) && unitRefsEqual(item.ref, ref)));
 	}
@@ -503,7 +527,7 @@ export class UnitIndex {
 				continue;
 			}
 			addedChanged = true;
-			if (item.ref.kind === "folder" && !rewritten.path.includes("/")) continue;
+			if (item.ref.kind === "folder" && isRootFolderPath(rewritten.path)) continue;
 			rewrittenAdded.push({ ...item, ref: rewritten });
 		}
 		if (addedChanged) {
