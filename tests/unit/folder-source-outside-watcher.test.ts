@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync } from "node:fs";
 import { join } from "node:path";
 import * as os from "node:os";
 import { EventEmitter } from "node:events";
@@ -261,7 +261,10 @@ describe("folder-source-outside-watcher — PR-1 R1: path normalization is cache
 
 		registry.sync(new Map([["node-a", other]]));
 		expect(realpathSyncSpy).toHaveBeenCalledTimes(2);
-		expect(watch.mock.calls.map((c) => c[0])).toEqual([dir, other]);
+		// R3 fix: the registry keys/watches the realpath, not the raw tmpdir path, so compare against
+		// realpathSync(dir)/realpathSync(other) — on a stock macOS TMPDIR (/var/folders/... symlinked to
+		// /private/var/folders/...) the raw and real paths differ, and asserting the raw paths flaked there.
+		expect(watch.mock.calls.map((c) => c[0])).toEqual([realpathSync(dir), realpathSync(other)]);
 	});
 
 	it("a source stuck on the textual fallback keeps re-resolving every sync until the target exists", () => {
