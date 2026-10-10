@@ -1,8 +1,16 @@
-import { afterEach, describe, expect, it } from "vitest";
-import { computeStickyHeaders, stuckScrollTarget, StickyHeaderInput } from "../src/explorer-view";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { stuckScrollTarget } from "../src/explorer-view";
 import { makeSectionHarness, SectionHarness } from "./explorer-header-fixtures";
 
-// PR-1.F1: the stacking function at the spec's grid cells (G3, G4) and short-panel boundaries (E2).
+// PR-1.B1: the JS pinning emulation (`computeStickyHeaders`, `updateStickyHeaders`, the scroll
+// listener, the per-header `translateY` transforms and `scroll-padding-top`/`-bottom`) is gone, so
+// the two `describe("computeStickyHeaders ...")` blocks and the three `*.style.transform` /
+// `*.style.scrollPadding*` assertions from the old version of this file are removed — pinning is now
+// a native CSS `position: sticky` rule read from the stylesheet below, not a value this test can
+// compute. `stuckScrollTarget` (G5, G7) is unchanged and kept as-is.
+//
 // Geometry: 28px headers and rows, a 60-row bucket (so the inbox starts at 28 + 60*28 = 1708), a
 // 25-row inbox, and a 300px viewport. Content ends at 2436, so the largest scrollTop is 2136.
 const HEADER = 28;
@@ -10,68 +18,6 @@ const ROW = 28;
 const VIEWPORT = 300;
 const INBOX_TOP = HEADER + 60 * ROW; // 1708
 const MAX_SCROLL = HEADER + 60 * ROW + HEADER + 25 * ROW - VIEWPORT; // 2136
-
-const base: StickyHeaderInput = {
-	scrollTop: 0,
-	viewportHeight: VIEWPORT,
-	bucketTop: 0,
-	bucketHeaderHeight: HEADER,
-	inboxTop: INBOX_TOP,
-	inboxHeaderHeight: HEADER,
-};
-
-describe("computeStickyHeaders (G3, G4)", () => {
-	it.each([
-		// [label, scrollTop, inboxPosition, inboxY, bucketY]
-		["top of panel: inbox pinned to the bottom edge", 0, "pinned", VIEWPORT - HEADER, 0],
-		["bucket rows scrolling under the bucket header", 1000, "pinned", 1000 + VIEWPORT - HEADER, 1000],
-		["last scrollTop with the inbox still pinned", 1435, "pinned", 1435 + VIEWPORT - HEADER, 1435],
-		["inbox reaches the bottom edge: flows in place", 1436, "flow", INBOX_TOP, 1436],
-		["inbox scrolled up into the view, still below the bucket header", 1500, "flow", INBOX_TOP, 1500],
-		["inbox meets the bucket header: still flow", 1680, "flow", INBOX_TOP, 1680],
-		["inbox passes under the bucket header: stacked", 1681, "stacked", 1681 + HEADER, 1681],
-		["max scroll: inbox stays stacked through the end of the inbox", MAX_SCROLL, "stacked", MAX_SCROLL + HEADER, MAX_SCROLL],
-	])("%s", (_label, scrollTop, position, inboxY, bucketY) => {
-		const layout = computeStickyHeaders({ ...base, scrollTop });
-		expect(layout.stuck).toBe(true);
-		expect(layout.inboxPosition).toBe(position);
-		expect(layout.bucketY).toBe(bucketY);
-		expect(layout.inboxY).toBe(inboxY);
-	});
-
-	it("an empty bucket puts the inbox header directly under the bucket header", () => {
-		const layout = computeStickyHeaders({ ...base, inboxTop: HEADER });
-		expect(layout.inboxPosition).toBe("flow");
-		expect(layout.inboxY).toBe(HEADER);
-	});
-});
-
-describe("computeStickyHeaders (E2 short panel)", () => {
-	const minFit = HEADER + HEADER + ROW; // bucket header + inbox header + one row = 84
-
-	it("exactly fits: headers stick, the inbox is pinned", () => {
-		const layout = computeStickyHeaders({ ...base, viewportHeight: minFit, scrollTop: 0 });
-		expect(layout.stuck).toBe(true);
-		expect(layout.inboxPosition).toBe("pinned");
-		expect(layout.inboxY).toBe(minFit - HEADER);
-	});
-
-	it("one px short: both headers unstick together, bucket included, at any scroll", () => {
-		const layout = computeStickyHeaders({ ...base, viewportHeight: minFit - 1, scrollTop: 1000 });
-		expect(layout.stuck).toBe(false);
-		expect(layout.inboxPosition).toBe("flow");
-		expect(layout.bucketY).toBe(0);
-		expect(layout.inboxY).toBe(INBOX_TOP);
-	});
-
-	it("re-sticks as soon as the panel is tall enough again", () => {
-		const short = computeStickyHeaders({ ...base, viewportHeight: minFit - 1, scrollTop: 1000 });
-		const tall = computeStickyHeaders({ ...base, viewportHeight: minFit, scrollTop: 1000 });
-		expect(short.stuck).toBe(false);
-		expect(tall.stuck).toBe(true);
-		expect(tall.bucketY).toBe(1000);
-	});
-});
 
 describe("stuckScrollTarget (G5, G7)", () => {
 	it.each([
@@ -86,54 +32,199 @@ describe("stuckScrollTarget (G5, G7)", () => {
 	});
 });
 
-describe("rendered headers follow the same rules (G3, E2)", () => {
+describe("rendered headers: no JS transform or scroll-padding (GP2-GP5, E1)", () => {
 	let h: SectionHarness | null = null;
 	afterEach(() => {
 		h?.teardown();
 		h = null;
 	});
 
-	it("pins the inbox and stacks the bucket, then unsticks both on a short panel and re-sticks on resize", async () => {
+	it("never sets a transform or scroll-padding on either label at any scroll position", async () => {
+		h = makeSectionHarness();
+		await h.render();
+		for (const top of [0, 1, 1000, 1435, 1436, 1500, 1680, 1681, MAX_SCROLL]) {
+			h.scrollTo(top);
+			expect(h.bucketHeader().style.transform).toBe("");
+			expect(h.inboxHeader().style.transform).toBe("");
+			expect(h.body().style.scrollPaddingTop).toBe("");
+			expect(h.body().style.scrollPaddingBottom).toBe("");
+		}
+	});
+
+	it("adds no scroll listener or requestAnimationFrame beyond the inbox virtualisation's own (F5)", async () => {
+		const addSpy = vi.spyOn(HTMLElement.prototype, "addEventListener");
+		const rafSpy = vi.spyOn(window, "requestAnimationFrame");
 		h = makeSectionHarness();
 		await h.render();
 		h.scrollTo(1000);
-		expect(h.bucketHeader().style.transform).toBe("translateY(1000px)");
-		expect(h.inboxHeader().style.transform).toBe(`translateY(${1000 + VIEWPORT - HEADER - INBOX_TOP}px)`);
-		// PR-1.F1 R2: scrollTop 1000 is the "pinned" state (see the table above) — only the bucket
-		// header is stuck over the top of the content, so the top padding is its height alone; the
-		// pinned inbox header instead covers content at the bottom edge, so that's a bottom padding.
-		expect(h.body().style.scrollPaddingTop).toBe(`${HEADER}px`);
-		expect(h.body().style.scrollPaddingBottom).toBe(`${HEADER}px`);
+		// The inbox's row-virtualisation redraw keeps its own `scroll` listener (unrelated to sticky
+		// headers, see `renderVirtualizedInboxRows`); the sticky-header code adds no listener of its own.
+		const scrollListeners = addSpy.mock.calls.filter((call, i) => call[0] === "scroll" && addSpy.mock.contexts[i] === h!.body());
+		expect(scrollListeners.length).toBe(1);
+		expect(rafSpy).not.toHaveBeenCalled();
+	});
+});
 
-		h.setViewportHeight(ROW + HEADER + HEADER - 1);
-		h.fireResize();
-		expect(h.bucketHeader().style.transform).toBe("");
-		expect(h.inboxHeader().style.transform).toBe("");
-		expect(h.body().style.scrollPaddingTop).toBe("0px");
-		expect(h.body().style.scrollPaddingBottom).toBe("0px");
-
-		h.setViewportHeight(ROW + HEADER + HEADER);
-		h.fireResize();
-		expect(h.bucketHeader().style.transform).toBe("translateY(1000px)");
+describe("--atlas-bucket-label-h stays in sync with the bucket header (E5, F2)", () => {
+	let h: SectionHarness | null = null;
+	afterEach(() => {
+		h?.teardown();
+		h = null;
 	});
 
-	it("stacks both header heights into the top padding only once the inbox header is itself stacked under the bucket header", async () => {
+	it("is set to the bucket header's height after render, and follows a header height change on resize", async () => {
 		h = makeSectionHarness();
 		await h.render();
-		// 1681 is "inbox passes under the bucket header: stacked" in the table above.
-		h.scrollTo(1681);
-		expect(h.body().style.scrollPaddingTop).toBe(`${HEADER + HEADER}px`);
-		expect(h.body().style.scrollPaddingBottom).toBe("0px");
-	});
-
-	it("updates scroll-padding-top when a header's height changes, without a reload", async () => {
-		h = makeSectionHarness();
-		await h.render();
-		h.scrollTo(1000);
-		expect(h.body().style.scrollPaddingTop).toBe("28px");
+		expect(h.body().style.getPropertyValue("--atlas-bucket-label-h")).toBe(`${HEADER}px`);
 
 		h.setHeaderHeight(40);
 		h.fireResize();
-		expect(h.body().style.scrollPaddingTop).toBe("40px");
+		expect(h.body().style.getPropertyValue("--atlas-bucket-label-h")).toBe("40px");
+	});
+});
+
+describe("short-panel guard (E2)", () => {
+	let h: SectionHarness | null = null;
+	afterEach(() => {
+		h?.teardown();
+		h = null;
+	});
+
+	// Fit threshold: bucket header + inbox header + one row = 84px.
+	const minFit = HEADER + HEADER + ROW;
+
+	it.each([
+		["exactly fits: sticky stays enabled", minFit, false],
+		["one px short: sticky is disabled", minFit - 1, true],
+		["one px taller than the short case: sticky re-enables", minFit, false],
+	])("%s", async (_label, viewportHeight, expectDisabled) => {
+		h = makeSectionHarness();
+		await h.render();
+		h.setViewportHeight(viewportHeight);
+		h.fireResize();
+		expect(h.body().classList.contains("atlas-sticky-disabled")).toBe(expectDisabled);
+	});
+
+	it("re-enables without a reload: one guard toggles both directions on the same instance", async () => {
+		h = makeSectionHarness();
+		await h.render();
+
+		h.setViewportHeight(minFit - 1);
+		h.fireResize();
+		expect(h.body().classList.contains("atlas-sticky-disabled")).toBe(true);
+
+		h.setViewportHeight(minFit);
+		h.fireResize();
+		expect(h.body().classList.contains("atlas-sticky-disabled")).toBe(false);
+	});
+});
+
+describe("structure: labels are siblings of a display:contents wrapper (F2, F3, F4)", () => {
+	let h: SectionHarness | null = null;
+	afterEach(() => {
+		h?.teardown();
+		h = null;
+	});
+
+	it("keeps the bucket and inbox headers as the first child of their (display:contents) section", async () => {
+		h = makeSectionHarness();
+		await h.render();
+		expect(h.bucketHeader().parentElement?.classList.contains("atlas-bucket")).toBe(true);
+		expect(h.inboxHeader().parentElement?.classList.contains("atlas-inbox")).toBe(true);
+		expect(h.bucketHeader().nextElementSibling).toBe(h.bucketWrap());
+		expect(h.inboxHeader().nextElementSibling).toBe(h.inboxWrap());
+	});
+});
+
+describe("empty sections keep the remaining label sticky (E4)", () => {
+	let h: SectionHarness | null = null;
+	afterEach(() => {
+		h?.teardown();
+		h = null;
+	});
+
+	it("an empty bucket still renders the inbox header directly under the bucket header's slot", async () => {
+		h = makeSectionHarness({ bucketRows: 0 });
+		await h.render();
+		expect(h.bucketHeader()).toBeTruthy();
+		expect(h.inboxHeader()).toBeTruthy();
+		expect(h.body().style.getPropertyValue("--atlas-bucket-label-h")).toBe(`${HEADER}px`);
+		expect(h.body().classList.contains("atlas-sticky-disabled")).toBe(false);
+	});
+
+	it("an empty inbox still renders the bucket header, with no overlap or crash", async () => {
+		h = makeSectionHarness({ inboxRows: 0 });
+		await h.render();
+		expect(h.bucketHeader()).toBeTruthy();
+		expect(h.inboxHeader()).toBeTruthy();
+		expect(h.body().style.getPropertyValue("--atlas-bucket-label-h")).toBe(`${HEADER}px`);
+	});
+});
+
+describe("collapse leaves the sticky state consistent (E3)", () => {
+	let h: SectionHarness | null = null;
+	afterEach(() => {
+		h?.teardown();
+		h = null;
+	});
+
+	it("collapsing a section while scrolled keeps --atlas-bucket-label-h and the disabled class stable", async () => {
+		h = makeSectionHarness();
+		await h.render();
+		h.scrollTo(1000);
+		const before = h.body().style.getPropertyValue("--atlas-bucket-label-h");
+		const disabledBefore = h.body().classList.contains("atlas-sticky-disabled");
+
+		h.bucketChevron().click();
+
+		expect(h.body().style.getPropertyValue("--atlas-bucket-label-h")).toBe(before);
+		expect(h.body().classList.contains("atlas-sticky-disabled")).toBe(disabledBefore);
+	});
+});
+
+describe("stylesheet: .atlas-section-header is a native sticky rule (F1, F2, F3, E6)", () => {
+	const css = readFileSync(join(__dirname, "..", "styles.css"), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
+	const rules = Array.from(css.matchAll(/([^{}]+)\{([^}]*)\}/g), (m) => ({ selectors: m[1].trim(), body: m[2] }));
+
+	it(".atlas-section is display: contents, so a sticky header's containing block is the scroll body", () => {
+		const rule = rules.find((r) => r.selectors === ".atlas-section");
+		expect(rule).toBeDefined();
+		expect(rule!.body).toMatch(/display\s*:\s*contents/);
+	});
+
+	it(".atlas-section-header is position: sticky with an opaque background, and no leftover position: relative", () => {
+		const rule = rules.find((r) => r.selectors === ".atlas-section-header");
+		expect(rule).toBeDefined();
+		expect(rule!.body).toMatch(/position\s*:\s*sticky/);
+		expect(rule!.body).toMatch(/background\s*:\s*var\(--background-primary\)/);
+		expect(rule!.body).not.toMatch(/position\s*:\s*relative/);
+	});
+
+	it("the bucket label pins to the top", () => {
+		const rule = rules.find((r) => r.selectors === ".atlas-bucket > .atlas-section-header");
+		expect(rule).toBeDefined();
+		expect(rule!.body).toMatch(/top\s*:\s*0/);
+	});
+
+	it("the inbox label sets both top (stacked under the bucket) and bottom (pinned while below the fold)", () => {
+		const rule = rules.find((r) => r.selectors === ".atlas-inbox > .atlas-section-header");
+		expect(rule).toBeDefined();
+		expect(rule!.body).toMatch(/top\s*:\s*var\(--atlas-bucket-label-h/);
+		expect(rule!.body).toMatch(/bottom\s*:\s*0/);
+	});
+
+	it("the short-panel guard class takes both labels out of position: sticky", () => {
+		const rule = rules.find((r) => r.selectors === ".atlas-explorer-scroll.atlas-sticky-disabled .atlas-section-header");
+		expect(rule).toBeDefined();
+		expect(rule!.body).toMatch(/position\s*:\s*static/);
+	});
+
+	it("only the sticking properties changed on .atlas-section-header: padding, font, colour and height stay as on origin/main", () => {
+		const rule = rules.find((r) => r.selectors === ".atlas-section-header")!;
+		expect(rule.body).toMatch(/padding\s*:\s*4px 8px/);
+		expect(rule.body).toMatch(/font-weight\s*:\s*600/);
+		expect(rule.body).toMatch(/color\s*:\s*var\(--text-muted\)/);
+		expect(rule.body).toMatch(/text-transform\s*:\s*uppercase/);
+		expect(rule.body).toMatch(/font-size\s*:\s*var\(--font-ui-smaller\)/);
 	});
 });
