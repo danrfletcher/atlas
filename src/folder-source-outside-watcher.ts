@@ -86,7 +86,8 @@ export class FolderSourceOutsideWatchers {
 	 * than a source's path actually changes — but only once a source has a real target to cache. A
 	 * source with no entry here (blank, or `realpathSync` threw) always re-normalizes on the next sync,
 	 * so it keeps retrying until the real folder (or symlink target) appears. Keyed by node id; cleared
-	 * in `release` alongside `sourcePaths`. */
+	 * in `sync` (for node ids that left `sources`) and in `closeAll`, not in `release` — see `release`'s
+	 * own doc comment below for why it deliberately leaves this map alone. */
 	private rawPaths = new Map<string, string>();
 	private debounce: FolderLiveRefresh;
 	private watch: OutsideWatchFn;
