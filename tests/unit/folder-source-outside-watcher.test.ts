@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { mkdtempSync, readFileSync, rmSync, symlinkSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync } from "node:fs";
 import { join } from "node:path";
 import * as os from "node:os";
 import { EventEmitter } from "node:events";
@@ -224,16 +224,21 @@ describe("folder-source-outside-watcher — PR-2 R5: keyed by resolved path, not
 
 describe("folder-source-outside-watcher — PR-1 R1: path normalization is cached per source (G9)", () => {
 	let dir: string;
+	let other: string | undefined;
 
 	beforeEach(() => {
 		vi.useFakeTimers();
 		dir = mkdtempSync(join(os.tmpdir(), "atlas-outside-watcher-"));
+		other = undefined;
 		realpathSyncSpy.mockClear();
 	});
 
 	afterEach(() => {
 		vi.useRealTimers();
 		rmSync(dir, { recursive: true, force: true });
+		// R2 fix: cleaning this up here, not inline after the test's own `expect`, means a failing
+		// assertion still removes the tmpdir instead of leaking it, matching the PR-1 R4 fix above.
+		if (other) rmSync(other, { recursive: true, force: true });
 	});
 
 	it("a source whose raw path is unchanged across sync() calls is not re-resolved/re-realpath'd", () => {
@@ -248,7 +253,7 @@ describe("folder-source-outside-watcher — PR-1 R1: path normalization is cache
 	});
 
 	it("a source whose raw path changes is re-resolved, and the new value still opens one watcher", () => {
-		const other = mkdtempSync(join(os.tmpdir(), "atlas-outside-watcher-"));
+		other = mkdtempSync(join(os.tmpdir(), "atlas-outside-watcher-"));
 		const { registry, watch } = setup();
 
 		registry.sync(new Map([["node-a", dir]]));
@@ -257,8 +262,68 @@ describe("folder-source-outside-watcher — PR-1 R1: path normalization is cache
 		registry.sync(new Map([["node-a", other]]));
 		expect(realpathSyncSpy).toHaveBeenCalledTimes(2);
 		expect(watch.mock.calls.map((c) => c[0])).toEqual([dir, other]);
+	});
 
-		rmSync(other, { recursive: true, force: true });
+	it("a source stuck on the textual fallback keeps re-resolving every sync until the target exists", () => {
+		const missing = join(dir, "not-yet");
+		const { registry } = setup();
+
+		registry.sync(new Map([["node-a", missing]]));
+		expect(realpathSyncSpy).toHaveBeenCalledTimes(1);
+
+		// Still missing: a real fix must keep re-resolving, not cache the textual fallback.
+		registry.sync(new Map([["node-a", missing]]));
+		registry.sync(new Map([["node-a", missing]]));
+		expect(realpathSyncSpy).toHaveBeenCalledTimes(3);
+
+		mkdirSync(missing);
+
+		// Now that it resolves, this (and only this) sync should re-realpath it, and the result caches.
+		registry.sync(new Map([["node-a", missing]]));
+		expect(realpathSyncSpy).toHaveBeenCalledTimes(4);
+		registry.sync(new Map([["node-a", missing]]));
+		expect(realpathSyncSpy).toHaveBeenCalledTimes(4);
+	});
+
+	it("a not-yet-existing symlinked source re-keys onto the realpath another source already has, once its target is created (R1)", () => {
+		const target = join(dir, "target");
+		const alias = join(dir, "alias");
+		symlinkSync(target, alias, "dir");
+		const { registry, watch, onRescan, watchers } = setup();
+
+		// The target doesn't exist yet: node-a falls back to the textual alias path.
+		registry.sync(new Map([["node-a", alias]]));
+		expect(watch).toHaveBeenCalledTimes(1);
+		expect(watch.mock.calls[0][0]).toBe(alias);
+
+		mkdirSync(target);
+
+		// node-b now points straight at the real folder. node-a's raw path (`alias`) hasn't changed,
+		// but its last normalization failed, so it must still re-resolve here instead of staying keyed
+		// to the stale textual path — otherwise the two sources split one real folder across two
+		// watchers, against G9. Merging onto one watcher (not growing to two) is what proves the re-key.
+		registry.sync(
+			new Map([
+				["node-a", alias],
+				["node-b", target],
+			])
+		);
+		expect(watch).toHaveBeenCalledTimes(2);
+		expect(watch.mock.calls[1][0]).not.toBe(alias);
+
+		latest(watchers).emitChange("new.pdf");
+		vi.advanceTimersByTime(OUTSIDE_WATCH_DEBOUNCE_MS);
+		expect(onRescan.mock.calls.map((c) => c[0]).sort()).toEqual(["node-a", "node-b"]);
+
+		// It's cached now: a further sync with the same raw paths re-resolves neither source.
+		realpathSyncSpy.mockClear();
+		registry.sync(
+			new Map([
+				["node-a", alias],
+				["node-b", target],
+			])
+		);
+		expect(realpathSyncSpy).not.toHaveBeenCalled();
 	});
 });
 
