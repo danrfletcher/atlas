@@ -29,7 +29,7 @@ function getFolder(app: App, path: string): TFolder {
 
 describe("findInterfaceNote case-variant rule (PR-1 R3)", () => {
 	it("the exact-case conventional note is used when it exists, even alongside a case-variant sibling", () => {
-		const app = vaultWith(["Deep"], ["Deep/Deep.md", "Deep/deep.md"]);
+		const app = vaultWith(["Deep"], ["Deep/deep.md", "Deep/Deep.md"]);
 		const note = findInterfaceNote(app, getFolder(app, "Deep"), DEFAULT_SETTINGS);
 		expect(note?.path).toBe("Deep/Deep.md");
 	});
