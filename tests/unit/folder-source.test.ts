@@ -589,6 +589,55 @@ describe("R1 fix — removing a folder-source owner lifts a hand-nested grandchi
 		expect(vm.getNode(view.id, "managed")).toBeNull();
 		expect(vm.getNode(view.id, "grandchild")).toBeNull();
 	});
+
+	/** R1 fix (round 2): a promoted Inside-Vault row must lose its managed identity entirely, not just
+	 * move up a level still flagged `folderSourceManaged` with a now-dangling `folderSourceOwnerId` —
+	 * every lookup that gates on those fields (delete reconciliation, Swap, another source's own
+	 * reconcile) only checks `folderSourceManaged`/`folderSourceOwnerId`, never whether the owner they
+	 * point at still exists. */
+	it("Inside-Vault: the promoted row's folderSourceManaged/folderSourceOwnerId/folderSourceHiddenAtSave are all cleared", () => {
+		const { vm, view } = buildOwnerWithManagedChild("inside");
+		const managedBefore = vm.getNode(view.id, "managed")!;
+		managedBefore.folderSourceHiddenAtSave = true;
+
+		vm.unplaceNode(view.id, "owner");
+
+		const promoted = vm.getNode(view.id, "managed")!;
+		expect(promoted.folderSourceManaged).toBeUndefined();
+		expect(promoted.folderSourceOwnerId).toBeUndefined();
+		expect(promoted.folderSourceHiddenAtSave).toBeUndefined();
+	});
+
+	/** R1 (a): before this fix, `onVaultDelete` still matched the promoted row through
+	 * `collectManagedMatches` (it only checks `folderSourceManaged`), found no owner to compute a
+	 * placeholder from, and spliced the row out with nothing put back — the whole row vanished instead
+	 * of becoming a greyed missing row. Now that promotion clears `folderSourceManaged`, the row is an
+	 * ordinary unit node and `onVaultDelete` leaves it alone entirely, exactly like any other unit whose
+	 * file goes missing (rendered as a missing row elsewhere, never auto-removed). */
+	it("delete-after-removal: deleting the promoted row's file leaves it in the tree instead of vanishing", () => {
+		const { vm, view } = buildOwnerWithManagedChild("inside");
+
+		vm.unplaceNode(view.id, "owner");
+		vm.onVaultDelete("Projects/a.md");
+
+		const survivor = vm.getNode(view.id, "managed");
+		expect(survivor).toBeDefined();
+		expect(survivor!.ref).toEqual({ kind: "file", path: "Projects/a.md" });
+		expect(survivor!.folderSourceManaged).toBeUndefined();
+	});
+
+	/** R1 (b): before this fix, `canSwapNode`/`swapNodeWithUnit` refused the promoted row forever,
+	 * since both only check the still-true `folderSourceManaged` flag — "Swap with…" never appeared for
+	 * an otherwise-ordinary top-level row. */
+	it("swap-after-removal: the promoted row can now be swapped for another unit", () => {
+		const { vm, view } = buildOwnerWithManagedChild("inside");
+
+		vm.unplaceNode(view.id, "owner");
+		const didSwap = vm.swapNodeWithUnit(view.id, "managed", { kind: "file", path: "Elsewhere.md" });
+
+		expect(didSwap).toBe(true);
+		expect(vm.getNode(view.id, "managed")!.ref).toEqual({ kind: "file", path: "Elsewhere.md" });
+	});
 });
 
 /** PR-1.F2: reconcile with YAML rules. Existing managed rows are always kept, a new non-matching file never

@@ -810,13 +810,48 @@ export class ViewsManager {
 	 * under one. Dropping every managed child here regardless of location silently discarded that
 	 * hand-nested grandchild along with its managed parent, instead of lifting it one level like
 	 * every other removal. Only an Outside-Vault owner's managed children are dropped now; an
-	 * Inside-Vault owner's are promoted like any other child, subtree and all — every other lookup
-	 * that cares whether a node is still "managed" (`isOutsideOwned`, `managedRowFilterState`, the
-	 * reconcile/demote helpers below) already treats a missing owner id as "not managed," so a
-	 * promoted Inside row's now-dangling `folderSourceOwnerId` needs no separate cleanup. */
+	 * Inside-Vault owner's are promoted like any other child, subtree and all.
+	 *
+	 * R1 fix (round 2): that last clause was wrong — a missing owner id is NOT treated as "not managed"
+	 * everywhere. `collectManagedMatches`/`reconcileFolderSourceDeletesForPath` still match a promoted
+	 * row purely on its own still-true `folderSourceManaged`, so a later delete of it finds no owner,
+	 * computes no placeholder, and the row vanishes outright instead of showing a greyed missing row
+	 * (the rename path already guards exactly this at `onVaultRename`'s `leftSource`; the delete path
+	 * had no equivalent). `canSwapNode`/`swapNodeWithUnit`/`swapNodeForAtlasFolder` refuse it too, since
+	 * they also only check `folderSourceManaged`. And `reconcileManagedChildren` never checks the owner
+	 * id at all, so a different source's reconcile would mistake it for one of its own already-managed
+	 * rows if the user ever re-nests it underneath. `releaseManagedChildren`, called by both callers of
+	 * this method, clears `folderSourceManaged`/`folderSourceOwnerId`/`folderSourceHiddenAtSave` from
+	 * every row the removed owner manages anywhere in the view, not just these direct children. */
 	private promotableChildren(node: ViewNode): ViewNode[] {
 		const dropsManagedChildren = node.folderSource?.location === "outside";
 		return node.children.filter((child) => !(dropsManagedChildren && child.folderSourceManaged && child.folderSourceOwnerId === node.id));
+	}
+
+	/** R1 fix (round 2): releases every row `node` still manages anywhere in `view` once `node` itself is
+	 * about to be removed — not only the direct children `promotableChildren` just promoted, but any
+	 * managed row the user has since dragged or nested elsewhere in the tree (`reconcileManagedChildren`'s
+	 * own "managed row that got dragged out" case). A released row loses its managed identity entirely, so
+	 * every lookup that gates on `folderSourceManaged` (delete reconciliation, Swap, another source's own
+	 * reconcile) treats it as an ordinary row from here on, exactly like one that was never Folder-source-
+	 * managed. An Outside-Vault owner's managed children are dropped whole by `promotableChildren` instead
+	 * (see its own doc comment) — their `ref.path` is never a real vault path without the owner, so there
+	 * is nothing left to release for those, and this is a no-op for them. Also a no-op for a node that
+	 * never carried a Folder source at all (an ordinary meta folder or unit), since nothing else in the
+	 * view can have `folderSourceOwnerId === node.id` in that case. */
+	private releaseManagedChildren(view: View, node: ViewNode): void {
+		if (node.folderSource?.location === "outside") return;
+		const release = (nodes: ViewNode[]): void => {
+			for (const n of nodes) {
+				if (n.folderSourceManaged && n.folderSourceOwnerId === node.id) {
+					delete n.folderSourceManaged;
+					delete n.folderSourceOwnerId;
+					delete n.folderSourceHiddenAtSave;
+				}
+				release(n.children);
+			}
+		};
+		release(view.root);
 	}
 
 	/** Removes one specific node instance by id, regardless of what other placements of the same
@@ -831,6 +866,7 @@ export class ViewsManager {
 		if (!found) return;
 		this.rememberFolderSourceRemoval(view, found.node);
 		found.siblings.splice(found.index, 1, ...this.promotableChildren(found.node));
+		this.releaseManagedChildren(view, found.node);
 		this.save();
 	}
 
@@ -955,8 +991,9 @@ export class ViewsManager {
 	deleteMetaFolder(viewId: string, nodeId: string): void {
 		const view = this.getView(viewId);
 		const found = view && this.findNode(view.root, nodeId);
-		if (!found || found.node.type !== "meta") return;
+		if (!view || !found || found.node.type !== "meta") return;
 		found.siblings.splice(found.index, 1, ...this.promotableChildren(found.node));
+		this.releaseManagedChildren(view, found.node);
 		this.save();
 	}
 
