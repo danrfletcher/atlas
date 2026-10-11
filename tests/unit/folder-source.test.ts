@@ -539,6 +539,58 @@ describe("R1 end-to-end — a managed row survives refresh after being moved or 
 	});
 });
 
+describe("R1 fix — removing a folder-source owner lifts a hand-nested grandchild of its managed child", () => {
+	/** Builds `owner` (a folder-source meta node) → `managed` (its managed child) → `grandchild`
+	 * (a plain, non-managed unit hand-nested under `managed` — something only possible for an
+	 * Inside-Vault owner, whose managed rows stay ordinary drop zones; an Outside-Vault managed row
+	 * is never a drop zone, but the tree shape is built the same way here to exercise the drop path
+	 * explicitly regardless). */
+	function buildOwnerWithManagedChild(location: "inside" | "outside") {
+		const vm = makeViewsManager();
+		const view = vm.getViews()[0];
+		const grandchild: ViewNode = { id: "grandchild", type: "unit", ref: { kind: "file", path: "Other.md" }, children: [] };
+		const managed: ViewNode = {
+			id: "managed",
+			type: "unit",
+			ref: { kind: "file", path: "Projects/a.md" },
+			children: [grandchild],
+			folderSourceManaged: true,
+			folderSourceOwnerId: "owner",
+		};
+		const owner: ViewNode = {
+			id: "owner",
+			type: "meta",
+			label: "Folder source",
+			children: [managed],
+			folderSource: source({ location, path: location === "inside" ? "Projects" : "" }),
+		};
+		view.root.push(owner);
+		return { vm, view };
+	}
+
+	it("Inside-Vault: the managed child and its hand-nested grandchild are promoted up one level, not dropped", () => {
+		const { vm, view } = buildOwnerWithManagedChild("inside");
+
+		vm.unplaceNode(view.id, "owner");
+
+		expect(view.root.some((n) => n.id === "managed")).toBe(true);
+		const promoted = vm.getNode(view.id, "managed")!;
+		expect(promoted).toBeDefined();
+		expect(promoted.children.some((n) => n.id === "grandchild")).toBe(true);
+		expect(vm.getNode(view.id, "grandchild")).toBeDefined();
+	});
+
+	it("Outside-Vault: the managed child and its hand-nested grandchild are still dropped with the owner", () => {
+		const { vm, view } = buildOwnerWithManagedChild("outside");
+
+		vm.unplaceNode(view.id, "owner");
+
+		expect(view.root).toEqual([]);
+		expect(vm.getNode(view.id, "managed")).toBeNull();
+		expect(vm.getNode(view.id, "grandchild")).toBeNull();
+	});
+});
+
 /** PR-1.F2: reconcile with YAML rules. Existing managed rows are always kept, a new non-matching file never
  * joins, and a removed "filtered out" row only comes back once its file matches. The hidden-at-save flag is
  * set by `ViewsManager`, so its per-mode table is checked through that manager at the end. The fixture is a

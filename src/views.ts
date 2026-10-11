@@ -802,9 +802,21 @@ export class ViewsManager {
 	 * "never open/drag/rename this" protections active (see `isOutsideManagedNodeId`), so promoting
 	 * it to a plain top-level row the same way an ordinary child is promoted would leave it broken
 	 * and live. Dropped along with the owner instead; a manually-placed, non-managed child is
-	 * promoted as before. */
+	 * promoted as before.
+	 *
+	 * R1 fix: an Inside-Vault owner's managed children ARE real vault paths, and stay ordinary drop
+	 * zones the whole time the owner lives (`isOutsideManagedUnit`/the row-level drop gate in
+	 * `explorer-view.ts` only ever block an Outside-Vault one), so a user can hand-nest their own unit
+	 * under one. Dropping every managed child here regardless of location silently discarded that
+	 * hand-nested grandchild along with its managed parent, instead of lifting it one level like
+	 * every other removal. Only an Outside-Vault owner's managed children are dropped now; an
+	 * Inside-Vault owner's are promoted like any other child, subtree and all — every other lookup
+	 * that cares whether a node is still "managed" (`isOutsideOwned`, `managedRowFilterState`, the
+	 * reconcile/demote helpers below) already treats a missing owner id as "not managed," so a
+	 * promoted Inside row's now-dangling `folderSourceOwnerId` needs no separate cleanup. */
 	private promotableChildren(node: ViewNode): ViewNode[] {
-		return node.children.filter((child) => !(child.folderSourceManaged && child.folderSourceOwnerId === node.id));
+		const dropsManagedChildren = node.folderSource?.location === "outside";
+		return node.children.filter((child) => !(dropsManagedChildren && child.folderSourceManaged && child.folderSourceOwnerId === node.id));
 	}
 
 	/** Removes one specific node instance by id, regardless of what other placements of the same
