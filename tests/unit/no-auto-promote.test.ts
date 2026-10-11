@@ -423,6 +423,7 @@ describe("E4: renames and moves rewrite noAutoPromoteFolders before the index re
 		const before = fx.app.vault.calls.length;
 		(plugin as unknown as { onVaultRenameEvent(f: TFolder, old: string): void }).onVaultRenameEvent(folderAt("Media"), "Attachments");
 		expect(fx.app.vault.calls.length).toBe(before);
+		expect(fx.settings.noAutoPromoteFolders).toEqual(["Media"]);
 	});
 
 	it("R3: handleHiddenMove makes no vault write or rename call", () => {
@@ -430,6 +431,7 @@ describe("E4: renames and moves rewrite noAutoPromoteFolders before the index re
 		const before = fx.app.vault.calls.length;
 		(plugin as unknown as { handleHiddenMove(o: string, n: string): void }).handleHiddenMove("Attachments", "Media");
 		expect(fx.app.vault.calls.length).toBe(before);
+		expect(fx.settings.noAutoPromoteFolders).toEqual(["Media"]);
 	});
 });
 
