@@ -48,22 +48,50 @@ describe("PR-1 (S1 R3): the first resolve batches every filtered inside source i
 		f.vm.setFolderSource(f.viewId, active.id, source("inside", [{ key: "status", value: "active" }]));
 		const done = f.vm.addMetaFolder(f.viewId, null, "Done")!;
 		f.vm.setFolderSource(f.viewId, done.id, source("inside", [{ key: "status", value: "done" }]));
+		// Gets rules too, so the only thing that can exclude it from the batch is the `location ===
+		// "inside"` check — `refreshFolderSource` itself is a no-op for an outside source with no
+		// `outsidePath`, so asserting on `outside`'s children alone can't tell "skipped" from "ran and
+		// did nothing"; spying on `refreshFolderSource` below can.
 		const outside = f.vm.addMetaFolder(f.viewId, null, "Outside")!;
-		f.vm.setFolderSource(f.viewId, outside.id, source("outside", undefined, "/does/not/exist"));
+		f.vm.setFolderSource(f.viewId, outside.id, source("outside", [{ key: "status", value: "active" }], "/does/not/exist"));
 
+		const refreshSpy = vi.spyOn(f.vm, "refreshFolderSource");
 		f.persist.mockClear();
 		f.onChange.mockClear();
 
 		f.vm.onMetadataResolved();
+
+		const calledNodeIds = refreshSpy.mock.calls.map((call) => call[1]);
+		expect(calledNodeIds.filter((id) => id === active.id)).toHaveLength(1);
+		expect(calledNodeIds.filter((id) => id === done.id)).toHaveLength(1);
+		expect(calledNodeIds.filter((id) => id === outside.id)).toHaveLength(0);
+		expect(refreshSpy).toHaveBeenCalledTimes(2);
 
 		expect(f.persist).toHaveBeenCalledTimes(1);
 		expect(f.onChange).toHaveBeenCalledTimes(1);
 
 		expect(f.vm.getNode(f.viewId, active.id)!.children.map((c) => c.ref?.path)).toEqual(["Jobs/acme.md"]);
 		expect(f.vm.getNode(f.viewId, done.id)!.children.map((c) => c.ref?.path)).toEqual(["Jobs/beta.md"]);
-		// The outside source has no `outsidePath` to reconcile against here, so it is never even
-		// walked into `refreshFolderSource` — it stays exactly as it was before this resolve.
 		expect(f.vm.getNode(f.viewId, outside.id)!.children).toEqual([]);
+	});
+
+	it("first resolve with a filtered inside source whose rules match nothing: no save, exactly one notify", () => {
+		// PR-1 R2: the save branch (filtered sources that actually change something) was already
+		// covered above, but the sibling notify-only branch — filtered sources exist, yet none of
+		// them changes anything — was not. A rule matching no file keeps this source's children empty
+		// both before and after the resolve, so `refreshFolderSource` reports `changed: false` for it.
+		const f = setup(FILES);
+		const noMatch = f.vm.addMetaFolder(f.viewId, null, "NoMatch")!;
+		f.vm.setFolderSource(f.viewId, noMatch.id, source("inside", [{ key: "status", value: "archived" }]));
+
+		f.persist.mockClear();
+		f.onChange.mockClear();
+
+		f.vm.onMetadataResolved();
+
+		expect(f.vm.getNode(f.viewId, noMatch.id)!.children).toEqual([]);
+		expect(f.persist).not.toHaveBeenCalled();
+		expect(f.onChange).toHaveBeenCalledTimes(1);
 	});
 
 	it("no filtered inside source anywhere: no save, no notify", () => {
