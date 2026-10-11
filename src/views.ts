@@ -545,7 +545,10 @@ export class ViewsManager {
 	/** PR-1.S1 (E10): false until `metadataCache` has resolved, seeded in the constructor (T1). */
 	private metadataResolved: boolean;
 	/** PR-1.F2 R2 fix: bumped on every change notification, so `getFolderSourceOwners`'s cache knows
-	 * when a stored owner map might be stale without having to track every mutation site individually. */
+	 * when a stored owner map might be stale without having to track every mutation site individually.
+	 * PR-1 R3: this only holds if every write to a node's `folderSource` goes through `save()` or
+	 * `notifyChange()` — both bump this counter, so no mutation site needs to touch it directly. A
+	 * future direct mutation of `node.folderSource` that skips both would leave the cache stale. */
 	private folderSourceOwnersVersion = 0;
 	private folderSourceOwnersCache: { viewId: string; version: number; owners: Map<string, FolderSourceConfig> } | null = null;
 
@@ -577,7 +580,13 @@ export class ViewsManager {
 	 * single tree walk and cached until the next change notification — `managedRowFilterState` used to
 	 * call `getNode` (its own whole-tree walk) for every managed row it was asked about, which made a
 	 * render with many managed rows O(n^2). Re-walks only when nothing cached yet, the view changed, or
-	 * a mutation has happened since the cached map was built. */
+	 * a mutation has happened since the cached map was built.
+	 *
+	 * PR-1 R3: this cache holds a single view's map at a time, so switching between views rebuilds it
+	 * on every switch rather than keeping one map per view — cheap today since every mutation site
+	 * (`setFolderSource`, the rename rewrite, sanitize) already routes through `save()`/`notifyChange()`
+	 * to bump `folderSourceOwnersVersion`. Neither is a bug now; both assumptions break if a future
+	 * mutation site writes `node.folderSource` directly without going through one of those two calls. */
 	private getFolderSourceOwners(viewId: string): Map<string, FolderSourceConfig> {
 		const cached = this.folderSourceOwnersCache;
 		if (cached && cached.viewId === viewId && cached.version === this.folderSourceOwnersVersion) return cached.owners;
