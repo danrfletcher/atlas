@@ -298,6 +298,30 @@ describe("inbox lists: the list is read in both list functions the same way", ()
 	});
 });
 
+// --- R1: the normalised-folders cache follows a live settings change -----------------------------
+
+describe("R1: isLinkOnlyInNoAutoPromoteFolder's cache follows a live settings change", () => {
+	it("picks up a freshly assigned noAutoPromoteFolders array without an index rebuild", () => {
+		const fx = buildFixture();
+		const unit = fx.index.getUnits().find((u) => u.path === "Attachments/tacho-sheet.png");
+		expect(unit).toBeDefined();
+		expect(fx.index.isLinkOnlyInNoAutoPromoteFolder(unit!)).toBe(false);
+		fx.settings.noAutoPromoteFolders = ["Attachments"];
+		expect(fx.index.isLinkOnlyInNoAutoPromoteFolder(unit!)).toBe(true);
+	});
+
+	it("picks up a poolFolder change even when the array reference itself is unchanged", () => {
+		const fx = buildFixture({ noAutoPromoteFolders: ["Attachments"] });
+		const unit = fx.index.getUnits().find((u) => u.path === "Attachments/tacho-sheet.png");
+		expect(unit).toBeDefined();
+		expect(fx.index.isLinkOnlyInNoAutoPromoteFolder(unit!)).toBe(true);
+		// Same array identity: only poolFolder changes, and normalizeNoAutoPromoteFolders drops any
+		// entry that now equals the pool folder, so "Attachments" falls out of the normalised list.
+		fx.settings.poolFolder = "Attachments";
+		expect(fx.index.isLinkOnlyInNoAutoPromoteFolder(unit!)).toBe(false);
+	});
+});
+
 // --- E4: renames and moves keep the entry pointing at the folder -------------------------------
 
 /** The plugin with only the state the rename and move handlers touch. */
