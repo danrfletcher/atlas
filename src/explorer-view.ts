@@ -656,6 +656,12 @@ export class AtlasExplorerView extends ItemView {
 	/** The inbox row being dragged, kept alive across virtual redraws so an auto-scroll can't drop the
 	 * drag source out from under the browser. */
 	private inboxDragRowEl: HTMLElement | null = null;
+	/** PR-1 R3: the bucket row being dragged, if any — mirrors `inboxDragRowEl` so `render()`'s own
+	 * mid-drag teardown guard (below) covers a bucket-node drag too, not only an inbox one. Bucket rows
+	 * aren't virtualized, so this is never "kept alive" the way the inbox row is; it only exists to let
+	 * that guard detect "a drag is live and its source row is about to be torn down" before `dragend`
+	 * (which never fires on an already-detached element) would otherwise have cleared `dragPayload`. */
+	private bucketDragRowEl: HTMLElement | null = null;
 	/** PR-1.S1: the scroll position the newest in-flight render must restore. Set when a render starts
 	 * and cleared once that render has restored it. A render that starts while another is still
 	 * awaiting reads this, because the body it would otherwise read from the DOM is brand-new and
@@ -813,6 +819,7 @@ export class AtlasExplorerView extends ItemView {
 			// unnecessary flash before that render replaces it.
 			if (this.inboxDragRowEl?.style.display === "none") this.inboxDragRowEl.remove();
 			this.inboxDragRowEl = null;
+			this.bucketDragRowEl = null;
 			this.cancelActiveDwell?.();
 			// PR 20 follow-up (reviewer-caught, A27): a successful drop already repaints via
 			// `handleDrop`, but an *abandoned* drag (dropped outside any registered zone, or
@@ -1421,11 +1428,13 @@ export class AtlasExplorerView extends ItemView {
 		// body is rebuilt, and reset to 0 only on a genuine view switch (below). If another render is
 		// still in flight, its target wins: the live body may not have been restored yet.
 		const scrollTop = this.pendingScrollTop ?? container.querySelector<HTMLElement>(".atlas-explorer-scroll")?.scrollTop ?? 0;
-		if (this.inboxDragRowEl) {
-			// PR-1.S1 R4 hardening: `container.empty()` below is about to detach the dragged row (an
-			// index refresh mid-drag, say). Once it's detached, the window-level `dragend` backstop
-			// (registered in `onOpen`) never fires on it, so the drag would otherwise leak as a live,
-			// orphaned payload that outlives the gesture. Clear it here too, same as that backstop does.
+		if (this.inboxDragRowEl || this.bucketDragRowEl) {
+			// PR-1.S1 R4 hardening (PR-1 R3: now covers a bucket-node drag too, via `bucketDragRowEl`):
+			// `container.empty()` below is about to detach the dragged row (an index refresh mid-drag,
+			// say). Once it's detached, the window-level `dragend` backstop (registered in `onOpen`)
+			// never fires on it, so the drag would otherwise leak as a live, orphaned payload — and,
+			// for a bucket drag onto a module icon, a dwell timer that keeps running after its own row
+			// is gone — that outlives the gesture. Clear both here too, same as that backstop does.
 			this.dragPayload = null;
 			this.cancelActiveDwell?.();
 		}
@@ -1433,6 +1442,7 @@ export class AtlasExplorerView extends ItemView {
 		this.inboxLayoutObserver = null;
 		this.inboxRedraw = null;
 		this.inboxDragRowEl = null;
+		this.bucketDragRowEl = null;
 		// The filter input lives inside `container` and gets torn down by `container.empty()` below
 		// like everything else — every keystroke re-renders the whole view (index/view-change events
 		// and typing both go through this same `render()`). Capture focus/caret here and restore it
@@ -1466,34 +1476,38 @@ export class AtlasExplorerView extends ItemView {
 		const restoreScrollTop = view.id === this.lastRenderedViewId ? scrollTop : 0;
 		this.pendingScrollTop = restoreScrollTop;
 
-		// PR 20: bucket node ids are only meaningful within the view that minted them — switching to
-		// a different view and keeping the old selection around would (extremely unlikely id
-		// collision aside) just be a stale, meaningless-looking highlight on whatever nodes happen to
-		// render next. Inbox selection is unaffected — a ref key means the same thing across views.
-		if (view.id !== this.lastRenderedViewId) {
-			// R9: G5a is "opening or returning to an Atlas view", not just "Obsidian leaf activation" —
-			// switching the *internal* Atlas view (the view switcher, `setActiveViewId`) is exactly that,
-			// and previously fired no refresh at all since it never touches `active-leaf-change`. Guarded
-			// on `lastRenderedViewId !== null` so this is a genuine switch, not the view's very first
-			// render (which `onOpen`'s own `activate()` call already covers).
-			if (this.lastRenderedViewId !== null) this.refreshApiSourcesOnViewLoad();
-			this.lastRenderedViewId = view.id;
-			this.selectedBucketNodeIds.clear();
-			if (this.selectionAnchorScope === "bucket") {
-				this.selectionAnchor = null;
-				this.selectionAnchorScope = null;
-			}
-		}
-
-		this.renderToolbar(container, view);
-		if (filterHadFocus && this.filterInputEl) {
-			this.filterInputEl.focus();
-			this.filterInputEl.setSelectionRange(filterSelectionStart, filterSelectionEnd);
-		}
-
-		const scrollBody = container.createDiv({ cls: "atlas-explorer-scroll" });
-		const bucketEl = scrollBody.createDiv({ cls: "atlas-section atlas-bucket" });
+		// PR-1 R4: the try/finally starts here, right after `pendingScrollTop` is set above, not just
+		// before `renderBucketSection` — a throw from `renderToolbar` or from the view-switch branch
+		// just below (both run between the two) would otherwise leave `pendingScrollTop` stuck forever,
+		// the same bug the R6 guard below was written to close, just one step too late to catch it.
 		try {
+			// PR 20: bucket node ids are only meaningful within the view that minted them — switching to
+			// a different view and keeping the old selection around would (extremely unlikely id
+			// collision aside) just be a stale, meaningless-looking highlight on whatever nodes happen to
+			// render next. Inbox selection is unaffected — a ref key means the same thing across views.
+			if (view.id !== this.lastRenderedViewId) {
+				// R9: G5a is "opening or returning to an Atlas view", not just "Obsidian leaf activation" —
+				// switching the *internal* Atlas view (the view switcher, `setActiveViewId`) is exactly that,
+				// and previously fired no refresh at all since it never touches `active-leaf-change`. Guarded
+				// on `lastRenderedViewId !== null` so this is a genuine switch, not the view's very first
+				// render (which `onOpen`'s own `activate()` call already covers).
+				if (this.lastRenderedViewId !== null) this.refreshApiSourcesOnViewLoad();
+				this.lastRenderedViewId = view.id;
+				this.selectedBucketNodeIds.clear();
+				if (this.selectionAnchorScope === "bucket") {
+					this.selectionAnchor = null;
+					this.selectionAnchorScope = null;
+				}
+			}
+
+			this.renderToolbar(container, view);
+			if (filterHadFocus && this.filterInputEl) {
+				this.filterInputEl.focus();
+				this.filterInputEl.setSelectionRange(filterSelectionStart, filterSelectionEnd);
+			}
+
+			const scrollBody = container.createDiv({ cls: "atlas-explorer-scroll" });
+			const bucketEl = scrollBody.createDiv({ cls: "atlas-section atlas-bucket" });
 			await this.renderBucketSection(bucketEl, view);
 			if (!isCurrent()) return;
 			// PR-1.S1 R2: restored here too, straight after the bucket is built, not only inside
@@ -1536,13 +1550,14 @@ export class AtlasExplorerView extends ItemView {
 			this.updateActiveHighlight();
 			this.syncRefreshTimers(view);
 		} finally {
-			// PR-1.S1 R6: if `renderBucketSection`/`renderInboxSection` throws (a rejected `resolveRef`,
-			// say) between setting `pendingScrollTop` above and clearing it above, it would otherwise
-			// stay set forever — every later render restoring that one stale value instead of the
-			// user's live scroll position. Guarded on `isCurrent()`: a superseded render's `finally` must
-			// not clear the field out from under whichever later render is still relying on it as its
-			// own restore target (see the comment where `pendingScrollTop` is read, at the top of this
-			// method).
+			// PR-1.S1 R6 (PR-1 R4: try moved up to right after `pendingScrollTop` is set, so this also
+			// covers a throw from `renderToolbar` or the view-switch branch, not just `renderBucketSection`/
+			// `renderInboxSection`): if anything in the block above throws (a rejected `resolveRef`, say)
+			// before clearing `pendingScrollTop`, it would otherwise stay set forever — every later render
+			// restoring that one stale value instead of the user's live scroll position. Guarded on
+			// `isCurrent()`: a superseded render's `finally` must not clear the field out from under
+			// whichever later render is still relying on it as its own restore target (see the comment
+			// where `pendingScrollTop` is read, at the top of this method).
 			if (isCurrent()) this.pendingScrollTop = null;
 		}
 	}
@@ -2463,7 +2478,10 @@ export class AtlasExplorerView extends ItemView {
 			// to bind unconditionally, since the previous behavior ("nothing happens") is preserved
 			// exactly for a plain click; only shift/cmd-click gain new meaning.
 			row.addEventListener("click", (evt) => this.handleSelectionClick(evt, node.id, "bucket", this.bucketVisibleOrder()));
-			row.addEventListener("dragstart", () => (this.dragPayload = this.buildNodeDragPayload(node.id, view.id)));
+			row.addEventListener("dragstart", () => {
+				this.dragPayload = this.buildNodeDragPayload(node.id, view.id);
+				this.bucketDragRowEl = row;
+			});
 			this.makeDropZone(row, { kind: "node", nodeId: node.id, viewId: view.id });
 			row.addEventListener("keydown", (evt) => this.handleRowKeydown(evt, node, view));
 			row.tabIndex = 0;
@@ -2542,7 +2560,10 @@ export class AtlasExplorerView extends ItemView {
 			if (!consumed && !outsideManaged) void this.openRef(ref);
 		});
 		if (!outsideManaged) {
-			row.addEventListener("dragstart", () => (this.dragPayload = this.buildNodeDragPayload(node.id, view.id)));
+			row.addEventListener("dragstart", () => {
+				this.dragPayload = this.buildNodeDragPayload(node.id, view.id);
+				this.bucketDragRowEl = row;
+			});
 			this.makeDropZone(row, { kind: "node", nodeId: node.id, viewId: view.id });
 		}
 		row.tabIndex = 0;
