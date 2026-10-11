@@ -146,3 +146,23 @@ describe("E9 — selection is pruned of hidden rows, and a filtered-out row stay
 		expect(rowElFor(container, acme.id)!.classList.contains("is-selected")).toBe(true);
 	});
 });
+
+describe("PR-1 (deferred-findings R3) — a bucket row's own dragstart tracks its source element", () => {
+	it("sets bucketDragRowEl alongside dragPayload, so render() can detect a mid-drag teardown", async () => {
+		const h = setup();
+		const acme = rowFor(h, "Jobs/acme.md");
+		(h.fake as unknown as { buildNodeDragPayload: ReturnType<typeof vi.fn> }).buildNodeDragPayload = vi.fn(() => ({
+			kind: "node",
+			nodeId: acme.id,
+			viewId: h.viewId,
+		}));
+
+		const container = await render(h);
+		const row = rowElFor(container, acme.id)!;
+		row.dispatchEvent(new Event("dragstart"));
+
+		const fake = h.fake as unknown as { dragPayload: unknown; bucketDragRowEl: HTMLElement | null };
+		expect(fake.dragPayload).not.toBeNull();
+		expect(fake.bucketDragRowEl).toBe(row);
+	});
+});
