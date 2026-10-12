@@ -31,6 +31,25 @@ export function rewriteRefPath(ref: UnitRef, oldPath: string, newPath: string): 
 	return rewritten === ref.path ? ref : { ...ref, path: rewritten };
 }
 
+/** PR-1.F1: the inverse of `unitRefKey` — recovers a `UnitRef` from a row's persisted
+ * `data-ref-key` string so `updateActiveHighlight` can decide a match without the render pass
+ * keeping a live `ViewNode`/`UnitRef` around for every row. Returns null for anything that isn't a
+ * well-formed `file:`/`folder:`/`block:` key (an unrecognised kind, or a `block:` key with no `#`),
+ * never throws. Mirrors `rewriteRefKeyPath`'s own parsing exactly, so the two stay consistent. */
+export function parseUnitRefKey(key: string): UnitRef | null {
+	const colon = key.indexOf(":");
+	if (colon < 0) return null;
+	const kind = key.slice(0, colon);
+	const rest = key.slice(colon + 1);
+	if (kind === "file" || kind === "folder") return { kind, path: rest };
+	if (kind === "block") {
+		const hash = rest.indexOf("#");
+		if (hash < 0) return null;
+		return { kind: "block", path: rest.slice(0, hash), subpath: rest.slice(hash + 1) };
+	}
+	return null;
+}
+
 /** PR-4 (R8): rewrites the path embedded in a `unitRefKey` string (`'file:Proj/a.md'`,
  * `'folder:Proj'`, `'block:Proj/a.md#^abc'`) using the same rename-integrity rule as
  * `rewritePathString`. `FolderSourceConfig.removedRefs` stores these keys rather than `UnitRef`s
