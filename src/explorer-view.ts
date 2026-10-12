@@ -1,7 +1,8 @@
 import { App, FuzzyMatch, FuzzySuggestModal, ItemView, MarkdownView, Menu, Modal, Notice, Platform, TAbstractFile, TFile, TFolder, WorkspaceLeaf, renderResults, setIcon, setTooltip } from "obsidian";
 import type AtlasPlugin from "./main";
 import type { AtlasSettings } from "./settings";
-import { ApiItemState, PLACEHOLDER_ROW_KIND, StatusGovernance, TruncatedStatusConfig, Unit, UnitRef, View, ViewNode, unitRefKey, unitToRef } from "./types";
+import { ApiItemState, PLACEHOLDER_ROW_KIND, StatusGovernance, TruncatedStatusConfig, Unit, UnitRef, View, ViewNode, parseUnitRefKey, unitRefKey, unitToRef } from "./types";
+import { matchesActiveFile } from "./active-highlight";
 import {
 	ApiSourceIdPair,
 	MetaTarget,
@@ -1292,6 +1293,11 @@ export class AtlasExplorerView extends ItemView {
 		const row = container.createDiv({ cls: "atlas-row atlas-row-unit atlas-row-api-item" });
 		row.style.paddingLeft = `${depth * 16}px`;
 		row.toggleClass("atlas-not-found", !!item.notFound);
+		// PR-1.F1 (G3): a Table/API/CSV placeholder row with a note/block/module attached (`noteRef`,
+		// always a real vault ref — see `attachApiItem`, never an Outside-Vault path) highlights the
+		// same way a bucket row does once that attachment is the open note. No `data-ref-key` at all
+		// while unattached, same as before this PR.
+		if (item.noteRef) row.dataset.refKey = unitRefKey(item.noteRef);
 		row.createDiv({ cls: "atlas-chevron" }); // empty spacer — keeps icons aligned at this depth, same as any childless row
 		const iconEl = row.createDiv({ cls: "atlas-icon" });
 		// R5: routes the dot click to the API item's own status setter — `pseudo` has no real `ViewNode`
@@ -2492,6 +2498,12 @@ export class AtlasExplorerView extends ItemView {
 		row.toggleClass("atlas-filtered-out", filteredOut);
 		row.dataset.refKey = unitRefKey(ref);
 		row.dataset.selectKey = node.id;
+		// PR-1.F1 (F6): `data-ref-key` above is still this ref's own key regardless — the rest of the
+		// explorer (drag, "Place here", the drop zone...) keys off it unconditionally — but an
+		// Outside-Vault-managed row's `ref.path` is root-relative to that external source, never a
+		// vault path, so `updateActiveHighlight` must never treat it as a candidate match even when
+		// it happens to read the same as a real vault note's path.
+		if (outsideManaged) row.dataset.outsideManaged = "true";
 		row.toggleClass("is-selected", this.selectedBucketNodeIds.has(node.id));
 		row.style.paddingLeft = `${depth * 16}px`;
 		// G8/F7: an Outside-Vault-managed child never drags (there is no real move/rename for it to
@@ -3589,13 +3601,38 @@ export class AtlasExplorerView extends ItemView {
 		setTooltip(row, text);
 	}
 
+	/** PR-1.F1 (G1, G3-G8, F6): re-applied after every render, and separately on `file-open`/
+	 * `active-leaf-change` (which never re-render — the fence (F1) is no scroll/fold/view-switch on
+	 * open, so this never does more than toggle `is-active` classes on whatever rows are already in
+	 * the DOM). Walks every rendered row that carries a ref (`data-ref-key` — a meta/Folder row never
+	 * does, G6) and asks the pure `matchesActiveFile` whether that row stands for the open note.
+	 * `getActiveFile()` keeps the last file while focus moves into Atlas or a non-note leaf (E2),
+	 * exactly like the native file explorer. No selector is ever built from the open file's path —
+	 * every existing `[data-ref-key]` row is read via its own dataset string and compared with plain
+	 * `===`, so a path with selector/regex characters (`Draft [v2].md`, `#`, quotes...) needs no
+	 * escaping and can't be read as a selector (the added special-character case). */
 	private updateActiveHighlight(): void {
 		const container = this.containerEl.children[1] as HTMLElement;
-		const activeFile = this.plugin.app.workspace.getActiveFile();
 		container.querySelectorAll(".atlas-row.is-active").forEach((el) => el.removeClass("is-active"));
-		if (!activeFile) return;
-		const ref: UnitRef = { kind: "file", path: activeFile.path };
-		container.querySelectorAll<HTMLElement>(`[data-ref-key="${CSS.escape(unitRefKey(ref))}"]`).forEach((el) => el.addClass("is-active"));
+		const activeFilePath = this.plugin.app.workspace.getActiveFile()?.path ?? null;
+		if (!activeFilePath) return;
+		container.querySelectorAll<HTMLElement>("[data-ref-key]").forEach((row) => {
+			// G7: a missing or filtered-out row never highlights, even if its stale ref happens to
+			// read the same as the open file's path.
+			if (row.classList.contains("atlas-missing") || row.classList.contains("atlas-filtered-out")) return;
+			const ref = parseUnitRefKey(row.dataset.refKey ?? "");
+			if (!ref) return;
+			const isOutsideManaged = row.dataset.outsideManaged === "true";
+			let interfaceNotePath: string | null = null;
+			if (ref.kind === "folder" && !isOutsideManaged) {
+				// G4/Added: honours the alternate interface-note names setting via the real
+				// `findInterfaceNote`, same lookup every other module-row caller uses; a folder that
+				// no longer exists, or has no interface note, resolves to null and never throws.
+				const folder = this.plugin.app.vault.getAbstractFileByPath(ref.path);
+				if (folder instanceof TFolder) interfaceNotePath = findInterfaceNote(this.plugin.app, folder, this.plugin.settings)?.path ?? null;
+			}
+			if (matchesActiveFile({ activeFilePath, ref, interfaceNotePath, isOutsideManaged })) row.addClass("is-active");
+		});
 	}
 
 	private handleRowKeydown(evt: KeyboardEvent, node: ViewNode, view: View): void {
