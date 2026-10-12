@@ -98,6 +98,9 @@ Guidance for coding agents working in this repo.
 - Modals belong to the app, not the leaf. Close any open modal in the view's `onClose`.
 - Resync `ButtonComponent` via `setDisabled()`, never via the raw `.disabled` attribute.
 - A modal's scrolling element is `.modal` (`modalEl`), not `.modal-content`. Preserve `modalEl.scrollTop`.
+- Modal state changes usually rebuild via `contentEl.empty()` + re-render, which lets the browser's scroll anchoring reset `.modal`. Save and restore `modalEl.scrollTop` inside `render()` itself (as `StatusesModal` does), never in an opt-in wrapper some call sites forget. For a single field, mutate the component (`setDisabled`) instead of re-rendering.
+- Don't validate a field just because a toggle turned on: pre-fill it with its canonical default (e.g. `MIN_REFRESH_MINUTES`) so the toggled-on state starts valid.
+- Test mocks of `obsidian` that zero `modalEl.scrollTop` on `contentEl.empty()` don't model real scroll anchoring; assert on `render()` behaviour across every render-triggering interaction.
 - A prompt-style `FuzzySuggestModal` never renders `setTitle`. Use `setPlaceholder`.
 - Don't wait on metadataCache 'resolved' alone. After a plugin reload it never re-fires, so seed from the idle state.
 - A child's rename event can arrive before its parent folder's; check the source folder still exists before treating a child as moved out.
@@ -105,6 +108,13 @@ Guidance for coding agents working in this repo.
 - Linux inotify emits no `fs.watch` 'error' on folder deletion. Close the watcher when a changed path no longer resolves.
 - Don't use fixed-timeout waits on real `fs.watch` in tests; they flake. Trigger events deterministically or retry within a bound.
 - Obsidian's `input[type=text]:not(:disabled):hover` (specificity 0,3,1) beats two-class rules. Match or exceed its specificity for input border styles.
+
+## Testing in a real Obsidian
+
+- Visual checks run in an Obsidian desktop container (image `obsidian-development-template`) with the worktree bind-mounted as the plugin folder. Build on the host first (`npm run build`); the container only runs the built `main.js`.
+- Enumerate the examples and edge cases for each acceptance criterion and check each one visually, not only in unit tests.
+- If a bug won't reproduce in the test vault, reproduce it against a copy of a real vault rather than guessing.
+- Update `docs/` (GitHub Pages) and `README.md` in the same PR when user-facing behaviour changes.
 
 ## Environment and workflow
 
