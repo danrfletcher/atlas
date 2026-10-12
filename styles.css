@@ -226,6 +226,19 @@
 .atlas-row.is-active {
 	background: var(--nav-item-background-active);
 	font-weight: 600;
+}
+
+/* R1 fix: the `::before` bar below needs a positioned ancestor, but that must never be this rule
+ * applied unconditionally — `.atlas-row.is-active` has specificity (0,2,0), which beats
+ * `.atlas-row-virtual { position: absolute }` (0,1,0), the class every virtualised inbox row gets
+ * (`renderVirtualizedInboxRows`). Forcing `position: relative` on an active virtual row would drop
+ * it back into normal flow inside `.atlas-inbox-spacer`, turning its `top: i*28px` into a relative
+ * offset instead of an absolute one — harmless with exactly one active inbox row, but stacking every
+ * later active row at the wrong height once two or more are visible at once (GP2/GP6: two promoted
+ * blocks of the open file, or a file plus its blocks, both in the inbox). A virtual row is already
+ * `position: absolute`, which alone establishes the positioning context the `::before` bar needs, so
+ * only a non-virtual active row needs this rule. */
+.atlas-row.is-active:not(.atlas-row-virtual) {
 	position: relative;
 }
 

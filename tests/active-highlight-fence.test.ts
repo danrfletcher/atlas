@@ -61,4 +61,11 @@ describe("PR-1.F1 fence", () => {
 		const activeBefore = ruleBody(".atlas-row.is-active::before");
 		expect(activeBefore).toMatch(/background\s*:\s*var\(--interactive-accent\)/);
 	});
+
+	it("R1: the bare `.atlas-row.is-active` rule never sets position — only `:not(.atlas-row-virtual)` may, so an active virtualised inbox row keeps .atlas-row-virtual's own `position: absolute` (GP2/GP6)", () => {
+		const bareActive = ruleBody(".atlas-row.is-active");
+		expect(bareActive).not.toMatch(/position\s*:/);
+		const nonVirtualActive = ruleBody(".atlas-row.is-active:not(.atlas-row-virtual)");
+		expect(nonVirtualActive).toMatch(/position\s*:\s*relative/);
+	});
 });
