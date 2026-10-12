@@ -5,8 +5,63 @@ import { App as MockApp } from "../mocks/obsidian";
 import { ViewsManager } from "../../src/views";
 import { ApiItemState, FolderSourceConfig, PLACEHOLDER_ROW_KIND, UnitRef, View, ViewNode } from "../../src/types";
 import { YamlFilterRule } from "../../src/folder-filter";
-import { DEFAULT_SETTINGS, AtlasSettings } from "../../src/settings";
+import { AtlasSettingTab, DEFAULT_SETTINGS, AtlasSettings } from "../../src/settings";
+import { ATLAS_VIEW_TYPE, AtlasExplorerView } from "../../src/explorer-view";
+import AtlasPlugin from "../../src/main";
 import { callRenderApiItemRow, callRenderNodeList, makeFakeExplorer, makeStatusesManager, proto } from "../unit/explorer-view-sort-truncate-helpers";
+
+// R1 (PR-1.F2 review): Obsidian's `Setting` is replaced with a recorder so the "Highlight the open
+// note" toggle's *real* settings-tab `onChange` (settings.ts:253-257) can be captured and invoked
+// directly — the same technique `tests/unit/no-auto-promote.test.ts` already uses for the toggle
+// right beside it. Every other export (App, Vault, TFile...) is kept exactly as the shared mock.
+vi.mock("obsidian", async (importOriginal) => {
+	const actual = await importOriginal<typeof import("obsidian")>();
+
+	interface ToggleState {
+		value?: boolean;
+		onChange?: (value: boolean) => unknown;
+	}
+	const makeToggleComponent = (state: ToggleState): unknown => {
+		const proxy: unknown = new Proxy(
+			{},
+			{
+				get: (_target, prop) => {
+					if (prop === "setValue") return (v: boolean) => ((state.value = v), proxy);
+					if (prop === "onChange") return (fn: (value: boolean) => unknown) => ((state.onChange = fn), proxy);
+					return () => proxy;
+				},
+			}
+		);
+		return proxy;
+	};
+
+	class FakeSetting {
+		static rows: { name: string; toggles: ToggleState[] }[] = [];
+		constructor(public containerEl: HTMLElement) {
+			const row = { name: "", toggles: [] as ToggleState[] };
+			FakeSetting.rows.push(row);
+			return new Proxy(this, {
+				get(target, prop, receiver) {
+					if (prop === "setName") return (name: string) => ((row.name = name), receiver);
+					if (prop === "addToggle")
+						return (cb: (c: unknown) => void) => {
+							const state: ToggleState = {};
+							cb(makeToggleComponent(state));
+							row.toggles.push(state);
+							return receiver;
+						};
+					if (prop in target) return Reflect.get(target, prop, receiver);
+					// Every other Setting-builder call (setDesc, addText, addTextArea, addDropdown...)
+					// is a harmless no-op — renderBasicTab only needs its toggle rows read back, and
+					// none of those other builders' callbacks need to run at all for that.
+					return (..._args: unknown[]) => receiver;
+				},
+			});
+		}
+	}
+
+	return { ...actual, Setting: FakeSetting };
+});
 
 /** PR-1.F2 integration: the filter box and selection against a Folder source's hidden and "filtered out"
  * rows. The real `ViewsManager` answers the render state, and the real `renderNode` builds the rows, so the
@@ -708,6 +763,112 @@ describe("PR-1.F2 — the 'Highlight the open note' setting (G9, GP7, E9)", () =
 		sharedSettings.highlightOpenNote = true;
 		callUpdateActiveHighlight(leafA);
 		callUpdateActiveHighlight(leafB);
+		expect(activeRefKeys(leafA).length).toBeGreaterThan(0);
+		expect(activeRefKeys(leafB).length).toBeGreaterThan(0);
+	});
+});
+
+/** PR-1.F2 R1: the test above (E9) calls `updateActiveHighlight` by hand on two independent
+ * harnesses and never touches `onChange`/`refreshExplorerViews` at all, so it would still pass if
+ * the toggle's `onChange` dropped the `refreshExplorerViews()` call, called it before
+ * `saveSettings`, or if `refreshExplorerViews` skipped a leaf. This exercises the real chain
+ * instead: the settings tab's actual `onChange` (settings.ts:253-257, captured via the `Setting`
+ * recorder above) mutates the one shared settings object, awaits the real `saveSettings` (->
+ * `persistNow` -> `saveData`), then calls the real `AtlasPlugin.refreshExplorerViews`, which looks
+ * up two stubbed Atlas leaves via `getLeavesOfType` and calls the real `refresh`/`queueRender` on
+ * each (never reimplemented here) — so a dropped or reordered call in any of those real methods
+ * would fail this test. Each leaf's own `render` override is the only stand-in, rebuilding the
+ * same real tree `renderHighlightTree` builds and then calling the real `updateActiveHighlight`,
+ * exactly mirroring what the real (private) `render` does at its own end. */
+describe("PR-1.F2 — R1: the real settings-tab onChange drives refreshExplorerViews over real Atlas leaves", () => {
+	it("saves before either leaf's queued render runs, and that queued render clears/restores the highlight on both", async () => {
+		const { Setting: FakeSettingCtor } = (await import("obsidian")) as unknown as {
+			Setting: { rows: { name: string; toggles: { value?: boolean; onChange?: (v: boolean) => unknown }[] }[] };
+		};
+		FakeSettingCtor.rows.length = 0;
+
+		const sharedSettings: AtlasSettings = { ...DEFAULT_SETTINGS };
+		const leafA = setupHighlightHarness(sharedSettings);
+		const leafB = setupHighlightHarness(sharedSettings);
+		// Grafting the real prototype on (while every already-assigned own property above keeps
+		// taking priority over it) makes `leaf.view instanceof AtlasExplorerView` true. `queueRender`
+		// is deleted off each fake (setupHighlightHarness stubs it as a no-op for the tests above,
+		// which never need a queued render) so it and `refresh` fall through to the real,
+		// un-stubbed prototype methods — the whole point of this test.
+		for (const h of [leafA, leafB]) {
+			Object.setPrototypeOf(h.fake, AtlasExplorerView.prototype);
+			delete (h.fake as unknown as { queueRender?: unknown }).queueRender;
+		}
+
+		const order: string[] = [];
+		for (const [label, h] of [["A", leafA], ["B", leafB]] as const) {
+			Object.assign(h.fake, {
+				render: vi.fn(async () => {
+					order.push(`render:${label}`);
+					await renderHighlightTree(h);
+					(h.fake as unknown as { updateActiveHighlight(): void }).updateActiveHighlight();
+				}),
+			});
+		}
+
+		await renderHighlightTree(leafA);
+		await renderHighlightTree(leafB);
+		leafA.setActiveFile({ path: "Quarry drones.md" } as TFile);
+		leafB.setActiveFile({ path: "Quarry drones.md" } as TFile);
+		callUpdateActiveHighlight(leafA);
+		callUpdateActiveHighlight(leafB);
+		expect(activeRefKeys(leafA).length).toBeGreaterThan(0);
+		expect(activeRefKeys(leafB).length).toBeGreaterThan(0);
+
+		const plugin = Object.create(AtlasPlugin.prototype) as AtlasPlugin;
+		Object.assign(plugin, {
+			app: {
+				workspace: {
+					getLeavesOfType: vi.fn((type: string) => {
+						// The first synchronous thing `refreshExplorerViews` itself does — recorded so the
+						// order check below can tell a same-tick reorder (refresh dispatched before save)
+						// from the correct one, since the *actual* re-render it triggers is always deferred
+						// to a macrotask either way and so can't by itself prove which came first.
+						order.push("refresh-dispatch");
+						return type === ATLAS_VIEW_TYPE ? [{ view: leafA.fake }, { view: leafB.fake }] : [];
+					}),
+				},
+			},
+			settings: sharedSettings,
+			unitIndex: { getManualPromotions: () => [], getDismissedByView: () => ({}), getDismissedGlobal: () => [], getAddedItems: () => [] },
+			viewsManager: { getViews: () => [], getActiveViewId: () => "default" },
+			statusesManager: { getStatusSets: () => [], getColorPalette: () => [] },
+			expandedModuleFolders: new Set<string>(),
+			saveData: vi.fn(async (_data: unknown) => {
+				order.push("saveData");
+			}),
+		});
+
+		const tab = new AtlasSettingTab(new MockApp() as unknown as App, plugin);
+		(tab as unknown as { renderBasicTab(el: HTMLElement): void }).renderBasicTab(document.createElement("div"));
+		const row = FakeSettingCtor.rows.find((r) => r.name === "Highlight the open note");
+		expect(row).toBeTruthy();
+		const toggle = row!.toggles[0];
+		expect(toggle.value).toBe(true); // reflects the shared settings object's current (default-on) value
+
+		const flush = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+		// Off: the real onChange runs end to end. `saveData` must land before `refreshExplorerViews`
+		// is even dispatched; the render itself is also deferred (queueRender's setTimeout 0), so
+		// nothing renders yet.
+		await toggle.onChange!(false);
+		expect(order).toEqual(["saveData", "refresh-dispatch"]);
+		await flush();
+		expect(order).toEqual(["saveData", "refresh-dispatch", "render:A", "render:B"]);
+		expect(activeRefKeys(leafA)).toEqual([]);
+		expect(activeRefKeys(leafB)).toEqual([]);
+
+		// Back on: same real chain, same ordering, both leaves' highlight restored together.
+		order.length = 0;
+		await toggle.onChange!(true);
+		expect(order).toEqual(["saveData", "refresh-dispatch"]);
+		await flush();
+		expect(order).toEqual(["saveData", "refresh-dispatch", "render:A", "render:B"]);
 		expect(activeRefKeys(leafA).length).toBeGreaterThan(0);
 		expect(activeRefKeys(leafB).length).toBeGreaterThan(0);
 	});
