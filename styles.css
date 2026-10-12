@@ -224,8 +224,25 @@
 }
 
 .atlas-row.is-active {
-	background: var(--background-modifier-active-hover);
+	background: var(--nav-item-background-active);
 	font-weight: 600;
+	position: relative;
+}
+
+/* PR-1.F1 (G8/E7): a left accent bar, not the box-shadow ring `.is-selected` (below) uses — the two
+ * styles are on different properties entirely so a row that is both open and selected shows both at
+ * once, with neither clobbering the other regardless of declaration order. An absolutely-positioned
+ * pseudo-element (rather than `border-left`) draws it without changing the row's own box size, so
+ * every row keeps the exact same width/alignment whether or not it's active. */
+.atlas-row.is-active::before {
+	content: "";
+	position: absolute;
+	top: 0;
+	bottom: 0;
+	left: 0;
+	width: 2px;
+	border-radius: 2px 0 0 2px;
+	background: var(--interactive-accent);
 }
 
 /* PR 20: multi-select highlight — a distinct treatment from `.is-active` (the currently-open-file
