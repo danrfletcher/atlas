@@ -197,7 +197,12 @@ describe("folder-source-outside-watcher — PR-2 R5: keyed by resolved path, not
 		);
 
 		expect(watch).toHaveBeenCalledTimes(1);
-		rmSync(alias, { force: true });
+		// `recursive: true` is required here even though `alias` is a symlink, not a real
+		// directory: on Node 24.x, `rmSync` on a dir-type symlink throws "Path is a
+		// directory" without it. With `recursive: true` it still only unlinks the symlink
+		// itself (verified above) — the target directory `dir` is untouched and is removed
+		// separately in `afterEach`.
+		rmSync(alias, { recursive: true, force: true });
 	});
 });
 
