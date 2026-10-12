@@ -167,8 +167,25 @@ interface HighlightHarness {
 	notesNode: ViewNode;
 	block1: ViewNode;
 	block2: ViewNode;
+	/** R4: a block row whose own file path contains '#'. */
+	block3: ViewNode;
+	/** R3/G7: a row an `.atlas-missing` class must keep unhighlighted even when its ref matches. */
+	missingNode: ViewNode;
+	/** R3/G7: a row an `.atlas-filtered-out` class must keep unhighlighted even when its ref matches. */
+	filteredNode: ViewNode;
+	/** R3/F6: an Outside-Vault Folder source whose managed child (`outsideRow`) must never highlight. */
+	outsideOwnerNode: ViewNode;
+	outsideRow: ViewNode;
 	groupMeta: ViewNode;
 	v: View;
+	/** R2(a): fires whatever the real `onOpen` (via `callOnOpen`) registered on the mock
+	 * workspace — lets a test prove the `file-open`/`active-leaf-change` subscriptions themselves
+	 * still drive `updateActiveHighlight`, instead of only ever calling it directly. */
+	triggerWorkspace: (name: string, ...args: unknown[]) => void;
+	/** R2(a): the real (unstubbed) `onOpen`, run against this harness's `fake`. `fake.render` is a
+	 * no-op stub — `onOpen`'s own final `await this.render()` is irrelevant to this test, which only
+	 * needs the two workspace subscriptions it wires before that call. */
+	callOnOpen: () => Promise<void>;
 }
 
 function setupHighlightHarness(): HighlightHarness {
@@ -179,14 +196,52 @@ function setupHighlightHarness(): HighlightHarness {
 	app.vault.seedFile("Notes.md");
 	app.vault.seedFile("Ideas.md");
 	app.vault.seedFile("Attached.md");
+	app.vault.seedFile("Draft #1.md");
 
 	const sm = makeStatusesManager();
 	const setNodeCollapsed = vi.fn();
+
+	// R3/F6: the Outside-Vault source `outsideRow` (below) belongs to — looked up by id via
+	// `viewsManager.getNode`, the same way the real `isOutsideManagedUnit` looks up any owner.
+	const outsideOwnerNode: ViewNode = {
+		id: "outside-owner",
+		type: "meta",
+		label: "External",
+		children: [],
+		folderSource: { type: "folder", location: "outside", path: "Ext", showFiles: true, showFolders: false, mode: "merge" },
+	};
+
+	// R2(a): a minimal real event bus on the mock workspace. `onOpen` (called for real by
+	// `callOnOpen`, never reimplemented here) registers its `file-open`/`active-leaf-change`
+	// handlers against this the same way it would against the real Obsidian workspace; `on` itself
+	// is the actual subscription (Obsidian's `registerEvent` is only cleanup bookkeeping on top of
+	// it), so stubbing `registerEvent` to a no-op below still leaves the real handlers reachable.
+	const workspaceListeners = new Map<string, Array<(...args: unknown[]) => void>>();
+	const workspace = (app as unknown as { workspace: Record<string, unknown> }).workspace;
+	workspace.on = (name: string, cb: (...args: unknown[]) => void) => {
+		const arr = workspaceListeners.get(name) ?? [];
+		arr.push(cb);
+		workspaceListeners.set(name, arr);
+		return { name, cb };
+	};
+	const triggerWorkspace = (name: string, ...args: unknown[]): void => {
+		for (const cb of workspaceListeners.get(name) ?? []) cb(...args);
+	};
+
 	const plugin = {
 		statusesManager: sm,
 		settings: DEFAULT_SETTINGS,
 		app: app as unknown as App,
-		viewsManager: { setApiItemStatus: vi.fn(), managedRowFilterState: vi.fn(() => "shown"), setNodeCollapsed },
+		unitIndex: { onChange: vi.fn(() => () => {}) },
+		viewsManager: {
+			setApiItemStatus: vi.fn(),
+			// R3/G7: only the one row tagged "filtered-node" reports filteredOut — every other row's
+			// match keeps working exactly as before.
+			managedRowFilterState: vi.fn((_viewId: string, node: ViewNode) => (node.id === "filtered-node" ? "filteredOut" : "shown")),
+			setNodeCollapsed,
+			onChange: vi.fn(() => () => {}),
+			getNode: vi.fn((_viewId: string, nodeId: string) => (nodeId === "outside-owner" ? outsideOwnerNode : undefined)),
+		},
 	};
 
 	let activeFile: TFile | null = null;
@@ -198,6 +253,21 @@ function setupHighlightHarness(): HighlightHarness {
 	const notesNode: ViewNode = { id: "notes", type: "unit", ref: { kind: "file", path: "Notes.md" }, children: [] };
 	const block1: ViewNode = { id: "block-1", type: "unit", ref: { kind: "block", path: "Ideas.md", subpath: "^b1" }, children: [] };
 	const block2: ViewNode = { id: "block-2", type: "unit", ref: { kind: "block", path: "Ideas.md", subpath: "^b2" }, children: [] };
+	// R4: a block row whose file path itself contains '#' — `parseUnitRefKey`'s pre-fix first-'#'
+	// split misread `block:Draft #1.md#^b3` as path "Draft " + subpath "1.md#^b3", so this never
+	// highlighted before the fix even though its file is open.
+	const block3: ViewNode = { id: "block-3", type: "unit", ref: { kind: "block", path: "Draft #1.md", subpath: "^b3" }, children: [] };
+	const missingNode: ViewNode = { id: "missing-node", type: "unit", ref: { kind: "file", path: "Missing.md" }, children: [] };
+	const filteredNode: ViewNode = { id: "filtered-node", type: "unit", ref: { kind: "file", path: "Filtered.md" }, children: [] };
+	// F6: ref.path deliberately reads the same as the real vault note "Quarry drones.md" above.
+	const outsideRow: ViewNode = {
+		id: "outside-row",
+		type: "unit",
+		ref: { kind: "file", path: "Quarry drones.md" },
+		folderSourceManaged: true,
+		folderSourceOwnerId: "outside-owner",
+		children: [],
+	};
 	const groupMeta: ViewNode = { id: "group", type: "meta", label: "Group", children: [] };
 
 	const v: View = { id: "v1", name: "Default", inboxMode: "view", root: [] };
@@ -224,11 +294,17 @@ function setupHighlightHarness(): HighlightHarness {
 		resolveRef: vi.fn(async (ref: UnitRef) => ({
 			text: ref.kind === "block" ? ref.subpath : (ref.path.split("/").pop() ?? ref.path).replace(/\.md$/, ""),
 			icon: ref.kind === "folder" ? "folder" : "file",
-			missing: false,
+			// R3/G7: only `missingNode`'s own path reports missing — every other row's match keeps
+			// working exactly as before.
+			missing: ref.kind !== "block" && ref.path === "Missing.md",
 			promoted: false,
 			added: false,
 		})),
-		isOutsideManagedUnit: vi.fn(() => false),
+		// R3/F6: the real `isOutsideManagedUnit`, not a stub that always answers false. It still
+		// answers false for every row here except `outsideRow` — none of the others ever set
+		// `folderSourceManaged`/`folderSourceOwnerId`, so this is a no-op for every existing test.
+		isOutsideManagedUnit: proto.isOutsideManagedUnit,
+		resolveOutsideManagedRowInfo: proto.resolveOutsideManagedRowInfo,
 		setPlacementTooltip: vi.fn(),
 		wireModuleRow: vi.fn(),
 		handleSelectionClick: vi.fn(() => false),
@@ -237,6 +313,22 @@ function setupHighlightHarness(): HighlightHarness {
 		makeDropZone: vi.fn(),
 		handleRowKeydown: vi.fn(),
 		buildNodeDragPayload: vi.fn(),
+		// R2(a): the real `updateActiveHighlight`, so the handlers wired by the real `onOpen` (which
+		// call `this.updateActiveHighlight()` directly, not through any test helper) actually run it.
+		updateActiveHighlight: proto.updateActiveHighlight,
+		// R2(a): the rest of `onOpen`'s own dependencies — exercised only by the test that calls
+		// `callOnOpen`, harmless no-ops for every other test here, which never calls it.
+		unsubscribers: [] as (() => void)[],
+		registerEvent: vi.fn(),
+		registerDomEvent: vi.fn(),
+		leaf: {},
+		viewLoadTrigger: { activate: vi.fn(() => false), deactivate: vi.fn() },
+		refreshApiSourcesOnViewLoad: vi.fn(),
+		render: vi.fn(async () => {}),
+		dragPayload: null,
+		inboxDragRowEl: null,
+		cancelActiveDwell: null,
+		queueRender: vi.fn(),
 	});
 	Object.assign(fake, { selectedBucketNodeIds: new Set<string>() });
 
@@ -247,14 +339,35 @@ function setupHighlightHarness(): HighlightHarness {
 	containerEl.appendChild(content);
 	Object.assign(fake, { containerEl });
 
-	return { app, fake, content, setActiveFile: (file) => (activeFile = file), setNodeCollapsed, projectsNode, quarryNested, quarryDuplicate, notesNode, block1, block2, groupMeta, v };
+	return {
+		app,
+		fake,
+		content,
+		setActiveFile: (file) => (activeFile = file),
+		setNodeCollapsed,
+		projectsNode,
+		quarryNested,
+		quarryDuplicate,
+		notesNode,
+		block1,
+		block2,
+		block3,
+		missingNode,
+		filteredNode,
+		outsideOwnerNode,
+		outsideRow,
+		groupMeta,
+		v,
+		triggerWorkspace,
+		callOnOpen: () => (proto.onOpen as unknown as (this: unknown) => Promise<void>).call(fake),
+	};
 }
 
 /** Renders the harness's root nodes plus one API Item row (a Table/API source placeholder with a
  * `noteRef` attachment) into `h.content`, real pass throughout. */
 async function renderHighlightTree(h: HighlightHarness): Promise<void> {
 	h.content.replaceChildren();
-	const roots = [h.groupMeta, h.projectsNode, h.quarryDuplicate, h.notesNode, h.block1, h.block2];
+	const roots = [h.groupMeta, h.projectsNode, h.quarryDuplicate, h.notesNode, h.block1, h.block2, h.block3, h.missingNode, h.filteredNode, h.outsideRow];
 	await callRenderNodeList(h.fake, roots, h.content, h.v, 0, [h.v], undefined);
 
 	const apiItem: ApiItemState = { id: "api-1", label: "Attached item", kind: PLACEHOLDER_ROW_KIND, noteRef: { kind: "file", path: "Attached.md" } };
@@ -435,5 +548,76 @@ describe("PR-1.F1 — active highlight: file, module, block and Item rows via th
 		expect(h.content.scrollTop).toBe(42);
 		expect(h.setNodeCollapsed).not.toHaveBeenCalled();
 		expect(Notice.instances).toHaveLength(0);
+	});
+
+	it("R4: a block row whose own file path contains '#' highlights once that file is open, exactly like any other block row", async () => {
+		const h = setupHighlightHarness();
+		await renderHighlightTree(h);
+		h.setActiveFile({ path: "Draft #1.md" } as TFile);
+		callUpdateActiveHighlight(h);
+
+		const row = h.content.querySelector<HTMLElement>(`[data-select-key="${h.block3.id}"]`)!;
+		expect(row.dataset.refKey).toBe("block:Draft #1.md#^b3");
+		expect(row.classList.contains("is-active")).toBe(true);
+	});
+
+	it("R3/F6: an Outside-Vault-managed row whose ref.path equals the open vault note's path never highlights, even while the real vault rows for that same path do", async () => {
+		const h = setupHighlightHarness();
+		await renderHighlightTree(h);
+		const outsideRowEl = h.content.querySelector<HTMLElement>(`[data-select-key="${h.outsideRow.id}"]`)!;
+		expect(outsideRowEl.dataset.outsideManaged).toBe("true");
+
+		h.setActiveFile({ path: "Quarry drones.md" } as TFile);
+		callUpdateActiveHighlight(h);
+
+		expect(outsideRowEl.classList.contains("is-active")).toBe(false);
+		expect(h.content.querySelector(`[data-select-key="${h.quarryNested.id}"]`)!.classList.contains("is-active")).toBe(true);
+		expect(h.content.querySelector(`[data-select-key="${h.quarryDuplicate.id}"]`)!.classList.contains("is-active")).toBe(true);
+	});
+
+	it("R3/G7: a missing row and a filtered-out row stay unhighlighted even though their own ref matches the open file's path", async () => {
+		const h = setupHighlightHarness();
+		await renderHighlightTree(h);
+		const missingRow = h.content.querySelector<HTMLElement>(`[data-select-key="${h.missingNode.id}"]`)!;
+		const filteredRow = h.content.querySelector<HTMLElement>(`[data-select-key="${h.filteredNode.id}"]`)!;
+		expect(missingRow.classList.contains("atlas-missing")).toBe(true);
+		expect(filteredRow.classList.contains("atlas-filtered-out")).toBe(true);
+
+		h.setActiveFile({ path: "Missing.md" } as TFile);
+		callUpdateActiveHighlight(h);
+		expect(missingRow.classList.contains("is-active")).toBe(false);
+
+		h.setActiveFile({ path: "Filtered.md" } as TFile);
+		callUpdateActiveHighlight(h);
+		expect(filteredRow.classList.contains("is-active")).toBe(false);
+	});
+
+	it("G8: a row that is both selected and the open note carries is-selected and is-active together", async () => {
+		const h = setupHighlightHarness();
+		(h.fake as unknown as { selectedBucketNodeIds: Set<string> }).selectedBucketNodeIds = new Set([h.quarryNested.id]);
+		await renderHighlightTree(h);
+
+		h.setActiveFile({ path: "Quarry drones.md" } as TFile);
+		callUpdateActiveHighlight(h);
+
+		const row = h.content.querySelector<HTMLElement>(`[data-select-key="${h.quarryNested.id}"]`)!;
+		expect(row.classList.contains("is-selected")).toBe(true);
+		expect(row.classList.contains("is-active")).toBe(true);
+	});
+
+	it("R2(a): the real file-open and active-leaf-change subscriptions wired in onOpen drive the highlight, not just a direct call to updateActiveHighlight", async () => {
+		const h = setupHighlightHarness();
+		await renderHighlightTree(h);
+		await h.callOnOpen();
+
+		h.setActiveFile({ path: "Quarry drones.md" } as TFile);
+		h.triggerWorkspace("file-open");
+		expect(h.content.querySelector(`[data-select-key="${h.quarryNested.id}"]`)!.classList.contains("is-active")).toBe(true);
+		expect(h.content.querySelector(`[data-select-key="${h.quarryDuplicate.id}"]`)!.classList.contains("is-active")).toBe(true);
+
+		h.setActiveFile({ path: "Notes.md" } as TFile);
+		h.triggerWorkspace("active-leaf-change", {});
+		expect(h.content.querySelector(`[data-select-key="${h.quarryNested.id}"]`)!.classList.contains("is-active")).toBe(false);
+		expect(h.content.querySelector(`[data-select-key="${h.notesNode.id}"]`)!.classList.contains("is-active")).toBe(true);
 	});
 });
