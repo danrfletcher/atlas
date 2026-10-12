@@ -86,4 +86,10 @@ describe("matchesActiveFile — PR-1.F1 matching rule", () => {
 		expect(matchesActiveFile({ ...base, activeFilePath: tricky, ref: fileRef(tricky) })).toBe(true);
 		expect(matchesActiveFile({ ...base, activeFilePath: tricky, ref: fileRef("Draft [v2] (not it).md") })).toBe(false);
 	});
+
+	it("R4/Added: a block ref matches on a path containing '#', the same way as any other path (the bug this guards against lives in parseUnitRefKey's own split, not here — see tests/unit/types.test.ts)", () => {
+		const tricky = "Draft #1.md";
+		expect(matchesActiveFile({ ...base, activeFilePath: tricky, ref: blockRef(tricky, "^abc") })).toBe(true);
+		expect(matchesActiveFile({ ...base, activeFilePath: "Other.md", ref: blockRef(tricky, "^abc") })).toBe(false);
+	});
 });

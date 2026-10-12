@@ -43,7 +43,12 @@ export function parseUnitRefKey(key: string): UnitRef | null {
 	const rest = key.slice(colon + 1);
 	if (kind === "file" || kind === "folder") return { kind, path: rest };
 	if (kind === "block") {
-		const hash = rest.indexOf("#");
+		// R4: split at the *last* `#`, not the first — the open file's own path can itself contain
+		// `#` (`Draft #1.md`), and `unitRefKey` always appends `#<subpath>` after the whole path, so
+		// the separator is never anything but the final `#` in the string. Splitting at the first one
+		// instead would read `block:Draft #1.md#^abc` as path `Draft ` + subpath `1.md#^abc`, silently
+		// losing the match for any such file (the spec's "Added" `#`-in-path case, for a block row).
+		const hash = rest.lastIndexOf("#");
 		if (hash < 0) return null;
 		return { kind: "block", path: rest.slice(0, hash), subpath: rest.slice(hash + 1) };
 	}
@@ -63,7 +68,9 @@ export function rewriteRefKeyPath(key: string, oldPath: string, newPath: string)
 	const kind = key.slice(0, colon);
 	const rest = key.slice(colon + 1);
 	if (kind === "block") {
-		const hash = rest.indexOf("#");
+		// R4 (same flaw as parseUnitRefKey): split at the last `#`, not the first — see that
+		// function's comment. A `#` in `path` must never be mistaken for the path/subpath separator.
+		const hash = rest.lastIndexOf("#");
 		if (hash < 0) return key;
 		const path = rest.slice(0, hash);
 		const subpath = rest.slice(hash + 1);

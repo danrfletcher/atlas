@@ -70,4 +70,13 @@ describe("PR-1.F1 — parseUnitRefKey: the inverse of unitRefKey", () => {
 		expect(parseUnitRefKey("no-colon-here")).toBeNull();
 		expect(parseUnitRefKey("block:Ideas.md")).toBeNull();
 	});
+
+	it("R4: round-trips a block ref whose path itself contains '#' — must split at the last '#', not the first", () => {
+		const ref: UnitRef = { kind: "block", path: "Draft #1.md", subpath: "^abc" };
+		const key = unitRefKey(ref);
+		expect(key).toBe("block:Draft #1.md#^abc");
+		// The first '#' in the key belongs to the path, not the path/subpath separator — splitting
+		// there (the pre-fix bug) would misparse to path "Draft " + subpath "1.md#^abc".
+		expect(parseUnitRefKey(key)).toEqual(ref);
+	});
 });
