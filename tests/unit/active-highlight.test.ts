@@ -92,4 +92,9 @@ describe("matchesActiveFile — PR-1.F1 matching rule", () => {
 		expect(matchesActiveFile({ ...base, activeFilePath: tricky, ref: blockRef(tricky, "^abc") })).toBe(true);
 		expect(matchesActiveFile({ ...base, activeFilePath: "Other.md", ref: blockRef(tricky, "^abc") })).toBe(false);
 	});
+
+	it("R5: a block ref matches by path regardless of whether its own subpath itself contains '#' (a nested-heading link, [[Ideas#H1#H2]]) — matchesActiveFile never looks at subpath at all, so it's unaffected by parseUnitRefKey's ambiguity (see explorer-view.ts's updateActiveHighlight and tests/unit/types.test.ts for where that ambiguity is actually resolved)", () => {
+		expect(matchesActiveFile({ ...base, activeFilePath: "Ideas.md", ref: blockRef("Ideas.md", "H1#H2") })).toBe(true);
+		expect(matchesActiveFile({ ...base, activeFilePath: "Other.md", ref: blockRef("Ideas.md", "H1#H2") })).toBe(false);
+	});
 });

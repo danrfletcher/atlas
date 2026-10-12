@@ -3620,7 +3620,8 @@ export class AtlasExplorerView extends ItemView {
 			// G7: a missing or filtered-out row never highlights, even if its stale ref happens to
 			// read the same as the open file's path.
 			if (row.classList.contains("atlas-missing") || row.classList.contains("atlas-filtered-out")) return;
-			const ref = parseUnitRefKey(row.dataset.refKey ?? "");
+			const key = row.dataset.refKey ?? "";
+			const ref = parseUnitRefKey(key);
 			if (!ref) return;
 			const isOutsideManaged = row.dataset.outsideManaged === "true";
 			let interfaceNotePath: string | null = null;
@@ -3631,7 +3632,17 @@ export class AtlasExplorerView extends ItemView {
 				const folder = this.plugin.app.vault.getAbstractFileByPath(ref.path);
 				if (folder instanceof TFolder) interfaceNotePath = findInterfaceNote(this.plugin.app, folder, this.plugin.settings)?.path ?? null;
 			}
-			if (matchesActiveFile({ activeFilePath, ref, interfaceNotePath, isOutsideManaged })) row.addClass("is-active");
+			// R5: `parseUnitRefKey`'s guess at a block ref's `path` can be wrong when the subpath
+			// itself contains '#' (`[[Ideas#H1#H2]]` promotes subpath `'H1#H2'`, key
+			// `'block:Ideas.md#H1#H2'`) — splitting at either the first or the last '#' is ambiguous
+			// on the string alone. `activeFilePath` is exactly the context needed to settle it: by
+			// construction (`unitRefKey`), a block ref's path equals `activeFilePath` iff the raw key
+			// starts with `block:<activeFilePath>#`, whatever further '#'s the subpath holds. Rewrite
+			// `ref.path` to that known-correct value before handing it to the one matching rule, so
+			// `matchesActiveFile` stays the single place that decides and every other kind's
+			// (unambiguous) path still flows straight through unchanged.
+			const effectiveRef = ref.kind === "block" ? { ...ref, path: key.startsWith(`block:${activeFilePath}#`) ? activeFilePath : ref.path } : ref;
+			if (matchesActiveFile({ activeFilePath, ref: effectiveRef, interfaceNotePath, isOutsideManaged })) row.addClass("is-active");
 		});
 	}
 

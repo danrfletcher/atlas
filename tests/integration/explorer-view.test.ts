@@ -169,6 +169,8 @@ interface HighlightHarness {
 	block2: ViewNode;
 	/** R4: a block row whose own file path contains '#'. */
 	block3: ViewNode;
+	/** R5: a block row whose *subpath* itself contains '#' (a nested-heading link, [[Ideas#H1#H2]]). */
+	block4: ViewNode;
 	/** R3/G7: a row an `.atlas-missing` class must keep unhighlighted even when its ref matches. */
 	missingNode: ViewNode;
 	/** R3/G7: a row an `.atlas-filtered-out` class must keep unhighlighted even when its ref matches. */
@@ -257,6 +259,10 @@ function setupHighlightHarness(): HighlightHarness {
 	// split misread `block:Draft #1.md#^b3` as path "Draft " + subpath "1.md#^b3", so this never
 	// highlighted before the fix even though its file is open.
 	const block3: ViewNode = { id: "block-3", type: "unit", ref: { kind: "block", path: "Draft #1.md", subpath: "^b3" }, children: [] };
+	// R5: a block row promoted from a nested-heading link ([[Ideas#H1#H2]]) — the subpath itself
+	// contains '#', so `block:Ideas.md#H1#H2` is ambiguous between this ref and
+	// `{ path: "Ideas.md#H1", subpath: "H2" }`. Opening "Ideas.md" must still highlight this row.
+	const block4: ViewNode = { id: "block-4", type: "unit", ref: { kind: "block", path: "Ideas.md", subpath: "H1#H2" }, children: [] };
 	const missingNode: ViewNode = { id: "missing-node", type: "unit", ref: { kind: "file", path: "Missing.md" }, children: [] };
 	const filteredNode: ViewNode = { id: "filtered-node", type: "unit", ref: { kind: "file", path: "Filtered.md" }, children: [] };
 	// F6: ref.path deliberately reads the same as the real vault note "Quarry drones.md" above.
@@ -352,6 +358,7 @@ function setupHighlightHarness(): HighlightHarness {
 		block1,
 		block2,
 		block3,
+		block4,
 		missingNode,
 		filteredNode,
 		outsideOwnerNode,
@@ -367,7 +374,7 @@ function setupHighlightHarness(): HighlightHarness {
  * `noteRef` attachment) into `h.content`, real pass throughout. */
 async function renderHighlightTree(h: HighlightHarness): Promise<void> {
 	h.content.replaceChildren();
-	const roots = [h.groupMeta, h.projectsNode, h.quarryDuplicate, h.notesNode, h.block1, h.block2, h.block3, h.missingNode, h.filteredNode, h.outsideRow];
+	const roots = [h.groupMeta, h.projectsNode, h.quarryDuplicate, h.notesNode, h.block1, h.block2, h.block3, h.block4, h.missingNode, h.filteredNode, h.outsideRow];
 	await callRenderNodeList(h.fake, roots, h.content, h.v, 0, [h.v], undefined);
 
 	const apiItem: ApiItemState = { id: "api-1", label: "Attached item", kind: PLACEHOLDER_ROW_KIND, noteRef: { kind: "file", path: "Attached.md" } };
@@ -558,6 +565,17 @@ describe("PR-1.F1 — active highlight: file, module, block and Item rows via th
 
 		const row = h.content.querySelector<HTMLElement>(`[data-select-key="${h.block3.id}"]`)!;
 		expect(row.dataset.refKey).toBe("block:Draft #1.md#^b3");
+		expect(row.classList.contains("is-active")).toBe(true);
+	});
+
+	it("R5: a block row whose own subpath contains '#' (a nested-heading link, [[Ideas#H1#H2]]) highlights once its file is open — parseUnitRefKey's last-'#' split alone would misread this row's path as 'Ideas.md#H1' and never match 'Ideas.md'", async () => {
+		const h = setupHighlightHarness();
+		await renderHighlightTree(h);
+		h.setActiveFile({ path: "Ideas.md" } as TFile);
+		callUpdateActiveHighlight(h);
+
+		const row = h.content.querySelector<HTMLElement>(`[data-select-key="${h.block4.id}"]`)!;
+		expect(row.dataset.refKey).toBe("block:Ideas.md#H1#H2");
 		expect(row.classList.contains("is-active")).toBe(true);
 	});
 

@@ -447,6 +447,21 @@ describe("removedRefs-rewrite-on-rename — R8", () => {
 		expect(rewritten.removedRefs).toEqual(["file:Unrelated/a.md"]);
 	});
 
+	it("R5: onVaultRename rewrites a removedRefs block key whose subpath itself contains '#' (a nested-heading link, [[Ideas#H1#H2]])", () => {
+		const vm = makeViewsManager();
+		const view = vm.getViews()[0];
+		const folder = vm.addMetaFolder(view.id, null, "Folder source")!;
+		vm.setFolderSource(view.id, folder.id, source({ path: "Projects", removedRefs: ["block:Projects/Ideas.md#H1#H2"] }));
+
+		vm.onVaultRename("Projects/Ideas.md", "Projects/Renamed.md");
+
+		const rewritten = vm.getNode(view.id, folder.id)!.folderSource!;
+		// Splitting at the last '#' (the R4 fix) would misread the path as 'Projects/Ideas.md#H1' and
+		// leave this key unrewritten; splitting at the first would misread a '#'-in-path case (R4).
+		// Only matching the known `oldPath` by prefix gets both right.
+		expect(rewritten.removedRefs).toEqual(["block:Projects/Renamed.md#H1#H2"]);
+	});
+
 	it("end-to-end: removing a managed child, then renaming it, then refreshing, does not resurrect it under its new name", () => {
 		const app = new MockApp();
 		app.vault.seedFolder("Proj");
