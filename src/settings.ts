@@ -30,6 +30,11 @@ export interface AtlasSettings {
 	 * background (a "cut out of the dot" look), `false` matches normal text color. Only meaningful
 	 * when `retainIcons` is on. */
 	retainIconMatchBackground: boolean;
+	/** PR-1.F2: turns the open-note highlight (file/module/block/Item rows, `.is-active`) off and
+	 * back on. Read live by `updateActiveHighlight` itself, not just hidden via CSS, so turning it
+	 * off truly adds no class and turning it back on re-applies at once. Absent in an old
+	 * `data.json` (pre-PR-1.F1/F2) resolves to on, via `Object.assign` against `DEFAULT_SETTINGS`. */
+	highlightOpenNote: boolean;
 }
 
 export const DEFAULT_TO_DELETE_FOLDER = "_to_delete";
@@ -47,7 +52,17 @@ export const DEFAULT_SETTINGS: AtlasSettings = {
 	glowEnabled: false,
 	retainIcons: false,
 	retainIconMatchBackground: false,
+	highlightOpenNote: true,
 };
+
+/** PR-1.F2: a hand-edited `data.json` can hold any JSON value for `highlightOpenNote` (a string,
+ * a number, `null`...). The one stated rule: anything that isn't a real boolean falls back to the
+ * default (on), rather than throwing or being coerced by truthiness. Also covers the key being
+ * absent entirely (`undefined`), same outcome as `Object.assign` against `DEFAULT_SETTINGS` would
+ * already give, so this is safe to apply unconditionally after that assign. */
+export function normalizeHighlightOpenNote(raw: unknown): boolean {
+	return typeof raw === "boolean" ? raw : true;
+}
 
 /** Turns a raw `noAutoPromoteFolders` value (a textarea's lines, or whatever `data.json` holds) into
  * clean vault-relative folder paths: trims, strips leading/trailing `/`, drops blanks, and drops the
@@ -228,6 +243,17 @@ export class AtlasSettingTab extends PluginSettingTab {
 				toggle.setValue(this.plugin.settings.confirmAddToModule).onChange(async (value) => {
 					this.plugin.settings.confirmAddToModule = value;
 					await this.plugin.saveSettings();
+				})
+			);
+
+		new Setting(containerEl)
+			.setName("Highlight the open note")
+			.setDesc("Give the row(s) standing for the note open in the editor a visible highlight — the file row, its module's row if it's the interface note, and any of its blocks. Turn off to go back to no highlight.")
+			.addToggle((toggle) =>
+				toggle.setValue(this.plugin.settings.highlightOpenNote).onChange(async (value) => {
+					this.plugin.settings.highlightOpenNote = value;
+					await this.plugin.saveSettings();
+					this.plugin.refreshExplorerViews();
 				})
 			);
 
