@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { ApiSourceConfig, DataSourceConfig, DataSourceType } from "../../src/types";
+import { ApiSourceConfig, DataSourceConfig, DataSourceType, UnitRef, parseUnitRefKey, unitRefKey } from "../../src/types";
 
 describe("PR-3 — DataSourceConfig type discriminant", () => {
 	it("config shape includes type discriminant and narrows correctly for api type", () => {
@@ -41,5 +41,33 @@ describe("PR-3 — DataSourceConfig type discriminant", () => {
 		expect(folderStub.type).toBe("folder");
 		expect(tableStub.type).toBe("markdown-table");
 		expect(csvStub.type).toBe("csv");
+	});
+});
+
+describe("PR-1.F1 — parseUnitRefKey: the inverse of unitRefKey", () => {
+	it("round-trips a file ref", () => {
+		const ref: UnitRef = { kind: "file", path: "Quarry drones.md" };
+		expect(parseUnitRefKey(unitRefKey(ref))).toEqual(ref);
+	});
+
+	it("round-trips a folder ref", () => {
+		const ref: UnitRef = { kind: "folder", path: "Projects" };
+		expect(parseUnitRefKey(unitRefKey(ref))).toEqual(ref);
+	});
+
+	it("round-trips a block ref", () => {
+		const ref: UnitRef = { kind: "block", path: "Ideas.md", subpath: "^abc123" };
+		expect(parseUnitRefKey(unitRefKey(ref))).toEqual(ref);
+	});
+
+	it("round-trips a path with special characters (selector/regex metacharacters)", () => {
+		const ref: UnitRef = { kind: "file", path: 'Draft [v2] "final".md' };
+		expect(parseUnitRefKey(unitRefKey(ref))).toEqual(ref);
+	});
+
+	it("returns null for an unrecognised kind, a key with no colon, and a block key with no #", () => {
+		expect(parseUnitRefKey("widget:foo")).toBeNull();
+		expect(parseUnitRefKey("no-colon-here")).toBeNull();
+		expect(parseUnitRefKey("block:Ideas.md")).toBeNull();
 	});
 });
