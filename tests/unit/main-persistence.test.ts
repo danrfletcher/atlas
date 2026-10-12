@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { App } from "obsidian";
 import AtlasPlugin from "../../src/main";
-import { DEFAULT_SETTINGS } from "../../src/settings";
+import { AtlasSettings, DEFAULT_SETTINGS } from "../../src/settings";
 import { UnitIndex } from "../../src/unit-index";
 import { ViewsManager } from "../../src/views";
 import { StatusesManager } from "../../src/statuses";
@@ -124,5 +124,49 @@ describe("noAutoPromoteFolders persistence (G1)", () => {
 		await (plugin as unknown as { persistNow(): Promise<void> }).persistNow();
 		(plugin as unknown as { loadFromData(d: unknown): void }).loadFromData(saved[0]);
 		expect((plugin as unknown as { settings: AtlasSettings }).settings.noAutoPromoteFolders).toEqual(["Attachments", "Projects/Old/assets"]);
+	});
+});
+
+describe("highlightOpenNote persistence (PR-1.F2, F3)", () => {
+	function makeFullPlugin(settings: AtlasSettings, saved: unknown[]): AtlasPlugin {
+		const plugin = makePlugin();
+		const app = new App();
+		Object.assign(plugin, {
+			settings,
+			unitIndex: new UnitIndex(app, settings, []),
+			viewsManager: new ViewsManager(app, [], "default", () => {}),
+			statusesManager: new StatusesManager([], [], () => {}),
+			expandedModuleFolders: new Set<string>(),
+			saveData: async (data: unknown) => {
+				saved.push(data);
+			},
+		});
+		return plugin;
+	}
+
+	it("saving and reloading round-trips the key, both when on and when off", async () => {
+		for (const value of [true, false]) {
+			const settings: AtlasSettings = { ...DEFAULT_SETTINGS, highlightOpenNote: value };
+			const saved: unknown[] = [];
+			const plugin = makeFullPlugin(settings, saved);
+			await (plugin as unknown as { persistNow(): Promise<void> }).persistNow();
+
+			const reloaded = makePlugin();
+			(reloaded as unknown as { loadFromData(d: unknown): void }).loadFromData(saved[0]);
+			expect((reloaded as unknown as { settings: AtlasSettings }).settings.highlightOpenNote).toBe(value);
+		}
+	});
+
+	it("F3: adds no key to the saved settings object other than highlightOpenNote itself", async () => {
+		const before: AtlasSettings = { ...DEFAULT_SETTINGS };
+		const after: AtlasSettings = { ...DEFAULT_SETTINGS, highlightOpenNote: false };
+		const savedBefore: unknown[] = [];
+		const savedAfter: unknown[] = [];
+		await (makeFullPlugin(before, savedBefore) as unknown as { persistNow(): Promise<void> }).persistNow();
+		await (makeFullPlugin(after, savedAfter) as unknown as { persistNow(): Promise<void> }).persistNow();
+
+		const keysBefore = Object.keys((savedBefore[0] as { settings: AtlasSettings }).settings).sort();
+		const keysAfter = Object.keys((savedAfter[0] as { settings: AtlasSettings }).settings).sort();
+		expect(keysAfter).toEqual(keysBefore);
 	});
 });

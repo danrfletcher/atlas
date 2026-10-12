@@ -5,7 +5,7 @@ import { App as MockApp } from "../mocks/obsidian";
 import { ViewsManager } from "../../src/views";
 import { ApiItemState, FolderSourceConfig, PLACEHOLDER_ROW_KIND, UnitRef, View, ViewNode } from "../../src/types";
 import { YamlFilterRule } from "../../src/folder-filter";
-import { DEFAULT_SETTINGS } from "../../src/settings";
+import { DEFAULT_SETTINGS, AtlasSettings } from "../../src/settings";
 import { callRenderApiItemRow, callRenderNodeList, makeFakeExplorer, makeStatusesManager, proto } from "../unit/explorer-view-sort-truncate-helpers";
 
 /** PR-1.F2 integration: the filter box and selection against a Folder source's hidden and "filtered out"
@@ -188,9 +188,12 @@ interface HighlightHarness {
 	 * no-op stub — `onOpen`'s own final `await this.render()` is irrelevant to this test, which only
 	 * needs the two workspace subscriptions it wires before that call. */
 	callOnOpen: () => Promise<void>;
+	/** PR-1.F2: the plugin's own settings object passed into (or created by) `setupHighlightHarness` —
+	 * a test can flip `settings.highlightOpenNote` directly and call `callUpdateActiveHighlight` again. */
+	settings: AtlasSettings;
 }
 
-function setupHighlightHarness(): HighlightHarness {
+function setupHighlightHarness(settings: AtlasSettings = { ...DEFAULT_SETTINGS }): HighlightHarness {
 	const app = new MockApp();
 	app.vault.seedFolder("Projects");
 	app.vault.seedFile("Projects/Projects.md");
@@ -232,7 +235,7 @@ function setupHighlightHarness(): HighlightHarness {
 
 	const plugin = {
 		statusesManager: sm,
-		settings: DEFAULT_SETTINGS,
+		settings,
 		app: app as unknown as App,
 		unitIndex: { onChange: vi.fn(() => () => {}) },
 		viewsManager: {
@@ -367,6 +370,7 @@ function setupHighlightHarness(): HighlightHarness {
 		v,
 		triggerWorkspace,
 		callOnOpen: () => (proto.onOpen as unknown as (this: unknown) => Promise<void>).call(fake),
+		settings,
 	};
 }
 
@@ -637,5 +641,74 @@ describe("PR-1.F1 — active highlight: file, module, block and Item rows via th
 		h.triggerWorkspace("active-leaf-change", {});
 		expect(h.content.querySelector(`[data-select-key="${h.quarryNested.id}"]`)!.classList.contains("is-active")).toBe(false);
 		expect(h.content.querySelector(`[data-select-key="${h.notesNode.id}"]`)!.classList.contains("is-active")).toBe(true);
+	});
+});
+
+/** PR-1.F2: the global "Highlight the open note" setting. `updateActiveHighlight` itself must read
+ * `plugin.settings.highlightOpenNote` fresh on every call (not a cached copy), so these exercise the
+ * real method directly against the setting flipped on the same (per-harness) settings object — no
+ * stub of the matching rule anywhere here, same as the PR-1.F1 suite above. */
+describe("PR-1.F2 — the 'Highlight the open note' setting (G9, GP7, E9)", () => {
+	it("G9: with the setting off, no row anywhere carries is-active even though the open file has matching rows", async () => {
+		const h = setupHighlightHarness({ ...DEFAULT_SETTINGS, highlightOpenNote: false });
+		await renderHighlightTree(h);
+		h.setActiveFile({ path: "Quarry drones.md" } as TFile);
+		callUpdateActiveHighlight(h);
+
+		expect(activeRefKeys(h)).toEqual([]);
+	});
+
+	it("GP7: turning the setting off clears every highlight at once, and turning it back on restores it with no reload and no scrolling", async () => {
+		const h = setupHighlightHarness();
+		await renderHighlightTree(h);
+		h.setActiveFile({ path: "Quarry drones.md" } as TFile);
+		callUpdateActiveHighlight(h);
+		expect(activeRefKeys(h).length).toBeGreaterThan(0);
+
+		// Off: every highlight disappears at once, straight from this one call — no re-render.
+		h.settings.highlightOpenNote = false;
+		callUpdateActiveHighlight(h);
+		expect(activeRefKeys(h)).toEqual([]);
+
+		// GP7 continued: opening another note while off adds none.
+		h.setActiveFile({ path: "Notes.md" } as TFile);
+		callUpdateActiveHighlight(h);
+		expect(activeRefKeys(h)).toEqual([]);
+
+		// Back on: the currently open note's visible rows are highlighted again at once, with no
+		// reload and no scrolling — just the next call to the same method.
+		h.settings.highlightOpenNote = true;
+		callUpdateActiveHighlight(h);
+		expect(h.content.querySelector(`[data-select-key="${h.notesNode.id}"]`)!.classList.contains("is-active")).toBe(true);
+	});
+
+	it("E9: flipping the setting re-applies/clears on two separate Atlas leaves sharing the same settings object, both changing together", async () => {
+		const sharedSettings: AtlasSettings = { ...DEFAULT_SETTINGS };
+		const leafA = setupHighlightHarness(sharedSettings);
+		const leafB = setupHighlightHarness(sharedSettings);
+		await renderHighlightTree(leafA);
+		await renderHighlightTree(leafB);
+		leafA.setActiveFile({ path: "Quarry drones.md" } as TFile);
+		leafB.setActiveFile({ path: "Quarry drones.md" } as TFile);
+		callUpdateActiveHighlight(leafA);
+		callUpdateActiveHighlight(leafB);
+		expect(activeRefKeys(leafA).length).toBeGreaterThan(0);
+		expect(activeRefKeys(leafB).length).toBeGreaterThan(0);
+
+		// A real settings-tab toggle mutates the one shared settings object then calls
+		// refreshExplorerViews(), which re-runs the highlight on every leaf — modelled here by
+		// mutating the shared object once and re-invoking updateActiveHighlight on each leaf, the
+		// same single pass a real refreshExplorerViews() loop would drive.
+		sharedSettings.highlightOpenNote = false;
+		callUpdateActiveHighlight(leafA);
+		callUpdateActiveHighlight(leafB);
+		expect(activeRefKeys(leafA)).toEqual([]);
+		expect(activeRefKeys(leafB)).toEqual([]);
+
+		sharedSettings.highlightOpenNote = true;
+		callUpdateActiveHighlight(leafA);
+		callUpdateActiveHighlight(leafB);
+		expect(activeRefKeys(leafA).length).toBeGreaterThan(0);
+		expect(activeRefKeys(leafB).length).toBeGreaterThan(0);
 	});
 });
