@@ -1,4 +1,6 @@
 import { describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { App } from "obsidian";
 import AtlasPlugin from "../../src/main";
 import { AtlasSettings, DEFAULT_SETTINGS } from "../../src/settings";
@@ -168,5 +170,49 @@ describe("highlightOpenNote persistence (PR-1.F2, F3)", () => {
 		const keysBefore = Object.keys((savedBefore[0] as { settings: AtlasSettings }).settings).sort();
 		const keysAfter = Object.keys((savedAfter[0] as { settings: AtlasSettings }).settings).sort();
 		expect(keysAfter).toEqual(keysBefore);
+	});
+
+	it("F3: loading the v0.2.1 fixture through loadFromData and persisting it adds no settings key other than noAutoPromoteFolders and highlightOpenNote, and no new top-level key", async () => {
+		// Real end-to-end load -> persist against pre-PR-1.F1/F2 data, not a comparison of two
+		// post-PR saves that differ only in highlightOpenNote's value (which can't catch a stray
+		// extra key landing on both sides identically).
+		const fixture = JSON.parse(readFileSync(join(__dirname, "../fixtures/data-v0.2.1.json"), "utf8"));
+
+		const plugin = makePlugin();
+		(plugin as unknown as { loadFromData(d: unknown): void }).loadFromData(fixture);
+		const loaded = plugin as unknown as {
+			settings: AtlasSettings;
+			manualPromotions: UnitRef[];
+			dismissedByView: Record<string, UnitRef[]>;
+			dismissedGlobal: UnitRef[];
+			addedItems: AddedItem[];
+		};
+
+		const app = new App();
+		const saved: unknown[] = [];
+		// Mirrors `AtlasPlugin.onload`'s own construction of these from the loaded data, so
+		// `persistNow` sees exactly what a real reload of this fixture would.
+		Object.assign(plugin, {
+			unitIndex: new UnitIndex(app, loaded.settings, loaded.manualPromotions, loaded.dismissedByView, loaded.dismissedGlobal, loaded.addedItems),
+			viewsManager: new ViewsManager(app, fixture.views ?? [], fixture.activeViewId ?? "", () => {}),
+			statusesManager: new StatusesManager(fixture.statusSets ?? [], fixture.colorPalette ?? [], () => {}),
+			saveData: async (data: unknown) => {
+				saved.push(data);
+			},
+		});
+
+		await (plugin as unknown as { persistNow(): Promise<void> }).persistNow();
+		expect(saved).toHaveLength(1);
+		const persisted = saved[0] as Record<string, unknown>;
+
+		const settingsKeys = Object.keys(persisted.settings as AtlasSettings).sort();
+		expect(settingsKeys).toEqual([...Object.keys(fixture.settings), "noAutoPromoteFolders", "highlightOpenNote"].sort());
+
+		// No top-level key beyond what PR-2 already established (dismissedByView/dismissedGlobal/
+		// addedItems, defaulted here since the fixture predates them) — PR-1.F2 adds none of its own.
+		const topLevelKeys = Object.keys(persisted).sort();
+		expect(topLevelKeys).toEqual(
+			["settings", "manualPromotions", "views", "activeViewId", "expandedModuleFolders", "statusSets", "colorPalette", "dismissedByView", "dismissedGlobal", "addedItems"].sort()
+		);
 	});
 });
