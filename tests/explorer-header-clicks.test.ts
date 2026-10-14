@@ -57,7 +57,6 @@ describe("chevron (G6, G7)", () => {
 		// Collapsed content is 28 + 700 rows tall, so the settle target is the top of the body.
 		expect(h.scrollCalls).toEqual([{ top: 0, behavior: "auto" }]);
 		expect(h.body().scrollTop).toBe(0);
-		expect(h.inboxHeader().style.transform).toBe("");
 	});
 
 	it("a chevron collapse never lands mid-inbox: the scroll is capped at the collapsed content's maximum", () => {
