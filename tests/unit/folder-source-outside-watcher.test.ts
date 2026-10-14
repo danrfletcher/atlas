@@ -329,7 +329,6 @@ describe("folder-source-outside-watcher — PR-1 R1: path normalization is cache
 			])
 		);
 		expect(realpathSyncSpy).not.toHaveBeenCalled();
->>>>>>> origin/main
 	});
 });
 
