@@ -192,7 +192,9 @@ describe("folder-source-outside-watcher — PR-2 R5: keyed by resolved path, not
 		rmSync(dir, { recursive: true, force: true });
 		// PR-1 R4 fix: cleaning this up here, not inline after the test's own `expect`, means a failing
 		// assertion still removes the alias instead of leaking it in tmpdir.
-		if (alias) rmSync(alias, { force: true });
+		// `recursive: true` is required here even though `alias` is a symlink, not a real directory: on Node 24.x,
+		// `rmSync` on a dir-type symlink throws "Path is a directory" without it.
+		if (alias) rmSync(alias, { recursive: true, force: true });
 	});
 
 	it("a trailing slash on one source's path is still the same folder as the other's — one watcher, not two", () => {
@@ -327,6 +329,7 @@ describe("folder-source-outside-watcher — PR-1 R1: path normalization is cache
 			])
 		);
 		expect(realpathSyncSpy).not.toHaveBeenCalled();
+>>>>>>> origin/main
 	});
 });
 
