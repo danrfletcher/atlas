@@ -1000,7 +1000,7 @@ export class AtlasExplorerView extends ItemView {
 		void this.plugin.csvSourceController.refresh(
 			node,
 			node.csvSource,
-			(changed) => (changed ? this.plugin.viewsManager.notifyExternalMutation() : this.plugin.viewsManager.notifyChangeOnly()),
+			(changed) => (changed ? this.plugin.viewsManager.notifyExternalMutation() : this.plugin.viewsManager.notifyChange()),
 			{
 				vault: this.plugin.app.vault,
 				trigger,
@@ -1025,7 +1025,7 @@ export class AtlasExplorerView extends ItemView {
 		void this.plugin.markdownTableSourceController.refresh(
 			node,
 			node.markdownTableSource,
-			(changed) => (changed ? this.plugin.viewsManager.notifyExternalMutation() : this.plugin.viewsManager.notifyChangeOnly()),
+			(changed) => (changed ? this.plugin.viewsManager.notifyExternalMutation() : this.plugin.viewsManager.notifyChange()),
 			{
 				vault: this.plugin.app.vault,
 				trigger,
@@ -1121,7 +1121,7 @@ export class AtlasExplorerView extends ItemView {
 		// the watcher-sync listener it triggered read the clone's outside path as unset and opened no
 		// watcher for it. Re-notifying now (no second save — the path store isn't part of `data.json`)
 		// re-runs that same sync with the path now in place.
-		if (copiedOutsidePath) this.plugin.viewsManager.notifyChangeOnly();
+		if (copiedOutsidePath) this.plugin.viewsManager.notifyChange();
 	}
 
 	/** G9: opens an API item's already-attached note/block/module. Only ever called once `item.noteRef`

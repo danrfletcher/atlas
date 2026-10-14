@@ -568,7 +568,7 @@ export class ViewsManager {
 
 	/** Re-renders listeners without persisting anything — for a change that is only visible on screen
 	 * (e.g. an Outside-Vault source's unresolved/reconnected state), which `save` alone would skip. */
-	private notifyChange(): void {
+	notifyChange(): void {
 		this.folderSourceOwnersVersion++;
 		for (const cb of this.changeListeners) cb();
 	}
@@ -1348,7 +1348,7 @@ export class ViewsManager {
 		const found = this.findNode(view.root, nodeId);
 		if (!found || !canHoldSource(found.node) || !found.node.folderSource) return false;
 		const ownerId = found.node.id;
-		// PR-1 R2 fix: `reconcileOutsideChildChanges` below can rename or demote a managed row the user
+		// PR-2 R2 fix: `reconcileOutsideChildChanges` below can rename or demote a managed row the user
 		// re-nested anywhere else in the view (`collectManagedMatches` walks the whole `view.root`, not
 		// just this owner's own children) — snapshotting only `found.node`'s own subtree missed those
 		// writes, so the save-vs-notify decision below could choose notifyChange() (render only) for a
@@ -1606,13 +1606,6 @@ export class ViewsManager {
 	 * other change here. */
 	notifyExternalMutation(): void {
 		this.save();
-	}
-
-	/** PR-1 R4 fix: the `CsvSourceController`/`MarkdownTableSourceController` equivalent of
-	 * `refreshFolderSource`'s own no-op branch — re-renders so an in-memory-only change (e.g. the dot's
-	 * `fetchedAt`) is still visible, without writing `data.json` for a refresh that found no change. */
-	notifyChangeOnly(): void {
-		this.notifyChange();
 	}
 
 	/** F9 rename integrity: rewrite every matching ref (exact + prefix) across every view. */
