@@ -254,8 +254,38 @@
 }
 
 .atlas-row.is-active {
-	background: var(--background-modifier-active-hover);
+	background: var(--nav-item-background-active);
 	font-weight: 600;
+}
+
+/* R1 fix: the `::before` bar below needs a positioned ancestor, but that must never be this rule
+ * applied unconditionally — `.atlas-row.is-active` has specificity (0,2,0), which beats
+ * `.atlas-row-virtual { position: absolute }` (0,1,0), the class every virtualised inbox row gets
+ * (`renderVirtualizedInboxRows`). Forcing `position: relative` on an active virtual row would drop
+ * it back into normal flow inside `.atlas-inbox-spacer`, turning its `top: i*28px` into a relative
+ * offset instead of an absolute one — harmless with exactly one active inbox row, but stacking every
+ * later active row at the wrong height once two or more are visible at once (GP2/GP6: two promoted
+ * blocks of the open file, or a file plus its blocks, both in the inbox). A virtual row is already
+ * `position: absolute`, which alone establishes the positioning context the `::before` bar needs, so
+ * only a non-virtual active row needs this rule. */
+.atlas-row.is-active:not(.atlas-row-virtual) {
+	position: relative;
+}
+
+/* PR-1.F1 (G8/E7): a left accent bar, not the box-shadow ring `.is-selected` (below) uses — the two
+ * styles are on different properties entirely so a row that is both open and selected shows both at
+ * once, with neither clobbering the other regardless of declaration order. An absolutely-positioned
+ * pseudo-element (rather than `border-left`) draws it without changing the row's own box size, so
+ * every row keeps the exact same width/alignment whether or not it's active. */
+.atlas-row.is-active::before {
+	content: "";
+	position: absolute;
+	top: 0;
+	bottom: 0;
+	left: 0;
+	width: 2px;
+	border-radius: 2px 0 0 2px;
+	background: var(--interactive-accent);
 }
 
 /* PR 20: multi-select highlight — a distinct treatment from `.is-active` (the currently-open-file
