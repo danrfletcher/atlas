@@ -489,6 +489,17 @@ input.atlas-yaml-key-invalid[type="text"]:not(:disabled) {
 	margin: 0;
 }
 
+/* PR-1 R2 fix: F1 R1 only fixed the error paragraph's own margin — this inline list (shown while the
+ * key field has focus) had no CSS at all, so up to 50 matches pushed every rule row below it down the
+ * same amount. Bounded height plus scroll keeps that push-down small and constant regardless of how
+ * many frontmatter keys the vault has. Scoped to this modifier class only, the same way the sibling
+ * fix above is scoped, so the other `atlas-folder-suggest-list` uses (CSV/folder/API path pickers,
+ * each already sized to its own modal section) are untouched. */
+.atlas-yaml-key-suggest {
+	max-height: 160px;
+	overflow-y: auto;
+}
+
 /* PR-4 (G3): persistent unsandboxed-code warning next to the JS mapping editor — visible without
  * scrolling, so it sits directly above the textarea rather than in a tooltip/collapsed section. */
 .atlas-api-js-warning {
