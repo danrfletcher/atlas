@@ -59,7 +59,9 @@ function install(saved: Saved[], target: object, key: string, descriptor: Proper
 	Object.defineProperty(target, key, { configurable: true, ...descriptor });
 }
 
-export function makeSectionHarness(): SectionHarness {
+export function makeSectionHarness(options: { bucketRows?: number; inboxRows?: number } = {}): SectionHarness {
+	const bucketRows = options.bucketRows ?? BUCKET_ROWS;
+	const inboxRows = options.inboxRows ?? INBOX_ROWS;
 	let headerH = 28;
 	let viewH = VIEWPORT_H;
 	const scrollCalls: ScrollCall[] = [];
@@ -71,7 +73,7 @@ export function makeSectionHarness(): SectionHarness {
 
 	/** Geometry in scroll-body coordinates (content-space), derived from the rendered DOM. */
 	const geometry = () => {
-		const bucketContent = isCollapsed(".atlas-bucket > .atlas-meta-children") ? 0 : BUCKET_ROWS * ROW;
+		const bucketContent = isCollapsed(".atlas-bucket > .atlas-meta-children") ? 0 : bucketRows * ROW;
 		const bucketH = headerH + bucketContent;
 		const spacer = document.querySelector<HTMLElement>(".atlas-inbox-spacer");
 		const inboxContent = isCollapsed(".atlas-inbox > .atlas-meta-children") ? 0 : parseFloat(spacer?.style.height ?? "0") || 0;
@@ -95,6 +97,10 @@ export function makeSectionHarness(): SectionHarness {
 			return { top: sectionTop, height: headerH };
 		}
 		if (el.classList.contains("atlas-inbox-spacer")) return { top: g.inboxTop + headerH, height: g.spacerH };
+		if (el.classList.contains("atlas-meta-children")) {
+			if (el.closest(".atlas-inbox")) return { top: g.inboxTop + headerH, height: g.spacerH };
+			return { top: headerH, height: g.bucketH - headerH };
+		}
 		return { top: 0, height: 0 };
 	};
 
@@ -152,7 +158,7 @@ export function makeSectionHarness(): SectionHarness {
 	const openAddFileModal = vi.fn();
 	const showInboxHeaderMenu = vi.fn();
 	const setInboxMode = vi.fn();
-	const units = fileUnits(INBOX_ROWS);
+	const units = fileUnits(inboxRows);
 	const plugin = {
 		app: { workspace: { on: vi.fn(() => ({})) }, vault: { getAbstractFileByPath: () => null } },
 		unitIndex: { getUnits: () => units, onChange: vi.fn(() => () => {}) },
@@ -175,7 +181,7 @@ export function makeSectionHarness(): SectionHarness {
 		renderToolbar: (container: HTMLElement) => container.createDiv({ cls: "atlas-toolbar" }),
 		// The 60 bucket rows; their content doesn't matter to the header behaviour under test.
 		renderNodeList: async (_nodes: unknown, container: HTMLElement) => {
-			for (let i = 0; i < BUCKET_ROWS; i++) container.createDiv({ cls: "atlas-row atlas-row-unit" });
+			for (let i = 0; i < bucketRows; i++) container.createDiv({ cls: "atlas-row atlas-row-unit" });
 		},
 		resolveRef: async (ref: { path: string }) => ({ text: ref.path, icon: "file" }),
 		matchesFilter: () => true,

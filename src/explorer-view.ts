@@ -19,7 +19,7 @@ import { createInterfaceNote, findInterfaceNote } from "./interface-notes";
 import { addBlock } from "./commands";
 import { addCreateModuleItem, startCreateModule, unitForRef } from "./create-module";
 import { CreateKind, addCreateItem, startCreateFromMeta } from "./create-from-meta";
-import { SwapCandidate, SwapPickerModal, buildSwapCandidates, canSwapForAtlasFolder, canSwapNode } from "./swap";
+import { SwapCandidate, SwapPickerModal, SwapSourceBlock, buildSwapCandidates, canSwapForAtlasFolder, canSwapNode } from "./swap";
 import { noticeIfLinksNotUpdated } from "./links-notice";
 import { generateBlockId } from "./display-text";
 import { ApiSourceModal } from "./api-source-modal";
@@ -63,44 +63,7 @@ export function computeInboxWindow(
 	return { start, end };
 }
 
-export interface StickyHeaderInput {
-	scrollTop: number;
-	viewportHeight: number;
-	/** Natural top of the bucket section, in scroll-body coordinates. */
-	bucketTop: number;
-	bucketHeaderHeight: number;
-	/** Natural top of the inbox section (where its header sits when not stuck). */
-	inboxTop: number;
-	inboxHeaderHeight: number;
-}
-
-export interface StickyHeaderLayout {
-	/** False when the panel is too short to hold both headers and a row (E2): both stay in flow. */
-	stuck: boolean;
-	/** Scroll-body position of the bucket header. It stays at the top edge for the whole scroll. */
-	bucketY: number;
-	/** Scroll-body position of the inbox header. */
-	inboxY: number;
-	inboxPosition: "flow" | "stacked" | "pinned";
-}
-
-/** PR-1.F1 (G3, G4, E2): where the two section headers sit for a given scroll. The bucket header
- * always stays at the top edge. The inbox header stays at its natural position, unless that lies
- * below the bottom edge (pinned there) or above the line directly under the bucket header (stacked
- * there). Pure, so the boundaries are tested without a layout engine. */
-export function computeStickyHeaders(input: StickyHeaderInput): StickyHeaderLayout {
-	const { scrollTop, viewportHeight, bucketTop, bucketHeaderHeight, inboxTop, inboxHeaderHeight } = input;
-	const inFlow: StickyHeaderLayout = { stuck: false, bucketY: bucketTop, inboxY: inboxTop, inboxPosition: "flow" };
-	if (viewportHeight < bucketHeaderHeight + inboxHeaderHeight + INBOX_ROW_HEIGHT) return inFlow;
-	const bucketY = Math.max(bucketTop, scrollTop);
-	const stackY = scrollTop + bucketHeaderHeight;
-	const pinY = scrollTop + viewportHeight - inboxHeaderHeight;
-	if (inboxTop > pinY) return { stuck: true, bucketY, inboxY: pinY, inboxPosition: "pinned" };
-	if (inboxTop < stackY) return { stuck: true, bucketY, inboxY: stackY, inboxPosition: "stacked" };
-	return { stuck: true, bucketY, inboxY: inboxTop, inboxPosition: "flow" };
-}
-
-/** PR-1.F1 (G5, G7): the scroll position that puts a section's header at its stuck position, with
+/** PR-1.B1 (G5, G7): the scroll position that puts a section's header at its stuck position, with
  * the headers above it stacked at the top. Title clicks and collapse settles both land here. */
 export function stuckScrollTarget(headerTop: number, stackOffset: number, maxScrollTop: number): number {
 	return Math.min(Math.max(0, maxScrollTop), Math.max(0, headerTop - stackOffset));
@@ -635,14 +598,17 @@ export class AtlasExplorerView extends ItemView {
 	/** Both sections start open on every load and are never persisted (PR-1.S1 / F8). */
 	private bucketCollapsed = false;
 	private inboxCollapsed = false;
-	/** PR-1.F1: the one scroll body and the section parts the sticky headers and title clicks act on.
-	 * Set by `render()` after each rebuild; null before the first render. */
+	/** PR-1.B1: the one scroll body and the section parts the sticky headers and title clicks act on.
+	 * `bucketWrap`/`inboxWrap` (each section's `.atlas-meta-children`) stand in for the section
+	 * element itself when measuring natural (unstuck) position — `.atlas-section` is `display:
+	 * contents` so it has no box of its own to measure. Set by `render()` after each rebuild; null
+	 * before the first render. */
 	private stickyEls: {
 		body: HTMLElement;
-		bucketEl: HTMLElement;
 		bucketHeader: HTMLElement;
-		inboxEl: HTMLElement;
+		bucketWrap: HTMLElement;
 		inboxHeader: HTMLElement;
+		inboxWrap: HTMLElement;
 	} | null = null;
 	/** PR-1.F1: bumped by every header click, so a title scroll still waiting for an expansion is
 	 * dropped once a newer click supersedes it (E4, chevron-then-title). */
@@ -1034,7 +1000,7 @@ export class AtlasExplorerView extends ItemView {
 		void this.plugin.csvSourceController.refresh(
 			node,
 			node.csvSource,
-			(changed) => (changed ? this.plugin.viewsManager.notifyExternalMutation() : this.plugin.viewsManager.notifyChangeOnly()),
+			(changed) => (changed ? this.plugin.viewsManager.notifyExternalMutation() : this.plugin.viewsManager.notifyChange()),
 			{
 				vault: this.plugin.app.vault,
 				trigger,
@@ -1059,7 +1025,7 @@ export class AtlasExplorerView extends ItemView {
 		void this.plugin.markdownTableSourceController.refresh(
 			node,
 			node.markdownTableSource,
-			(changed) => (changed ? this.plugin.viewsManager.notifyExternalMutation() : this.plugin.viewsManager.notifyChangeOnly()),
+			(changed) => (changed ? this.plugin.viewsManager.notifyExternalMutation() : this.plugin.viewsManager.notifyChange()),
 			{
 				vault: this.plugin.app.vault,
 				trigger,
@@ -1155,7 +1121,7 @@ export class AtlasExplorerView extends ItemView {
 		// the watcher-sync listener it triggered read the clone's outside path as unset and opened no
 		// watcher for it. Re-notifying now (no second save — the path store isn't part of `data.json`)
 		// re-runs that same sync with the path now in place.
-		if (copiedOutsidePath) this.plugin.viewsManager.notifyChangeOnly();
+		if (copiedOutsidePath) this.plugin.viewsManager.notifyChange();
 	}
 
 	/** G9: opens an API item's already-attached note/block/module. Only ever called once `item.noteRef`
@@ -1517,12 +1483,17 @@ export class AtlasExplorerView extends ItemView {
 			// The body has been restored by now (`renderVirtualizedInboxRows` runs inside the await above),
 			// so later renders can read it from the DOM again.
 			this.pendingScrollTop = null;
-			// Both sections always render their header; a render without them has nothing to stack.
+			// Both sections always render their header and wrap; a render without them has nothing to stack.
 			const bucketHeader = bucketEl.querySelector<HTMLElement>(":scope > .atlas-section-header");
+			const bucketWrap = bucketEl.querySelector<HTMLElement>(":scope > .atlas-meta-children");
 			const inboxHeader = inboxEl.querySelector<HTMLElement>(":scope > .atlas-section-header");
-			this.stickyEls = bucketHeader && inboxHeader ? { body: scrollBody, bucketEl, bucketHeader, inboxEl, inboxHeader } : null;
-			this.observeInboxLayout(container, scrollBody, bucketEl);
-			this.updateStickyHeaders();
+			const inboxWrap = inboxEl.querySelector<HTMLElement>(":scope > .atlas-meta-children");
+			this.stickyEls =
+				bucketHeader && bucketWrap && inboxHeader && inboxWrap
+					? { body: scrollBody, bucketHeader, bucketWrap, inboxHeader, inboxWrap }
+					: null;
+			this.observeInboxLayout(container, scrollBody, bucketWrap ?? bucketEl);
+			this.updateStickyLayout();
 
 			if (activeRowKey) {
 				const restored = container.querySelector<HTMLElement>(`[data-select-key="${CSS.escape(activeRowKey)}"]`);
@@ -1549,15 +1520,17 @@ export class AtlasExplorerView extends ItemView {
 
 	/** PR-1.S1: a ResizeObserver on the fixed part of the panel, the scroll body and the bucket. Those
 	 * are the things whose size or position moves the inbox without any scroll (bucket collapse
-	 * animation, folder fold, filter row, toolbar wrap), so each one redraws the inbox window. */
-	private observeInboxLayout(container: HTMLElement, scrollBody: HTMLElement, bucketEl: HTMLElement): void {
-		// PR-1.F1: header heights and panel height move the stacked headers as well, so they re-measure here.
+	 * animation, folder fold, filter row, toolbar wrap), so each one redraws the inbox window.
+	 * PR-1.B1: `bucketWrap` stands in for the (now `display: contents`) bucket section itself — a
+	 * `display: contents` element reports no box to a ResizeObserver. */
+	private observeInboxLayout(container: HTMLElement, scrollBody: HTMLElement, bucketWrap: HTMLElement): void {
+		// PR-1.B1: header heights and panel height move the sticky CSS var and short-panel guard too.
 		const observer = new ResizeObserver(() => {
 			this.inboxRedraw?.();
-			this.updateStickyHeaders();
+			this.updateStickyLayout();
 		});
 		observer.observe(scrollBody);
-		observer.observe(bucketEl);
+		observer.observe(bucketWrap);
 		for (const child of Array.from(container.children)) {
 			if (child !== scrollBody) observer.observe(child);
 		}
@@ -1566,55 +1539,37 @@ export class AtlasExplorerView extends ItemView {
 			observer.observe(this.stickyEls.inboxHeader);
 		}
 		this.inboxLayoutObserver = observer;
-		// PR-1.F1 R1: synchronous, not rAF-scheduled — `scroll` already fires at most once per frame
-		// (the compositor-driven scroll itself is what's already a frame ahead of this handler), so
-		// queuing the header move into a further rAF only adds a second frame of lag behind the content,
-		// visible as jitter during fast trackpad scrolls.
-		scrollBody.addEventListener("scroll", () => this.updateStickyHeaders());
 	}
 
-	/** PR-1.F1 (G3, G4, E2): moves the two section headers for the body's current scroll. Headers stay
-	 * in normal flow and are shifted with a transform, so section layout and the inbox window never
-	 * change. Also keeps `scroll-padding-top`/`scroll-padding-bottom` clear of whichever headers are
-	 * currently stuck over the content, so a programmatic scroll never hides a row behind them. */
-	private updateStickyHeaders(): void {
+	/** PR-1.B1 (E2, E5): keeps `--atlas-bucket-label-h` current from the bucket header's real height,
+	 * so the Inbox label's CSS `top` (styles.css) stacks directly under it, including after a
+	 * font-size or zoom change. Also toggles the short-panel guard class that takes both labels out of
+	 * `position: sticky` when the panel is too short to show both headers plus a row. The actual
+	 * pinning itself is the compositor's job now (CSS `position: sticky`); this only feeds it the one
+	 * value it can't express in pure CSS. */
+	private updateStickyLayout(): void {
 		const s = this.stickyEls;
 		if (!s || !s.body.isConnected) return;
-		const bodyTop = s.body.getBoundingClientRect().top;
-		// Section rects are untransformed, so this is the section's layout position at any scroll.
-		const layoutTop = (el: HTMLElement) => el.getBoundingClientRect().top - bodyTop + s.body.scrollTop;
-		const bucketTop = layoutTop(s.bucketEl);
-		const inboxTop = layoutTop(s.inboxEl);
 		const bucketHeaderHeight = s.bucketHeader.getBoundingClientRect().height;
 		const inboxHeaderHeight = s.inboxHeader.getBoundingClientRect().height;
-		const layout = computeStickyHeaders({
-			scrollTop: s.body.scrollTop,
-			viewportHeight: s.body.clientHeight,
-			bucketTop,
-			bucketHeaderHeight,
-			inboxTop,
-			inboxHeaderHeight,
-		});
-		s.bucketHeader.style.transform = layout.bucketY === bucketTop ? "" : `translateY(${layout.bucketY - bucketTop}px)`;
-		s.inboxHeader.style.transform = layout.inboxY === inboxTop ? "" : `translateY(${layout.inboxY - inboxTop}px)`;
-		// PR-1.F1 R2: the bucket header is the only one stuck over the top of the content in the
-		// "pinned" and (unstuck-inbox) "flow" sub-states — the stacked height only applies while the
-		// inbox header has *also* moved to sit directly under it. A pinned inbox header instead covers
-		// content at the bottom edge, so that's a bottom padding, not a (too-large) top one.
-		const topPadding = !layout.stuck ? 0 : layout.inboxPosition === "stacked" ? bucketHeaderHeight + inboxHeaderHeight : bucketHeaderHeight;
-		const bottomPadding = layout.stuck && layout.inboxPosition === "pinned" ? inboxHeaderHeight : 0;
-		s.body.style.scrollPaddingTop = `${topPadding}px`;
-		s.body.style.scrollPaddingBottom = `${bottomPadding}px`;
+		s.body.style.setProperty("--atlas-bucket-label-h", `${bucketHeaderHeight}px`);
+		const fits = s.body.clientHeight >= bucketHeaderHeight + inboxHeaderHeight + INBOX_ROW_HEIGHT;
+		s.body.toggleClass("atlas-sticky-disabled", !fits);
 	}
 
 	/** PR-1.F1 (G5): where a section's header belongs once stuck: the bucket at the top, the inbox
-	 * directly under the bucket header. Clamped to the scrollable range. */
+	 * directly under the bucket header. Clamped to the scrollable range.
+	 * PR-1.B1: measured from the section's wrap (`.atlas-meta-children`), not the section element
+	 * itself — `.atlas-section` is `display: contents` and reports no box — then backed up by the
+	 * header's own height, since the header sits immediately before the wrap in flow. */
 	private sectionStuckTarget(key: SectionKey): number {
 		const s = this.stickyEls;
 		if (!s) return 0;
 		const bodyTop = s.body.getBoundingClientRect().top;
-		const sectionEl = key === "bucket" ? s.bucketEl : s.inboxEl;
-		const headerTop = sectionEl.getBoundingClientRect().top - bodyTop + s.body.scrollTop;
+		const header = key === "bucket" ? s.bucketHeader : s.inboxHeader;
+		const wrap = key === "bucket" ? s.bucketWrap : s.inboxWrap;
+		const headerHeight = header.getBoundingClientRect().height;
+		const headerTop = wrap.getBoundingClientRect().top - bodyTop + s.body.scrollTop - headerHeight;
 		const stackOffset = key === "bucket" ? 0 : s.bucketHeader.getBoundingClientRect().height;
 		return stuckScrollTarget(headerTop, stackOffset, s.body.scrollHeight - s.body.clientHeight);
 	}
@@ -3118,23 +3073,24 @@ export class AtlasExplorerView extends ItemView {
 
 	/** PR-2 (G6): the "Swap with…" picker over every vault file and folder plus every known block, minus
 	 * excluded and dot-folders and the item being replaced. PR-2 R4: free-block labels are read from
-	 * `freeBlockTextCache` only — it's kept current by vault events from plugin load, so this needs no
-	 * disk read even on a vault with thousands of free blocks. Promoted blocks have no equivalent cache
-	 * (per `resolveUnit`'s own doc comment, a smaller, bounded-impact gap — they're typically far fewer
-	 * in a real vault), so those still resolve async before the picker opens. */
+	 * `freeBlockTextCache` first — it's kept current by vault events from plugin load, so this is
+	 * normally a synchronous lookup with no disk read even on a vault with thousands of free blocks.
+	 * R2 fix: `populateAll` runs async on plugin load (`main.ts`), so a picker opened before it finishes
+	 * hit every free block as a cache miss, read as `""` and shown as "(empty block)" with no text to
+	 * search by (T10 dropped the filename from a free block's label). `resolveUnit` already falls back
+	 * to a direct disk read on a cache miss for this exact reason, so block text now goes through it
+	 * for both kinds — a free-block cache hit still costs nothing extra, since `resolveUnit` checks the
+	 * cache first. */
 	async openSwapPicker(view: View, node: ViewNode): Promise<void> {
 		const { plugin } = this;
 		const units = plugin.unitIndex.getUnits();
 		const freeBlockUnits = units.filter((unit) => unit.type === "free-block");
 		const promotedBlockUnits = units.filter((unit) => unit.type === "promoted-block");
-		const freeBlocks = freeBlockUnits.map((unit) => ({ ref: unitToRef(unit), text: plugin.freeBlockTextCache?.get(unit.path) ?? "" }));
-		const promotedBlocks = await Promise.all(
-			promotedBlockUnits.map(async (unit) => {
-				const resolved = await resolveUnit(plugin.app, plugin.settings, unit, plugin.freeBlockTextCache);
-				return { ref: unitToRef(unit), text: resolved?.text ?? "" };
-			})
-		);
-		const blocks = [...freeBlocks, ...promotedBlocks];
+		const resolveBlockText = async (unit: Unit): Promise<SwapSourceBlock> => {
+			const resolved = await resolveUnit(plugin.app, plugin.settings, unit, plugin.freeBlockTextCache);
+			return { ref: unitToRef(unit), text: resolved?.text ?? "" };
+		};
+		const blocks = await Promise.all([...freeBlockUnits, ...promotedBlockUnits].map(resolveBlockText));
 		const vault = plugin.app.vault;
 		const candidates = buildSwapCandidates({
 			files: vault.getFiles().map((file) => ({ path: file.path, name: file.name })),
@@ -3242,11 +3198,13 @@ export class AtlasExplorerView extends ItemView {
 		menu.addSeparator();
 		menu.addItem((item) => item.setTitle("Place in view…").setIcon("arrow-right-left").onClick(() => this.placeInViewFlow(ref)));
 		// PR-4 (G4-G6): the only removal mechanism for any inbox row, auto-promoted or manually-added
-		// (PR-3) alike — there is no separate "remove"/"un-add" item anywhere in this menu (F1). Outside
-		// Global view this only ever touches the current view's own dismiss set; invoked while the
-		// explorer is showing Global view it writes the single global-scope entry instead (G5), which
-		// `getInboxUnits`' dismissed-OR-check (view-scope reads global-or-own-view, global-scope reads
-		// only the global set) then applies at render time for every view, including ones never opened.
+		// (PR-3) alike — dismiss is the underlying write regardless of provenance (F1); the label below
+		// now reads "Remove" for added rows instead of "Dismiss" (Polish R1, PR-4 finding), but that is
+		// a label override only, not a second mechanism. Outside Global view this only ever touches the
+		// current view's own dismiss set; invoked while the explorer is showing Global view it writes
+		// the single global-scope entry instead (G5), which `getInboxUnits`' dismissed-OR-check
+		// (view-scope reads global-or-own-view, global-scope reads only the global set) then applies at
+		// render time for every view, including ones never opened.
 		// Polish R1 (PR-5 finding): a row already dismissed-and-revealed (via "Show Dismissed") gets
 		// an "Unhide" item that flips the same dismiss flag back off, instead of a second "Dismiss"
 		// that would just no-op. "hidden" is derived the same way `ViewsManager.getDismissedInboxUnits`
