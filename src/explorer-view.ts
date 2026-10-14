@@ -19,7 +19,7 @@ import { createInterfaceNote, findInterfaceNote } from "./interface-notes";
 import { addBlock } from "./commands";
 import { addCreateModuleItem, startCreateModule, unitForRef } from "./create-module";
 import { CreateKind, addCreateItem, startCreateFromMeta } from "./create-from-meta";
-import { SwapCandidate, SwapPickerModal, buildSwapCandidates, canSwapForAtlasFolder, canSwapNode } from "./swap";
+import { SwapCandidate, SwapPickerModal, SwapSourceBlock, buildSwapCandidates, canSwapForAtlasFolder, canSwapNode } from "./swap";
 import { noticeIfLinksNotUpdated } from "./links-notice";
 import { generateBlockId } from "./display-text";
 import { ApiSourceModal } from "./api-source-modal";
@@ -3073,23 +3073,24 @@ export class AtlasExplorerView extends ItemView {
 
 	/** PR-2 (G6): the "Swap with…" picker over every vault file and folder plus every known block, minus
 	 * excluded and dot-folders and the item being replaced. PR-2 R4: free-block labels are read from
-	 * `freeBlockTextCache` only — it's kept current by vault events from plugin load, so this needs no
-	 * disk read even on a vault with thousands of free blocks. Promoted blocks have no equivalent cache
-	 * (per `resolveUnit`'s own doc comment, a smaller, bounded-impact gap — they're typically far fewer
-	 * in a real vault), so those still resolve async before the picker opens. */
+	 * `freeBlockTextCache` first — it's kept current by vault events from plugin load, so this is
+	 * normally a synchronous lookup with no disk read even on a vault with thousands of free blocks.
+	 * R2 fix: `populateAll` runs async on plugin load (`main.ts`), so a picker opened before it finishes
+	 * hit every free block as a cache miss, read as `""` and shown as "(empty block)" with no text to
+	 * search by (T10 dropped the filename from a free block's label). `resolveUnit` already falls back
+	 * to a direct disk read on a cache miss for this exact reason, so block text now goes through it
+	 * for both kinds — a free-block cache hit still costs nothing extra, since `resolveUnit` checks the
+	 * cache first. */
 	async openSwapPicker(view: View, node: ViewNode): Promise<void> {
 		const { plugin } = this;
 		const units = plugin.unitIndex.getUnits();
 		const freeBlockUnits = units.filter((unit) => unit.type === "free-block");
 		const promotedBlockUnits = units.filter((unit) => unit.type === "promoted-block");
-		const freeBlocks = freeBlockUnits.map((unit) => ({ ref: unitToRef(unit), text: plugin.freeBlockTextCache?.get(unit.path) ?? "" }));
-		const promotedBlocks = await Promise.all(
-			promotedBlockUnits.map(async (unit) => {
-				const resolved = await resolveUnit(plugin.app, plugin.settings, unit, plugin.freeBlockTextCache);
-				return { ref: unitToRef(unit), text: resolved?.text ?? "" };
-			})
-		);
-		const blocks = [...freeBlocks, ...promotedBlocks];
+		const resolveBlockText = async (unit: Unit): Promise<SwapSourceBlock> => {
+			const resolved = await resolveUnit(plugin.app, plugin.settings, unit, plugin.freeBlockTextCache);
+			return { ref: unitToRef(unit), text: resolved?.text ?? "" };
+		};
+		const blocks = await Promise.all([...freeBlockUnits, ...promotedBlockUnits].map(resolveBlockText));
 		const vault = plugin.app.vault;
 		const candidates = buildSwapCandidates({
 			files: vault.getFiles().map((file) => ({ path: file.path, name: file.name })),
