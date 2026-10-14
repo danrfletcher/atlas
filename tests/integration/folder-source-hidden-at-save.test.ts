@@ -234,3 +234,34 @@ describe("G4/T2: saving the same rules again, or saving with no change, leaves t
 		expect(live(f, node).children.map((c) => [c.ref?.path, c.folderSourceHiddenAtSave])).toEqual(before);
 	});
 });
+
+describe("PR-1 (F2 R2): the owner-map cache is invalidated after setFolderSource changes or removes a source's rules", () => {
+	it("a changed rule is reflected immediately, without a metadata-resolved event in between", () => {
+		const f = setup();
+		const node = addUnfiltered(f, "merge");
+		applyRules(f, node, "merge", ACTIVE);
+		// Populates the owner-map cache for this view, keyed to the current source object.
+		expect(f.vm.managedRowFilterState(f.viewId, rowFor(f, node, "Jobs/beta.md"))).toBe("hidden");
+
+		// setFolderSource swaps in a brand-new FolderSourceConfig object (status = done, which beta
+		// matches) rather than mutating the old one in place. A stale cache would still hold the old
+		// object's rule (status = active), under which beta's own frontmatter (status: done) fails to
+		// match and it would report "filteredOut" instead.
+		f.vm.setFolderSource(f.viewId, node.id, source("merge", [{ key: "status", value: "done" }]));
+
+		expect(f.vm.managedRowFilterState(f.viewId, rowFor(f, node, "Jobs/beta.md"))).toBe("shown");
+	});
+
+	it("removing a source's rules is reflected immediately: every row reports shown", () => {
+		const f = setup();
+		const node = addUnfiltered(f, "merge");
+		applyRules(f, node, "merge", ACTIVE);
+		expect(f.vm.managedRowFilterState(f.viewId, rowFor(f, node, "Jobs/beta.md"))).toBe("hidden");
+
+		f.vm.setFolderSource(f.viewId, node.id, source("merge"));
+
+		for (const row of live(f, node).children) {
+			expect(f.vm.managedRowFilterState(f.viewId, row)).toBe("shown");
+		}
+	});
+});

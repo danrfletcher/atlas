@@ -28,6 +28,14 @@ export function isIgnoredOutsideEvent(filename: string | null): boolean {
 	return filename !== null && filename.startsWith(".");
 }
 
+interface NormalizedOutsidePath {
+	path: string;
+	/** Whether `fs.realpathSync` actually succeeded. PR-1 R1 fix: `sync`'s per-source cache below must
+	 * only reuse a result where this is `true` — a fallback textual path is not yet the folder's real
+	 * identity, so it has to keep re-normalizing every sync until it resolves. */
+	resolved: boolean;
+}
+
 /** PR-2 R5 fix: the registry's own doc comment already claimed "keyed by resolved outside path", but
  * `retain`/`release` used the raw stored path as-is — '/x/Invoices' and '/x/Invoices/', or a symlinked
  * alias, keyed two different entries and opened two watchers on the same folder, against G9's
@@ -35,14 +43,14 @@ export function isIgnoredOutsideEvent(filename: string | null): boolean {
  * collapses a symlink to the real folder it points at. A blank/unset path is left alone (never resolved
  * against cwd), and a path that doesn't exist yet (so `realpathSync` throws) falls back to the
  * textually-resolved form — `isResolved`/`open` below decide separately whether it's watchable. */
-function normalizeOutsidePath(path: string): string {
+function normalizeOutsidePath(path: string): NormalizedOutsidePath {
 	const trimmed = path.trim();
-	if (!trimmed) return "";
+	if (!trimmed) return { path: "", resolved: false };
 	const resolved = resolvePath(trimmed);
 	try {
-		return fs.realpathSync(resolved);
+		return { path: fs.realpathSync(resolved), resolved: true };
 	} catch {
-		return resolved;
+		return { path: resolved, resolved: false };
 	}
 }
 
@@ -72,6 +80,15 @@ export interface FolderSourceOutsideWatchersDeps {
 export class FolderSourceOutsideWatchers {
 	private entries = new Map<string, OutsideWatchEntry>();
 	private sourcePaths = new Map<string, string>();
+	/** PR-1 R1 fix: the raw (pre-normalize) path last seen for each source whose normalization last
+	 * *succeeded* (`fs.realpathSync` resolved it). `sync` runs on every views change, so re-resolving +
+	 * re-realpath-ing every source's path on every call made those sync disk calls fire far more often
+	 * than a source's path actually changes — but only once a source has a real target to cache. A
+	 * source with no entry here (blank, or `realpathSync` threw) always re-normalizes on the next sync,
+	 * so it keeps retrying until the real folder (or symlink target) appears. Keyed by node id; cleared
+	 * in `sync` (for node ids that left `sources`) and in `closeAll`, not in `release` — see `release`'s
+	 * own doc comment below for why it deliberately leaves this map alone. */
+	private rawPaths = new Map<string, string>();
 	private debounce: FolderLiveRefresh;
 	private watch: OutsideWatchFn;
 
@@ -83,10 +100,30 @@ export class FolderSourceOutsideWatchers {
 	/** Brings the registry in line with `sources` (node id → device-local path, possibly blank or
 	 * unresolved). Sources that left are released; new ones are retained. PR-2 R5 fix: normalized here,
 	 * once, so every downstream comparison/key (`sourcePaths`, `entries`) stays in the same canonical
-	 * space regardless of which textual spelling a source was configured with. */
+	 * space regardless of which textual spelling a source was configured with. PR-1 R1 fix: a source
+	 * whose raw path is unchanged since the last `sync` reuses its last normalized result instead of
+	 * re-running `path.resolve`/`fs.realpathSync` — but only when that last result was a real
+	 * `realpathSync` resolution. A source stuck on the textual fallback (folder not there yet, drive
+	 * unplugged) has no cached raw path, so it re-normalizes on every sync until it resolves; otherwise
+	 * it would stay keyed to the fallback forever and never re-key to its realpath once the folder
+	 * appears, which can split one real folder across two watcher entries (breaks G9). */
 	sync(sources: Map<string, string>): void {
-		const normalized = new Map(Array.from(sources, ([nodeId, path]) => [nodeId, normalizeOutsidePath(path)]));
+		const normalized = new Map(
+			Array.from(sources, ([nodeId, rawPath]) => {
+				const cachedPath =
+					this.rawPaths.get(nodeId) === rawPath ? this.sourcePaths.get(nodeId) : undefined;
+				if (cachedPath !== undefined) return [nodeId, cachedPath] as const;
+				const { path, resolved } = normalizeOutsidePath(rawPath);
+				if (resolved) this.rawPaths.set(nodeId, rawPath);
+				else this.rawPaths.delete(nodeId);
+				return [nodeId, path] as const;
+			})
+		);
 		for (const [nodeId, path] of Array.from(this.sourcePaths)) {
+			// A node id absent from `sources` has left entirely: drop its raw-path cache too. One still
+			// present but re-keyed (e.g. the fallback above resolving to a different, real path) keeps
+			// whatever `rawPaths` the loop above just set — `release` below must not clear it again.
+			if (!sources.has(nodeId)) this.rawPaths.delete(nodeId);
 			if (normalized.get(nodeId) !== path) this.release(nodeId);
 		}
 		for (const [nodeId, path] of normalized) {
@@ -110,6 +147,7 @@ export class FolderSourceOutsideWatchers {
 		}
 		this.entries.clear();
 		this.sourcePaths.clear();
+		this.rawPaths.clear();
 	}
 
 	private retain(nodeId: string, path: string): void {
@@ -123,6 +161,11 @@ export class FolderSourceOutsideWatchers {
 		this.sourcePaths.set(nodeId, path);
 	}
 
+	/** Drops a node id's `sourcePaths` entry (and closes/removes the watcher entry once it's the last
+	 * one on that path). Deliberately leaves `rawPaths` alone: `sync` above already decided what belongs
+	 * there (the node's own re-resolution, or clearing it for a node that's left `sources` entirely), and
+	 * a node that's simply being re-keyed to a *different* resolved path must keep its freshly-cached
+	 * raw path, not lose it here. */
 	private release(nodeId: string): void {
 		const path = this.sourcePaths.get(nodeId);
 		if (path === undefined) return;
