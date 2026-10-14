@@ -11,9 +11,10 @@ const read = (rel: string) => readFileSync(join(root, rel), "utf8");
 const data = JSON.parse(readFileSync(join(root, "tests/fixtures/data-v0.2.1.json"), "utf8"));
 
 describe("data compatibility (a v0.2.1 data.json)", () => {
-	it("settings keys are the v0.2.1 fixture's keys plus noAutoPromoteFolders", () => {
-		// noAutoPromoteFolders is new and absent from the fixture; loading without it yields [] (see main-persistence tests).
-		expect(Object.keys(DEFAULT_SETTINGS).sort()).toEqual([...Object.keys(data.settings), "noAutoPromoteFolders"].sort());
+	it("settings keys are the v0.2.1 fixture's keys plus noAutoPromoteFolders and highlightOpenNote", () => {
+		// noAutoPromoteFolders and highlightOpenNote (PR-1.F2) are new and absent from the fixture;
+		// loading without them yields [] / true respectively (see main-persistence tests).
+		expect(Object.keys(DEFAULT_SETTINGS).sort()).toEqual([...Object.keys(data.settings), "noAutoPromoteFolders", "highlightOpenNote"].sort());
 	});
 
 	it("persisted AtlasData keys are the v0.2.1 fixture's keys plus PR-2's new fields", () => {
@@ -47,7 +48,7 @@ describe("fence regression", () => {
 	it("RG-1/2/3 adds no setting, command or menu item", () => {
 		const commands = [...read("src/commands.ts").matchAll(/id: "([^"]+)"/g), ...read("src/f10-commands.ts").matchAll(/id: "([^"]+)"/g)].map((m) => m[1]);
 		expect(commands.sort()).toEqual(["add-block", "new-view", "open-explorer", "place-active-file-in-view", "rebuild-index", "reveal-active-file", "switch-view"]);
-		expect(read("src/settings.ts").match(/new Setting\(/g)).toHaveLength(18); // 17 + "Never auto-promote from these folders"
+		expect(read("src/settings.ts").match(/new Setting\(/g)).toHaveLength(19); // 17 + "Never auto-promote from these folders" + PR-1.F2's "Highlight the open note"
 		for (const f of NEW_FILES) expect(read(f), f).not.toMatch(/addCommand\(|addItem\(|new Setting\(|addSettingTab|registerEditorSuggest/);
 		const wired = [...readdirSync(join(root, "src"))].filter((f) => f.endsWith(".ts")).filter((f) => /openNameDialog/.test(read(`src/${f}`)));
 		expect(wired.sort()).toEqual(["create-from-meta.ts", "create-module.ts", "main.ts", "name-dialog.ts", "test-harness.ts"]); // main.ts: graduation's clash dialog (PR-2); create-module.ts: PR-3; create-from-meta.ts: PR-4

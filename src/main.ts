@@ -4,6 +4,7 @@ import {
 	AtlasSettings,
 	DEFAULT_SETTINGS,
 	computeDefaultExcludedFolders,
+	normalizeHighlightOpenNote,
 	normalizeNoAutoPromoteFolders,
 	rewriteNoAutoPromoteFolders,
 } from "./settings";
@@ -314,6 +315,9 @@ export default class AtlasPlugin extends Plugin {
 		this.settings = Object.assign({}, DEFAULT_SETTINGS, data?.settings);
 		// Always a fresh, normalised array: `Object.assign` above would otherwise share DEFAULT_SETTINGS' array.
 		this.settings.noAutoPromoteFolders = normalizeNoAutoPromoteFolders(data?.settings?.noAutoPromoteFolders, this.settings.poolFolder);
+		// PR-1.F2: a hand-edited non-boolean value must not throw and falls back to the default (on),
+		// rather than being carried through by the plain `Object.assign` above.
+		this.settings.highlightOpenNote = normalizeHighlightOpenNote(this.settings.highlightOpenNote);
 		this.manualPromotions = data?.manualPromotions ?? [];
 		this.dismissedByView = data?.dismissedByView ?? {};
 		this.dismissedGlobal = data?.dismissedGlobal ?? [];

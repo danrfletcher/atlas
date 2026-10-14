@@ -2804,6 +2804,11 @@ export class AtlasExplorerView extends ItemView {
 				row.style.top = `${i * INBOX_ROW_HEIGHT}px`;
 			}
 			if (dragged && !draggedInWindow) dragged.setCssStyles({ display: "none" });
+			// PR-1.F2 (G2/E6): a row this window just drew carries the open-note highlight from its
+			// first paint, no separate unhighlighted frame — `updateActiveHighlight` itself reads the
+			// setting and the open file fresh each call, so this also clears/applies correctly if the
+			// setting changed since the last full render, with no extra render pass needed.
+			this.updateActiveHighlight();
 		};
 
 		this.inboxRedraw = scheduleDraw;
@@ -3593,6 +3598,10 @@ export class AtlasExplorerView extends ItemView {
 	private updateActiveHighlight(): void {
 		const container = this.containerEl.children[1] as HTMLElement;
 		container.querySelectorAll(".atlas-row.is-active").forEach((el) => el.removeClass("is-active"));
+		// PR-1.F2 (G9): read live, not cached — clears every highlight and returns before adding any
+		// when off, so the setting is the single source of truth this method itself enforces (hiding
+		// via CSS alone would not satisfy this).
+		if (!this.plugin.settings.highlightOpenNote) return;
 		const activeFilePath = this.plugin.app.workspace.getActiveFile()?.path ?? null;
 		if (!activeFilePath) return;
 		container.querySelectorAll<HTMLElement>("[data-ref-key]").forEach((row) => {

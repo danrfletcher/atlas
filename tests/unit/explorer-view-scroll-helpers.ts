@@ -113,15 +113,34 @@ export interface Harness {
 	setActiveView: (view: View) => void;
 	setUnits: (units: Unit[]) => void;
 	layout: LayoutStub;
+	/** PR-1.F2: the fake plugin's own (mutable) settings object — a test can flip
+	 * `settings.highlightOpenNote` directly and the next `updateActiveHighlight`/redraw reads it live. */
+	settings: { highlightOpenNote: boolean };
+	/** PR-1.F2: sets what `workspace.getActiveFile()` returns (null clears it, matching no file open). */
+	setActiveFile: (path: string | null) => void;
+}
+
+export interface MakeHarnessOpts {
+	/** PR-1.F2: when true, leaves `updateActiveHighlight` as the real (unstubbed) method instead of
+	 * the default no-op — needed by tests exercising G2/E6 (the scroll window re-applying the
+	 * highlight), harmless for everything else since the stubbed plugin now always provides the
+	 * `workspace.getActiveFile`/`settings.highlightOpenNote` the real method reads. */
+	useRealHighlight?: boolean;
 }
 
 /** Builds a real explorer with a fake plugin and a host element shaped like Obsidian's (header +
  * view-content). `renderToolbar` stands in for the toolbar, which doesn't matter to the inbox layout. */
-export function makeHarness(units: Unit[], layout: LayoutStub = { viewportHeight: 280, bucketHeight: 0 }): Harness {
+export function makeHarness(units: Unit[], layout: LayoutStub = { viewportHeight: 280, bucketHeight: 0 }, opts: MakeHarnessOpts = {}): Harness {
 	let activeView = testView;
 	let allUnits = units;
+	let activeFilePath: string | null = null;
+	const settings = { highlightOpenNote: true };
 	const plugin = {
-		app: { workspace: { on: vi.fn(() => ({})) }, vault: { getAbstractFileByPath: () => null } },
+		settings,
+		app: {
+			workspace: { on: vi.fn(() => ({})), getActiveFile: () => (activeFilePath ? { path: activeFilePath } : null) },
+			vault: { getAbstractFileByPath: () => null },
+		},
 		unitIndex: { getUnits: () => allUnits, onChange: vi.fn(() => () => {}) },
 		viewsManager: {
 			getActiveView: () => activeView,
@@ -146,12 +165,12 @@ export function makeHarness(units: Unit[], layout: LayoutStub = { viewportHeight
 		resolveRef: async (ref: { path: string }) => ({ text: ref.path, icon: "file" }),
 		matchesFilter: () => true,
 		setPlacementTooltip: vi.fn(),
-		updateActiveHighlight: vi.fn(),
 		syncRefreshTimers: vi.fn(),
 		refreshApiSourcesOnViewLoad: vi.fn(),
 		buildInboxDragPayload: vi.fn(() => ({ kind: "inbox", refs: [] })),
 		queueRender: vi.fn(),
 	};
+	if (!opts.useRealHighlight) stubs.updateActiveHighlight = vi.fn();
 	Object.assign(explorer, stubs);
 
 	const panel = () => host.children[1] as HTMLElement;
@@ -169,6 +188,10 @@ export function makeHarness(units: Unit[], layout: LayoutStub = { viewportHeight
 			allUnits = next;
 		},
 		layout,
+		settings,
+		setActiveFile: (path: string | null) => {
+			activeFilePath = path;
+		},
 	};
 }
 
