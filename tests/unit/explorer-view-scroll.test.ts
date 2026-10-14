@@ -463,6 +463,45 @@ describe("PR-1.S1 — G11/E8: a dragged inbox row survives virtual redraws", () 
 		expect(explorer.dragPayload).toBeNull();
 	});
 
+	it("also clears dragPayload and cancels the dwell when a render tears down a dragged *bucket* row mid-drag (PR-1 deferred-findings R3)", async () => {
+		// R4 hardening above only ever covered an inbox drag (gated on `inboxDragRowEl`); a bucket
+		// node's own `dragstart` (`renderNode`'s meta/unit row wiring) sets `bucketDragRowEl` the same
+		// way, so this same mid-drag teardown in `render()` must catch that leak too, dwell timer
+		// included — not just leave `dragPayload` set and a bucket dwell timer running forever.
+		const h = setup(fileUnits(2000));
+		const registered: (() => void)[] = [];
+		const explorer = h.explorer as unknown as {
+			registerEvent: (ref: unknown) => void;
+			registerDomEvent: (el: Element | Window, type: string, cb: () => void) => void;
+			dragPayload: unknown;
+			bucketDragRowEl: HTMLElement | null;
+			cancelActiveDwell: (() => void) | null;
+			onOpen: () => Promise<void>;
+		};
+		explorer.registerEvent = vi.fn();
+		explorer.registerDomEvent = (el, type, cb) => {
+			el.addEventListener(type, cb);
+			registered.push(() => el.removeEventListener(type, cb));
+		};
+		cleanups.push(() => registered.forEach((fn) => fn()));
+		await explorer.onOpen();
+
+		// The bucket itself is stubbed in this harness (see `makeHarness`'s `renderBucketSection`), so
+		// a bucket row's own real `dragstart` wiring is exercised in `explorer-view.test.ts` instead —
+		// here, drive the exact state that wiring leaves behind, same as the dwell test above does for
+		// `activeDwellRow`.
+		const bucketRow = h.panel().querySelector<HTMLElement>(".atlas-node-list")!;
+		explorer.dragPayload = { kind: "node", nodeId: "n1", viewId: "v1" };
+		explorer.bucketDragRowEl = bucketRow;
+		const dwell = vi.fn();
+		explorer.cancelActiveDwell = dwell;
+
+		await render(h.explorer);
+		expect(explorer.dragPayload).toBeNull();
+		expect(explorer.bucketDragRowEl).toBeNull();
+		expect(dwell).toHaveBeenCalled();
+	});
+
 	it("removes a hidden dragged row immediately on dragend, instead of waiting for the next redraw (R5)", async () => {
 		const units = fileUnits(2000);
 		const h = setup(units);
