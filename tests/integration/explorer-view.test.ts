@@ -873,3 +873,23 @@ describe("PR-1.F2 — R1: the real settings-tab onChange drives refreshExplorerV
 		expect(activeRefKeys(leafB).length).toBeGreaterThan(0);
 	});
 });
+
+describe("PR-1 (deferred-findings R3) — a bucket row's own dragstart tracks its source element", () => {
+	it("sets bucketDragRowEl alongside dragPayload, so render() can detect a mid-drag teardown", async () => {
+		const h = setup();
+		const acme = rowFor(h, "Jobs/acme.md");
+		(h.fake as unknown as { buildNodeDragPayload: ReturnType<typeof vi.fn> }).buildNodeDragPayload = vi.fn(() => ({
+			kind: "node",
+			nodeId: acme.id,
+			viewId: h.viewId,
+		}));
+
+		const container = await render(h);
+		const row = rowElFor(container, acme.id)!;
+		row.dispatchEvent(new Event("dragstart"));
+
+		const fake = h.fake as unknown as { dragPayload: unknown; bucketDragRowEl: HTMLElement | null };
+		expect(fake.dragPayload).not.toBeNull();
+		expect(fake.bucketDragRowEl).toBe(row);
+	});
+});

@@ -69,14 +69,14 @@ function renderBucketRow(info: PillRowInfo, ref: UnitRef, outsideManaged = false
 	});
 }
 
-function renderInboxRowFor(info: PillRowInfo, ref: UnitRef): HTMLElement {
+function renderInboxRowFor(info: PillRowInfo, ref: UnitRef, hidden = false): HTMLElement {
 	const container = document.createElement("div");
 	const fake = { selectedInboxRefKeys: new Set<string>(), setPlacementTooltip: vi.fn(noop) };
 	return (
 		AtlasExplorerView.prototype as unknown as {
 			renderInboxRow: (this: typeof fake, container: HTMLElement, ref: UnitRef, info: PillRowInfo, view: View, hidden?: boolean) => HTMLElement;
 		}
-	).renderInboxRow.call(fake, container, ref, info, createEmptyView("v1", "Default"), false);
+	).renderInboxRow.call(fake, container, ref, info, createEmptyView("v1", "Default"), hidden);
 }
 
 const promotedInfo: PillRowInfo = { text: "Hartley Haulage", icon: "file", promoted: true, added: false, missing: false };
@@ -134,13 +134,7 @@ describe("inbox rows keep their promoted/added pills (G2, GP1, GP3)", () => {
 	});
 
 	it("GP3: an added file revealed via Show Dismissed also carries the 'hidden' pill alongside 'added'", () => {
-		const container = document.createElement("div");
-		const fake = { selectedInboxRefKeys: new Set<string>(), setPlacementTooltip: vi.fn(noop) };
-		const row = (
-			AtlasExplorerView.prototype as unknown as {
-				renderInboxRow: (this: typeof fake, container: HTMLElement, ref: UnitRef, info: PillRowInfo, view: View, hidden?: boolean) => HTMLElement;
-			}
-		).renderInboxRow.call(fake, container, { kind: "file", path: "Areas/Notes.md" }, addedInfo, createEmptyView("v1", "Default"), true);
+		const row = renderInboxRowFor(addedInfo, { kind: "file", path: "Areas/Notes.md" }, true);
 		expect(badgesOf(row)).toEqual(["added", "hidden"]);
 	});
 });
