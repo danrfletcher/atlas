@@ -5,6 +5,7 @@ import { planApiRefresh } from "./api-refresh-plan";
 import { applyMergeResult, splitFolderSourceDeleted } from "./api-merge";
 import { parseCsv } from "./csv-parsing";
 import { ConfirmDeleteAnswer } from "./api-source-controller";
+import { cacheSnapshot } from "./api-cache-snapshot";
 import { ApiCache, CsvSourceConfig, ViewNode } from "./types";
 
 export interface CsvRefreshDeps {
@@ -39,7 +40,7 @@ function emptyCache(prev: ApiCache | undefined, fetchedAt: number, error: string
 export class CsvSourceController {
 	private inFlight = new Map<string, { promise: Promise<void>; sourceKey: string }>();
 
-	refresh(node: ViewNode, source: CsvSourceConfig, persist: () => void, deps: CsvRefreshDeps): Promise<void> {
+	refresh(node: ViewNode, source: CsvSourceConfig, persist: (changed: boolean) => void, deps: CsvRefreshDeps): Promise<void> {
 		const sourceKey = JSON.stringify(source);
 		const existing = this.inFlight.get(node.id);
 		if (existing) {
@@ -51,7 +52,7 @@ export class CsvSourceController {
 		return this.runRefresh(node, source, persist, deps, sourceKey);
 	}
 
-	private runRefresh(node: ViewNode, source: CsvSourceConfig, persist: () => void, deps: CsvRefreshDeps, sourceKey: string): Promise<void> {
+	private runRefresh(node: ViewNode, source: CsvSourceConfig, persist: (changed: boolean) => void, deps: CsvRefreshDeps, sourceKey: string): Promise<void> {
 		const run = this.doRefresh(node, source, persist, deps);
 		this.inFlight.set(node.id, { promise: run, sourceKey });
 		void run.finally(() => {
@@ -60,7 +61,7 @@ export class CsvSourceController {
 		return run;
 	}
 
-	private async doRefresh(node: ViewNode, source: CsvSourceConfig, persist: () => void, deps: CsvRefreshDeps): Promise<void> {
+	private async doRefresh(node: ViewNode, source: CsvSourceConfig, persist: (changed: boolean) => void, deps: CsvRefreshDeps): Promise<void> {
 		const now = deps.now ?? (() => Date.now());
 		const trigger = deps.trigger ?? "manual";
 		// Same race-guard `ApiSourceController.doRefresh` uses: re-checked after every await so a
@@ -72,13 +73,20 @@ export class CsvSourceController {
 			if (node.csvSource === undefined || startingCsvSource === undefined) return true;
 			return JSON.stringify(node.csvSource) !== JSON.stringify(startingCsvSource);
 		};
+		// PR-1 R4 fix: this now runs on every view load/switch with no toggle (PR-1 removed CSV's
+		// refresh-every setting), so persisting unconditionally would write data.json on every one of
+		// those even when the file hadn't changed — against F2's "a refresh that finds no change
+		// writes nothing". `persistIfChanged` reports whether anything comparable actually moved so the
+		// caller can still re-render (the dot's "just now" is real) without saving a no-op.
+		const before = cacheSnapshot(node);
+		const persistIfChanged = () => persist(cacheSnapshot(node) !== before);
 
 		try {
 			const file = deps.vault.getAbstractFileByPath(source.path);
 			if (!(file instanceof TFile)) {
 				// G23/E4: the source file is missing — reported the same way a dead API URL would be.
 				node.apiCache = emptyCache(node.apiCache, now(), `File not found: ${source.path}`);
-				persist();
+				persistIfChanged();
 				return;
 			}
 
@@ -89,7 +97,7 @@ export class CsvSourceController {
 			const parsed = parseCsv(text);
 			if (!parsed.ok) {
 				node.apiCache = emptyCache(node.apiCache, now(), parsed.error);
-				persist();
+				persistIfChanged();
 				return;
 			}
 
@@ -103,7 +111,7 @@ export class CsvSourceController {
 
 			if (isMapError(mapped)) {
 				node.apiCache = emptyCache(node.apiCache, now(), mapped.error);
-				persist();
+				persistIfChanged();
 				return;
 			}
 
@@ -146,7 +154,7 @@ export class CsvSourceController {
 				node.apiItemOrder = merged.order;
 				node.apiAwaitingConfirmation = false;
 				applyCacheSuccess();
-				persist();
+				persistIfChanged();
 				return;
 			}
 
@@ -164,22 +172,22 @@ export class CsvSourceController {
 				node.apiItemOrder = merged.order;
 				node.apiAwaitingConfirmation = false;
 				applyCacheSuccess();
-				persist();
+				persistIfChanged();
 				return;
 			}
 
 			if (answer === "cancelled" || trigger === "manual") {
 				node.apiAwaitingConfirmation = false;
 				applyCacheSuccess();
-				persist();
+				persistIfChanged();
 				return;
 			}
 
 			node.apiAwaitingConfirmation = true;
-			persist();
+			persistIfChanged();
 		} catch (err) {
 			node.apiCache = emptyCache(node.apiCache, now(), err instanceof Error ? err.message : "Unexpected error");
-			persist();
+			persistIfChanged();
 		}
 	}
 }

@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { App, TFile } from "obsidian";
-import type { EditorSuggestContext } from "obsidian";
+import type { Editor, EditorSuggestContext } from "obsidian";
 import { AtlasLinkSuggest } from "../../src/link-suggest";
 import type AtlasPlugin from "../../src/main";
 import { DEFAULT_SETTINGS } from "../../src/settings";
@@ -91,5 +91,98 @@ describe("[[ suggestions include added folders (G13)", () => {
 		await suggest.selectSuggestion(folderItem as never, {} as KeyboardEvent);
 
 		expect(app.vault.calls).not.toContain("create");
+	});
+
+	it("PR-1.F1 T1: picking a folder whose interface note is a case-variant sibling (deep.md for Deep) does not throw and links to the existing file", async () => {
+		const app = new App();
+		seedRoot(app, ["Jobs/Acme/Deep/deep.md"], ["Jobs", "Jobs/Acme", "Jobs/Acme/Deep"]);
+		const index = new UnitIndex(app, { ...DEFAULT_SETTINGS }, [], {}, [], []);
+		index.rebuild();
+		index.markAdded({ kind: "folder", path: "Jobs/Acme/Deep" });
+		const suggest = suggesterFor(app, index);
+		const { replaceRange } = openContext(suggest, "Notes/Today.md");
+
+		const items = (await suggest.getSuggestions({ query: "deep" } as EditorSuggestContext)) as unknown as Item[];
+		const folderItem = items.find((item) => item.kind === "folder-unit" && item.text === "Deep");
+		expect(folderItem).toBeDefined();
+
+		await expect(suggest.selectSuggestion(folderItem as never, {} as KeyboardEvent)).resolves.not.toThrow();
+
+		expect(app.vault.calls).not.toContain("create");
+		expect(replaceRange).toHaveBeenCalledWith("[[Jobs/Acme/Deep/deep.md]]", expect.anything(), expect.anything());
+	});
+});
+
+describe("onTrigger steps aside for # / ^ headings and blocks (PR-1.B1)", () => {
+	function makeSuggester(app: App): AtlasLinkSuggest {
+		const index = new UnitIndex(app, { ...DEFAULT_SETTINGS }, [], {}, [], []);
+		return suggesterFor(app, index);
+	}
+
+	function stubEditor(line: string): Editor {
+		return { getLine: () => line } as unknown as Editor;
+	}
+
+	// Rows where `#` or `^` appears before any `|`: onTrigger must return null so Obsidian's own
+	// heading/block list gets a turn, covering same-note (`[[#`/`[[^`), named-file (`[[File#`/
+	// `[[File^`), all-headings (`[[File##`), embeds (`![[File#`), and text after the marker
+	// (`[[File#Heading`).
+	const NULL_ROWS = ["[[File#", "[[File^", "[[#", "[[^", "[[File##", "![[File#", "[[File#Heading"];
+
+	it.each(NULL_ROWS)("returns null for %j", (line) => {
+		const app = new App();
+		const file = app.vault.seedFile("Note.md");
+		const suggest = makeSuggester(app);
+		const cursor = { line: 0, ch: line.length };
+		expect(suggest.onTrigger(cursor, stubEditor(line), file)).toBeNull();
+	});
+
+	// Rows that must still trigger Atlas's own popup unchanged: a plain query, an empty query
+	// right after `[[`, `|`-alias queries where `#`/`^` comes after the `|` (F4), and a second,
+	// still-open `[[` segment after an earlier closed link on the same line.
+	const TRIGGER_ROWS: Array<{ line: string; query: string }> = [
+		{ line: "[[Fi", query: "Fi" },
+		{ line: "[[", query: "" },
+		{ line: "[[A|b#c", query: "A|b#c" },
+		{ line: "[[A|b^c", query: "A|b^c" },
+		{ line: "[[A]] [[B", query: "B" },
+	];
+
+	it.each(TRIGGER_ROWS)("still triggers for $line with query $query", ({ line, query }) => {
+		const app = new App();
+		const file = app.vault.seedFile("Note.md");
+		const suggest = makeSuggester(app);
+		const cursor = { line: 0, ch: line.length };
+		const result = suggest.onTrigger(cursor, stubEditor(line), file);
+		expect(result).not.toBeNull();
+		expect(result?.query).toBe(query);
+		expect(result?.end).toEqual(cursor);
+	});
+
+	it("F1 regression: trigger info for [[Fi is deep-equal to the pre-change shape", () => {
+		const app = new App();
+		const file = app.vault.seedFile("Note.md");
+		const suggest = makeSuggester(app);
+		const cursor = { line: 2, ch: 6 };
+		const result = suggest.onTrigger(cursor, stubEditor("[[Fi"), file);
+		expect(result).toEqual({ start: { line: 2, ch: cursor.ch - 4 }, end: cursor, query: "Fi" });
+	});
+
+	it("E4: a # right after [[File inside a code block still returns null, same as before the change", () => {
+		const app = new App();
+		const file = app.vault.seedFile("Note.md");
+		app.metadataCache.getFileCache = (() => ({
+			sections: [{ type: "code", position: { start: { line: 0, col: 0, offset: 0 }, end: { line: 2, col: 0, offset: 0 } } }],
+		})) as unknown as App["metadataCache"]["getFileCache"];
+		const suggest = makeSuggester(app);
+		const cursor = { line: 1, ch: 7 };
+		expect(suggest.onTrigger(cursor, stubEditor("[[File#"), file)).toBeNull();
+	});
+
+	it("a null file argument still returns null", () => {
+		const app = new App();
+		const suggest = makeSuggester(app);
+		const cursor = { line: 0, ch: 2 };
+		expect(suggest.onTrigger(cursor, stubEditor("[["), null)).toBeNull();
 	});
 });

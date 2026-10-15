@@ -40,7 +40,16 @@ import {
  * loaded (e.g. the plugin was re-enabled mid-session). Obsidian fires "resolved" once per indexing
  * pass, so without this a later instance would hold rule-filtered files back until some note changed.
  * `inProgressTaskCount` is not in the public typings, so it is read defensively: when it is absent
- * this stays false and the "resolved" event decides, as before. */
+ * this stays false and the "resolved" event decides, as before.
+ *
+ * PR-1.S1 T3 (known limitation, not reproduced): if the plugin constructs in the narrow window before
+ * Obsidian has queued its *first* indexing pass, `inProgressTaskCount` can still read 0 here, this
+ * returns true, and the held-back refresh above is skipped — new matches then wait for the next
+ * refresh (often covered by `refreshOnViewLoad`) instead of the first "resolved" event. There is no
+ * earlier or more reliable public signal to check instead, and the container test vault always
+ * finished indexing before plugin construction in both the enable/disable and reload runs, so this
+ * can't be reproduced in a test here either (T1's tests below exercise the *intended* idle case —
+ * cache genuinely already resolved — which looks identical to this one from this function's view). */
 function metadataCacheIdle(app: App): boolean {
 	return (app as unknown as { metadataCache?: { inProgressTaskCount?: unknown } }).metadataCache?.inProgressTaskCount === 0;
 }
@@ -258,10 +267,13 @@ function sanitizeFolderSource(node: ViewNode): void {
 		return;
 	}
 	const rawRemoved = raw.removedRefs;
-	const filters = sanitizeFolderFilters(raw.filters);
+	const location = raw.location === "outside" ? "outside" : "inside";
+	// PR-1.S1 R4 fix: an Outside-vault source's filters are inert (`fileFilterFor` only runs on the
+	// inside path, F3), so they are dropped here rather than carried forward dormant.
+	const filters = location === "inside" ? sanitizeFolderFilters(raw.filters) : undefined;
 	node.folderSource = {
 		type: "folder",
-		location: raw.location === "outside" ? "outside" : "inside",
+		location,
 		path: raw.path,
 		showFiles: typeof raw.showFiles === "boolean" ? raw.showFiles : true,
 		showFolders: typeof raw.showFolders === "boolean" ? raw.showFolders : true,
@@ -517,8 +529,11 @@ export function nodeHasApiRows(node: Pick<ViewNode, "apiSource" | "csvSource" | 
 }
 
 /** PR-1 (G11a): every bucket node can hold a data source — an Atlas folder (meta), a unit (file, module,
- * block or promoted folder). One predicate serves every source setter, `refreshFolderSource`, and the
- * explorer's source walks, so no call site needs to know which kind of node it was handed. */
+ * block or promoted folder). Every node type is currently `"meta"` or `"unit"`, so this is effectively
+ * "the node exists" — a deliberate seam for PR-2 rather than a real type-narrowing check. One predicate
+ * serves every source setter and `refreshFolderSource`, so no call site needs to know which kind of
+ * node it was handed. PR-1 R6: the explorer's own source walks (`nodeHasApiRows` and friends) don't call
+ * this — it only gates the setters above. */
 export function canHoldSource(node: Pick<ViewNode, "type">): boolean {
 	return node.type === "meta" || node.type === "unit";
 }
@@ -563,6 +578,13 @@ export class ViewsManager {
 	private changeListeners = new Set<() => void>();
 	/** PR-1.S1 (E10): false until `metadataCache` has resolved, seeded in the constructor (T1). */
 	private metadataResolved: boolean;
+	/** PR-1.F2 R2 fix: bumped on every change notification, so `getFolderSourceOwners`'s cache knows
+	 * when a stored owner map might be stale without having to track every mutation site individually.
+	 * PR-1 R3: this only holds if every write to a node's `folderSource` goes through `save()` or
+	 * `notifyChange()` — both bump this counter, so no mutation site needs to touch it directly. A
+	 * future direct mutation of `node.folderSource` that skips both would leave the cache stale. */
+	private folderSourceOwnersVersion = 0;
+	private folderSourceOwnersCache: { viewId: string; version: number; owners: Map<string, FolderSourceConfig> } | null = null;
 
 	constructor(private app: App, initialViews: View[], initialActiveViewId: string, private persist: () => void) {
 		sanitizeViewsApiFields(initialViews);
@@ -583,8 +605,38 @@ export class ViewsManager {
 
 	/** Re-renders listeners without persisting anything — for a change that is only visible on screen
 	 * (e.g. an Outside-Vault source's unresolved/reconnected state), which `save` alone would skip. */
-	private notifyChange(): void {
+	notifyChange(): void {
+		this.folderSourceOwnersVersion++;
 		for (const cb of this.changeListeners) cb();
+	}
+
+	/** PR-1.F2 R2 fix: one id→`FolderSourceConfig` map for `viewId`'s managed-row owners, built with a
+	 * single tree walk and cached until the next change notification — `managedRowFilterState` used to
+	 * call `getNode` (its own whole-tree walk) for every managed row it was asked about, which made a
+	 * render with many managed rows O(n^2). Re-walks only when nothing cached yet, the view changed, or
+	 * a mutation has happened since the cached map was built.
+	 *
+	 * PR-1 R3: this cache holds a single view's map at a time, so switching between views rebuilds it
+	 * on every switch rather than keeping one map per view — cheap today since every mutation site
+	 * (`setFolderSource`, the rename rewrite, sanitize) already routes through `save()`/`notifyChange()`
+	 * to bump `folderSourceOwnersVersion`. Neither is a bug now; both assumptions break if a future
+	 * mutation site writes `node.folderSource` directly without going through one of those two calls. */
+	private getFolderSourceOwners(viewId: string): Map<string, FolderSourceConfig> {
+		const cached = this.folderSourceOwnersCache;
+		if (cached && cached.viewId === viewId && cached.version === this.folderSourceOwnersVersion) return cached.owners;
+		const owners = new Map<string, FolderSourceConfig>();
+		const view = this.getView(viewId);
+		if (view) {
+			const walk = (nodes: ViewNode[]): void => {
+				for (const node of nodes) {
+					if (node.folderSource) owners.set(node.id, node.folderSource);
+					walk(node.children);
+				}
+			};
+			walk(view.root);
+		}
+		this.folderSourceOwnersCache = { viewId, version: this.folderSourceOwnersVersion, owners };
+		return owners;
 	}
 
 	getViews(): View[] {
@@ -684,8 +736,11 @@ export class ViewsManager {
 		return !!view && this.findUnitNode(view.root, ref) !== null;
 	}
 
+	/** PR-1.F1 R3: built on `placedRefKeys`'s walk rather than its own `findUnitNode` pass, so the
+	 * "+" picker's placed-set and this check can never disagree about what counts as placed (the
+	 * Outside-owned skip rule lives in one place). */
 	isPlacedAnywhere(ref: UnitRef): boolean {
-		return this.views.some((v) => this.findUnitNode(v.root, ref) !== null);
+		return this.placedRefKeys().has(unitRefKey(ref));
 	}
 
 	/** PR-1.F1: every unit ref key placed in any view, collected in one walk. The "+" picker tests
@@ -784,18 +839,77 @@ export class ViewsManager {
 		if (changed) this.save();
 	}
 
+	/** PR-1 T5: a folder-source owner's own managed children (`folderSourceManaged` with
+	 * `folderSourceOwnerId` pointing at `node`) have no identity once that owner is gone — an
+	 * Outside-Vault one's `ref.path` isn't even a real vault path without the owner to keep its
+	 * "never open/drag/rename this" protections active (see `isOutsideManagedNodeId`), so promoting
+	 * it to a plain top-level row the same way an ordinary child is promoted would leave it broken
+	 * and live. Dropped along with the owner instead; a manually-placed, non-managed child is
+	 * promoted as before.
+	 *
+	 * R1 fix: an Inside-Vault owner's managed children ARE real vault paths, and stay ordinary drop
+	 * zones the whole time the owner lives (`isOutsideManagedUnit`/the row-level drop gate in
+	 * `explorer-view.ts` only ever block an Outside-Vault one), so a user can hand-nest their own unit
+	 * under one. Dropping every managed child here regardless of location silently discarded that
+	 * hand-nested grandchild along with its managed parent, instead of lifting it one level like
+	 * every other removal. Only an Outside-Vault owner's managed children are dropped now; an
+	 * Inside-Vault owner's are promoted like any other child, subtree and all.
+	 *
+	 * R1 fix (round 2): that last clause was wrong — a missing owner id is NOT treated as "not managed"
+	 * everywhere. `collectManagedMatches`/`reconcileFolderSourceDeletesForPath` still match a promoted
+	 * row purely on its own still-true `folderSourceManaged`, so a later delete of it finds no owner,
+	 * computes no placeholder, and the row vanishes outright instead of showing a greyed missing row
+	 * (the rename path already guards exactly this at `onVaultRename`'s `leftSource`; the delete path
+	 * had no equivalent). `canSwapNode`/`swapNodeWithUnit`/`swapNodeForAtlasFolder` refuse it too, since
+	 * they also only check `folderSourceManaged`. And `reconcileManagedChildren` never checks the owner
+	 * id at all, so a different source's reconcile would mistake it for one of its own already-managed
+	 * rows if the user ever re-nests it underneath. `releaseManagedChildren`, called by both callers of
+	 * this method, clears `folderSourceManaged`/`folderSourceOwnerId`/`folderSourceHiddenAtSave` from
+	 * every row the removed owner manages anywhere in the view, not just these direct children. */
+	private promotableChildren(node: ViewNode): ViewNode[] {
+		const dropsManagedChildren = node.folderSource?.location === "outside";
+		return node.children.filter((child) => !(dropsManagedChildren && child.folderSourceManaged && child.folderSourceOwnerId === node.id));
+	}
+
+	/** R1 fix (round 2): releases every row `node` still manages anywhere in `view` once `node` itself is
+	 * about to be removed — not only the direct children `promotableChildren` just promoted, but any
+	 * managed row the user has since dragged or nested elsewhere in the tree (`reconcileManagedChildren`'s
+	 * own "managed row that got dragged out" case). A released row loses its managed identity entirely, so
+	 * every lookup that gates on `folderSourceManaged` (delete reconciliation, Swap, another source's own
+	 * reconcile) treats it as an ordinary row from here on, exactly like one that was never Folder-source-
+	 * managed. An Outside-Vault owner's managed children are dropped whole by `promotableChildren` instead
+	 * (see its own doc comment) — their `ref.path` is never a real vault path without the owner, so there
+	 * is nothing left to release for those, and this is a no-op for them. Also a no-op for a node that
+	 * never carried a Folder source at all (an ordinary meta folder or unit), since nothing else in the
+	 * view can have `folderSourceOwnerId === node.id` in that case. */
+	private releaseManagedChildren(view: View, node: ViewNode): void {
+		if (node.folderSource?.location === "outside") return;
+		const release = (nodes: ViewNode[]): void => {
+			for (const n of nodes) {
+				if (n.folderSourceManaged && n.folderSourceOwnerId === node.id) {
+					delete n.folderSourceManaged;
+					delete n.folderSourceOwnerId;
+					delete n.folderSourceHiddenAtSave;
+				}
+				release(n.children);
+			}
+		};
+		release(view.root);
+	}
+
 	/** Removes one specific node instance by id, regardless of what other placements of the same
 	 * unit (if any, via PR 13's duplication) might also exist — this is what "Remove from view",
 	 * the Delete key, and dragging a row back to the inbox all actually mean: get rid of *this* row,
 	 * not every copy of the unit it happens to reference. Same children-promotion rule as
-	 * `unplaceUnit`/`deleteMetaFolder`. */
+	 * `unplaceUnit`/`deleteMetaFolder`, minus this node's own managed children (`promotableChildren`). */
 	unplaceNode(viewId: string, nodeId: string): void {
 		const view = this.getView(viewId);
 		if (!view) return;
 		const found = this.findNode(view.root, nodeId);
 		if (!found) return;
 		this.rememberFolderSourceRemoval(view, found.node);
-		found.siblings.splice(found.index, 1, ...found.node.children);
+		found.siblings.splice(found.index, 1, ...this.promotableChildren(found.node));
+		this.releaseManagedChildren(view, found.node);
 		this.save();
 	}
 
@@ -819,12 +933,13 @@ export class ViewsManager {
 	}
 
 	/** PR-1.F2 (G5/G6/E11): the render-time state of one managed row under its Folder source's YAML rules,
-	 * read from the metadata cache on every call and never stored. Before the cache resolves, a row of a
-	 * rule-filtered source is `hidden`, so no unfiltered row flashes (E10). A row whose file is gone keeps
-	 * its normal look, since the existing delete rule owns that case. */
+	 * read from the metadata cache on every call and never stored (the owner lookup itself is cached by
+	 * `getFolderSourceOwners`, R2 fix — only the match result is always fresh). Before the cache resolves,
+	 * a row of a rule-filtered source is `hidden`, so no unfiltered row flashes (E10). A row whose file is
+	 * gone keeps its normal look, since the existing delete rule owns that case. */
 	managedRowFilterState(viewId: string, node: ViewNode): FolderRowFilterState {
 		if (!node.folderSourceManaged || node.type !== "unit" || node.ref?.kind !== "file" || !node.folderSourceOwnerId) return "shown";
-		const source = this.getNode(viewId, node.folderSourceOwnerId)?.folderSource;
+		const source = this.getFolderSourceOwners(viewId).get(node.folderSourceOwnerId);
 		const rules = source && source.location === "inside" ? activeFolderRules(source) : [];
 		if (!source || rules.length === 0) return "shown";
 		if (!this.metadataResolved) return "hidden";
@@ -913,12 +1028,15 @@ export class ViewsManager {
 	}
 
 	/** Deleting a meta folder moves its children up one level, at the position it occupied — never
-	 * deletes the children themselves, and never touches disk (they're labels, not folders). */
+	 * deletes the children themselves, and never touches disk (they're labels, not folders).
+	 * PR-1 T5: an Atlas folder can be a folder-source owner too, so it shares `unplaceNode`'s
+	 * `promotableChildren` rule — its own managed children are dropped with it, not orphaned. */
 	deleteMetaFolder(viewId: string, nodeId: string): void {
 		const view = this.getView(viewId);
 		const found = view && this.findNode(view.root, nodeId);
-		if (!found || found.node.type !== "meta") return;
-		found.siblings.splice(found.index, 1, ...found.node.children);
+		if (!view || !found || found.node.type !== "meta") return;
+		found.siblings.splice(found.index, 1, ...this.promotableChildren(found.node));
+		this.releaseManagedChildren(view, found.node);
 		this.save();
 	}
 
@@ -1120,13 +1238,15 @@ export class ViewsManager {
 	/** PR 12: also collapses unit nodes that have gained meta-nested children — meta folders always
 	 * collapse here regardless of child count (existing behavior, a folder is always a foldable
 	 * concept even empty), but a unit only ever shows a chevron once it actually has a child (Q5),
-	 * so collapsing a childless one would be a no-op with nothing to reflect it visually anyway. */
+	 * so collapsing a childless one would be a no-op with nothing to reflect it visually anyway.
+	 * PR-1 R5: a unit with source rows but no children also shows a chevron (renderFoldableChildren's
+	 * G11c gate), so it's collapsed here too. */
 	collapseAll(viewId: string): void {
 		const view = this.getView(viewId);
 		if (!view) return;
 		const walk = (nodes: ViewNode[]) => {
 			for (const node of nodes) {
-				if (node.type === "meta" || node.children.length > 0) {
+				if (node.type === "meta" || node.children.length > 0 || nodeHasApiRows(node)) {
 					node.collapsed = true;
 					walk(node.children);
 				}
@@ -1340,14 +1460,24 @@ export class ViewsManager {
 	 * everything else — including a since-deleted managed child's now-missing ref — exactly as it
 	 * is; see `buildFolderSourceChildren`'s own doc comment for the full reconciliation contract). A
 	 * no-op if the node isn't a meta node with a Folder source. Read-only against the vault: this
-	 * never creates/moves/deletes anything on disk (F5). */
-	refreshFolderSource(viewId: string, nodeId: string, outsidePath?: string): void {
+	 * never creates/moves/deletes anything on disk (F5).
+	 *
+	 * PR-1.S1 R3 fix: `deferSave` skips this call's own save/notify and just reports whether anything
+	 * changed, so a caller reconciling many sources in one pass (`onMetadataResolved`'s first resolve)
+	 * can do one save and one render notification for the whole batch instead of one per source. */
+	refreshFolderSource(viewId: string, nodeId: string, outsidePath?: string, opts?: { deferSave?: boolean }): boolean {
 		const view = this.getView(viewId);
-		if (!view) return;
+		if (!view) return false;
 		const found = this.findNode(view.root, nodeId);
-		if (!found || !canHoldSource(found.node) || !found.node.folderSource) return;
+		if (!found || !canHoldSource(found.node) || !found.node.folderSource) return false;
 		const ownerId = found.node.id;
-		const before = JSON.stringify([found.node.children, found.node.apiItemState, found.node.apiItemOrder]);
+		// PR-2 R2 fix: `reconcileOutsideChildChanges` below can rename or demote a managed row the user
+		// re-nested anywhere else in the view (`collectManagedMatches` walks the whole `view.root`, not
+		// just this owner's own children) — snapshotting only `found.node`'s own subtree missed those
+		// writes, so the save-vs-notify decision below could choose notifyChange() (render only) for a
+		// refresh that actually mutated a differently-nested node. Snapshotting the whole view root
+		// covers every node the reconcile can touch.
+		const before = JSON.stringify(view.root);
 		// PR-2 (R2-Q2): an Outside-Vault source's deletes and renames are reconciled before the add pass,
 		// so a renamed row keeps its node and a deleted one is demoted per mode. An unresolved path is
 		// left alone, as it always was.
@@ -1381,8 +1511,11 @@ export class ViewsManager {
 		// folder event runs through here, so an unchanged source must not cost a `data.json` write.
 		// PR-1 (R1): but it still re-renders, because an unchanged Outside-Vault source can change what
 		// the explorer shows (unplugged or reconnected drive) without any stored data changing.
-		if (unflagged || JSON.stringify([found.node.children, found.node.apiItemState, found.node.apiItemOrder]) !== before) this.save();
+		const changed = unflagged || JSON.stringify(view.root) !== before;
+		if (opts?.deferSave) return changed;
+		if (changed) this.save();
 		else this.notifyChange();
+		return changed;
 	}
 
 	/** PR-1 (G5): the ids of this view's Inside-Vault Folder sources whose target folder is one of
@@ -1406,6 +1539,20 @@ export class ViewsManager {
 		return ids;
 	}
 
+	/** PR-1.F2 R3 fix: whether any Inside-vault Folder source anywhere has active YAML rules. Gates
+	 * `onMetadataResolved`'s later-resolve notify, so a vault with no rule-filtered source doesn't get a
+	 * full explorer re-render after every note edit for a flag that never applies to it. */
+	private hasActiveFolderSourceRules(): boolean {
+		const walk = (nodes: ViewNode[]): boolean => {
+			for (const node of nodes) {
+				if (node.folderSource && node.folderSource.location === "inside" && activeFolderRules(node.folderSource).length > 0) return true;
+				if (walk(node.children)) return true;
+			}
+			return false;
+		};
+		return this.views.some((view) => walk(view.root));
+	}
+
 	/** PR-1.S1 (E10): called from `main.ts`'s existing `metadataCache "resolved"` listener, before
 	 * `UnitIndex.onMetadataResolved`. On the first resolve only, it flips the held-back flag and
 	 * re-reconciles every rule-filtered Folder source, so files held back at startup appear now.
@@ -1416,21 +1563,34 @@ export class ViewsManager {
 		if (this.metadataResolved) {
 			// PR-1.F2 (G5/G6): a later resolve re-evaluates rows only. It unflags rows that match again, and
 			// the render reads drop-outs from the cache. It never adds a file, so new files still join only
-			// on a refresh (F7). Notify even without a save, so a live drop-out repaints.
+			// on a refresh (F7). Notify even without a save, so a live drop-out repaints — but only when some
+			// Inside-vault source actually has active rules (R3 fix): otherwise there is nothing for this
+			// event to have changed, and notifying anyway would re-render on every note edit for nothing.
 			if (this.clearMatchedHiddenAtSave(this.views)) this.save();
-			else this.notifyChange();
+			else if (this.hasActiveFolderSourceRules()) this.notifyChange();
 			return;
 		}
 		this.metadataResolved = true;
 		const filtered: { viewId: string; nodeId: string }[] = [];
 		const walk = (viewId: string, nodes: ViewNode[]): void => {
 			for (const node of nodes) {
-				if (node.type === "meta" && node.folderSource?.filters) filtered.push({ viewId, nodeId: node.id });
+				// PR-1.S1 R3 fix: only Inside-vault sources ever add files here (buildFolderSourceChildren's
+				// inside path is the only one `metadataResolved` gates) — an Outside-vault source with rules
+				// has no `outsidePath` to reconcile against from this listener, so including it bought nothing
+				// but a wasted no-op reconcile.
+				if (node.type === "meta" && node.folderSource?.location === "inside" && node.folderSource.filters) filtered.push({ viewId, nodeId: node.id });
 				walk(viewId, node.children);
 			}
 		};
 		for (const view of this.views) walk(view.id, view.root);
-		for (const { viewId, nodeId } of filtered) this.refreshFolderSource(viewId, nodeId);
+		// PR-1.S1 R3 fix: one save (or one notify) for the whole batch instead of one per filtered source —
+		// `refreshFolderSource`'s own save/notify is deferred and the results combined here.
+		let changed = false;
+		for (const { viewId, nodeId } of filtered) {
+			if (this.refreshFolderSource(viewId, nodeId, undefined, { deferSave: true })) changed = true;
+		}
+		if (changed) this.save();
+		else if (filtered.length > 0) this.notifyChange();
 	}
 
 	/** PR-6: the "next reconciliation pass" half of the mode-switch edge cases — re-applies
@@ -1579,7 +1739,11 @@ export class ViewsManager {
 		// the source's mode, exactly as a delete does. Checked before the rewrite below, so the owner
 		// folder's path is first rewritten here (a renamed source folder still counts as "still inside").
 		const leftSource = (owner: ViewNode | undefined): boolean => {
-			if (!owner?.folderSource) return true;
+			// R3 fix: an owner that cannot be found at all (its id is stale/missing) is not the same as an
+			// owner that exists but no longer carries a folderSource — only rewrite the ref, same as before
+			// this detach rule existed, rather than silently splicing the row out of the tree.
+			if (!owner) return false;
+			if (!owner.folderSource) return true;
 			const sourcePath = owner.folderSource.path;
 			// R2: a renamed parent folder's child can arrive before the folder's own rename event, so the
 			// source path is still the old one here. A source folder that no longer exists at its old path

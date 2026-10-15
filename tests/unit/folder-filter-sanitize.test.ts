@@ -92,6 +92,20 @@ describe("sanitizeFolderSource — filters", () => {
 	});
 });
 
+describe("sanitizeFolderSource — location gates filters (PR-1.S1 R4)", () => {
+	const RULES = { files: { yaml: { rules: [{ key: "status", value: "active" }] } } };
+
+	it("drops filters on an outside source, even when well-formed", () => {
+		const source = loadFolderSource({ type: "folder", location: "outside", path: "/Users/dan/Jobs", showFiles: true, showFolders: true, mode: "merge", filters: RULES });
+		expect("filters" in source!).toBe(false);
+	});
+
+	it("keeps filters on an inside source", () => {
+		const source = loadFolderSource({ type: "folder", location: "inside", path: "Jobs", showFiles: true, showFolders: true, mode: "merge", filters: RULES });
+		expect(source?.filters).toEqual(RULES);
+	});
+});
+
 describe("duplicateNode — filters", () => {
 	function setup(): { vm: ViewsManager; viewId: string; nodeId: string } {
 		const view: View = createEmptyView("v1", "View");

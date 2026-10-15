@@ -4,6 +4,7 @@ import {
 	AtlasSettings,
 	DEFAULT_SETTINGS,
 	computeDefaultExcludedFolders,
+	normalizeHighlightOpenNote,
 	normalizeNoAutoPromoteFolders,
 	rewriteNoAutoPromoteFolders,
 } from "./settings";
@@ -30,6 +31,7 @@ import { FolderSourceOutsideWatchers } from "./folder-source-outside-watcher";
 import { ApiSourceController } from "./api-source-controller";
 import { CsvSourceController } from "./csv-source-controller";
 import { MarkdownTableSourceController } from "./markdown-table-source-controller";
+import { ExternalMoveDetector } from "./external-move";
 
 interface AtlasData {
 	settings: AtlasSettings;
@@ -90,6 +92,9 @@ export default class AtlasPlugin extends Plugin {
 	/** PR-1 (G5): debounced live refresh for Inside-Vault Folder sources. Plugin-wide, not per leaf, so
 	 * two open Atlas leaves never mean two refreshes of the same source. */
 	private folderLiveRefresh = new FolderLiveRefresh((nodeId) => this.refreshInsideFolderSource(nodeId));
+	/** PR-1.S1 (T1): pairs a `delete` with a later `create` of the same name/kind as an external move
+	 * (e.g. a shell `mv`), which Obsidian reports as delete+create rather than `rename`. */
+	private externalMoveDetector = new ExternalMoveDetector();
 
 	async onload() {
 		const data = (await this.loadData()) as AtlasData | null;
@@ -221,10 +226,15 @@ export default class AtlasPlugin extends Plugin {
 	}
 
 	/** PR-1 (G5): a vault `create` event — the index picks the new file up, and any Inside-Vault Folder
-	 * source it is a direct child of refreshes live. */
+	 * source it is a direct child of refreshes live. PR-1.S1 (T1): also checks whether this pairs with
+	 * a recent `delete` of the same name and kind at a different path — an external move Obsidian
+	 * reports as delete+create instead of `rename` — and if so, replays the same reconciliation
+	 * `onVaultRenameEvent` runs for an in-app rename. */
 	onVaultCreateEvent(file: TAbstractFile): void {
 		this.unitIndex.onVaultCreate(file);
 		this.scheduleInsideFolderRefresh([file.path]);
+		const oldPath = this.externalMoveDetector.matchCreate(file);
+		if (oldPath !== null) this.onVaultRenameEvent(file, oldPath);
 	}
 
 	/** PR-1 (G5): a vault `delete` event. The live refresh is queued after the view's own delete handling,
@@ -241,6 +251,7 @@ export default class AtlasPlugin extends Plugin {
 		// `onVaultModifyEvent` already uses for a save — see its own doc comment for why this needs no
 		// separate "missing" handling.
 		this.notifyCsvOrMarkdownTableFileChanged(file.path);
+		this.externalMoveDetector.onDelete(file);
 	}
 
 	/** PR-1 (G5): a vault `rename` event. The live refresh is queued only after `viewsManager.onVaultRename`
@@ -293,6 +304,7 @@ export default class AtlasPlugin extends Plugin {
 
 	onunload() {
 		this.folderLiveRefresh.cancelAll(); // PR-1 (G5): nothing fires after the plugin is gone
+		this.externalMoveDetector?.cancelAll(); // PR-1.S1 (T1): same — no stray pairing after unload
 		this.outsideFolderWatchers?.closeAll(); // PR-2 (G9): every watcher closes with the plugin
 		this.graduation?.dispose(); // before closing the dialog, so a dismissed one doesn't revert or move anything
 		closeNameDialog();
@@ -325,6 +337,9 @@ export default class AtlasPlugin extends Plugin {
 		this.settings = Object.assign({}, DEFAULT_SETTINGS, data?.settings);
 		// Always a fresh, normalised array: `Object.assign` above would otherwise share DEFAULT_SETTINGS' array.
 		this.settings.noAutoPromoteFolders = normalizeNoAutoPromoteFolders(data?.settings?.noAutoPromoteFolders, this.settings.poolFolder);
+		// PR-1.F2: a hand-edited non-boolean value must not throw and falls back to the default (on),
+		// rather than being carried through by the plain `Object.assign` above.
+		this.settings.highlightOpenNote = normalizeHighlightOpenNote(this.settings.highlightOpenNote);
 		this.manualPromotions = data?.manualPromotions ?? [];
 		this.dismissedByView = data?.dismissedByView ?? {};
 		this.dismissedGlobal = data?.dismissedGlobal ?? [];

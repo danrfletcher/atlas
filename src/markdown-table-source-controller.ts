@@ -5,6 +5,7 @@ import { planApiRefresh } from "./api-refresh-plan";
 import { applyMergeResult, splitFolderSourceDeleted } from "./api-merge";
 import { detectMarkdownTables, selectMarkdownTable } from "./markdown-table-mapping";
 import { ConfirmDeleteAnswer } from "./api-source-controller";
+import { cacheSnapshot } from "./api-cache-snapshot";
 import { ApiCache, MarkdownTableSourceConfig, ViewNode } from "./types";
 
 export interface MarkdownTableRefreshDeps {
@@ -40,7 +41,7 @@ function emptyCache(prev: ApiCache | undefined, fetchedAt: number, error: string
 export class MarkdownTableSourceController {
 	private inFlight = new Map<string, { promise: Promise<void>; sourceKey: string }>();
 
-	refresh(node: ViewNode, source: MarkdownTableSourceConfig, persist: () => void, deps: MarkdownTableRefreshDeps): Promise<void> {
+	refresh(node: ViewNode, source: MarkdownTableSourceConfig, persist: (changed: boolean) => void, deps: MarkdownTableRefreshDeps): Promise<void> {
 		const sourceKey = JSON.stringify(source);
 		const existing = this.inFlight.get(node.id);
 		if (existing) {
@@ -55,7 +56,7 @@ export class MarkdownTableSourceController {
 	private runRefresh(
 		node: ViewNode,
 		source: MarkdownTableSourceConfig,
-		persist: () => void,
+		persist: (changed: boolean) => void,
 		deps: MarkdownTableRefreshDeps,
 		sourceKey: string
 	): Promise<void> {
@@ -67,7 +68,7 @@ export class MarkdownTableSourceController {
 		return run;
 	}
 
-	private async doRefresh(node: ViewNode, source: MarkdownTableSourceConfig, persist: () => void, deps: MarkdownTableRefreshDeps): Promise<void> {
+	private async doRefresh(node: ViewNode, source: MarkdownTableSourceConfig, persist: (changed: boolean) => void, deps: MarkdownTableRefreshDeps): Promise<void> {
 		const now = deps.now ?? (() => Date.now());
 		const trigger = deps.trigger ?? "manual";
 		// Same race-guard `CsvSourceController.doRefresh` uses: re-checked after every await so a
@@ -79,6 +80,11 @@ export class MarkdownTableSourceController {
 			if (node.markdownTableSource === undefined || startingSource === undefined) return true;
 			return JSON.stringify(node.markdownTableSource) !== JSON.stringify(startingSource);
 		};
+		// PR-1 R4 fix: same reasoning as `CsvSourceController.doRefresh` — this now runs on every view
+		// load/switch with no toggle, so persisting unconditionally would churn data.json even when the
+		// file hadn't changed.
+		const before = cacheSnapshot(node);
+		const persistIfChanged = () => persist(cacheSnapshot(node) !== before);
 
 		try {
 			const file = deps.vault.getAbstractFileByPath(source.path);
@@ -86,7 +92,7 @@ export class MarkdownTableSourceController {
 				// G23/E4: the source file is missing — reported the same way a dead API URL/missing CSV
 				// file would be.
 				node.apiCache = emptyCache(node.apiCache, now(), `File not found: ${source.path}`);
-				persist();
+				persistIfChanged();
 				return;
 			}
 
@@ -106,7 +112,7 @@ export class MarkdownTableSourceController {
 
 			if (isMapError(mapped)) {
 				node.apiCache = emptyCache(node.apiCache, now(), mapped.error);
-				persist();
+				persistIfChanged();
 				return;
 			}
 
@@ -148,7 +154,7 @@ export class MarkdownTableSourceController {
 				node.apiItemOrder = merged.order;
 				node.apiAwaitingConfirmation = false;
 				applyCacheSuccess();
-				persist();
+				persistIfChanged();
 				return;
 			}
 
@@ -166,22 +172,22 @@ export class MarkdownTableSourceController {
 				node.apiItemOrder = merged.order;
 				node.apiAwaitingConfirmation = false;
 				applyCacheSuccess();
-				persist();
+				persistIfChanged();
 				return;
 			}
 
 			if (answer === "cancelled" || trigger === "manual") {
 				node.apiAwaitingConfirmation = false;
 				applyCacheSuccess();
-				persist();
+				persistIfChanged();
 				return;
 			}
 
 			node.apiAwaitingConfirmation = true;
-			persist();
+			persistIfChanged();
 		} catch (err) {
 			node.apiCache = emptyCache(node.apiCache, now(), err instanceof Error ? err.message : "Unexpected error");
-			persist();
+			persistIfChanged();
 		}
 	}
 }

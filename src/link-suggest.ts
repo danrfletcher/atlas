@@ -52,6 +52,14 @@ export class AtlasLinkSuggest extends EditorSuggest<SuggestItem> {
 		if (this.isInsideCodeBlock(file, cursor.line)) return null;
 
 		const query = match[1];
+
+		// If `#` or `^` appears before any `|`, this is a heading/block link (or the same for an
+		// embed, same `[[`/`![[` path) — step aside so Obsidian's own heading/block suggester gets
+		// a turn instead of Atlas fuzzy-matching `File#Heading` against file names and finding
+		// nothing. `[[A|alias#x` is unaffected because the `|` comes first (settled call, F4).
+		const specialChar = /[#^|]/.exec(query);
+		if (specialChar && specialChar[0] !== "|") return null;
+
 		const startCh = cursor.ch - query.length - 2;
 		return { start: { line: cursor.line, ch: startCh }, end: cursor, query };
 	}
