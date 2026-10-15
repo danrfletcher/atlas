@@ -131,6 +131,14 @@ export class ApiSourceModal extends Modal {
 	 * no choice to make (zero or one table) and when loading a previously-saved config's stored index. */
 	private mdTablePath: string;
 	private mdTableIndex: number | null;
+	// PR-8 (R2 fix): true once `mdTableIndex` holds a genuinely user-intended value — loaded from a
+	// previously-saved config, or explicitly picked from the index-picker dropdown — as opposed to
+	// `resetMarkdownTableFieldsToBlank`'s own placeholder `0` for a brand-new, never-configured
+	// source. `loadMarkdownTableSample` only keeps the current index across a reload when this is
+	// true; otherwise that placeholder `0` would wrongly look like an "already chosen" index the
+	// moment a brand-new source's first "Load sample" happens to find exactly one or more tables,
+	// defeating R1's "never auto-pick when there's a genuine choice" rule for that very first load.
+	private mdTableIndexIsMeaningful = false;
 	/** PR-8 (G20): the tables detected by the last "Load sample" — cached so the index-picker dropdown
 	 * can switch between tables (re-deriving `sampleFields` for the newly chosen one) without needing
 	 * to re-read the file from disk on every selection change. */
@@ -205,6 +213,7 @@ export class ApiSourceModal extends Modal {
 		if (initialMarkdownTableSource) {
 			this.mdTablePath = initialMarkdownTableSource.path ?? "";
 			this.mdTableIndex = initialMarkdownTableSource.tableIndex ?? 0;
+			this.mdTableIndexIsMeaningful = true;
 			this.mapping = initialMarkdownTableSource.mapping ? { ...initialMarkdownTableSource.mapping } : this.mapping;
 			this.mode = initialMarkdownTableSource.mode ?? "merge";
 			this.keepOnEmpty = initialMarkdownTableSource.keepOnEmpty ?? true;
@@ -286,6 +295,7 @@ export class ApiSourceModal extends Modal {
 	private resetMarkdownTableFieldsToBlank(): void {
 		this.mdTablePath = "";
 		this.mdTableIndex = 0;
+		this.mdTableIndexIsMeaningful = false;
 		this.mdTables = [];
 		this.mapping = { idField: "", labelField: "", secondaryField: undefined };
 		this.extraFields = [];
@@ -833,6 +843,7 @@ export class ApiSourceModal extends Modal {
 					dropdown.setValue(this.mdTableIndex === null ? "" : String(this.mdTableIndex));
 					dropdown.onChange((value) => {
 						this.mdTableIndex = value === "" ? null : Number(value);
+						this.mdTableIndexIsMeaningful = value !== "";
 						this.applyMarkdownTableSelection();
 						this.render();
 					});
@@ -936,14 +947,18 @@ export class ApiSourceModal extends Modal {
 		// PR-8 (R2 fix): a previously-stored or previously-picked index that is still in range for
 		// this file's tables is kept, rather than unconditionally reset — editing an existing source
 		// used to silently drop the saved `tableIndex` back to 0/null the moment "Load sample" ran,
-		// even when the same table was still at the same position.
-		const previousIndex = this.mdTableIndex;
+		// even when the same table was still at the same position. Gated on `mdTableIndexIsMeaningful`
+		// (R5 regression fix): a brand-new, never-configured source's placeholder `0` must not be
+		// mistaken for a real prior choice — that placeholder happening to be "in range" for whatever
+		// the first Load sample finds would otherwise auto-pick table 1 every time, defeating R1.
+		const previousIndex = this.mdTableIndexIsMeaningful ? this.mdTableIndex : null;
 		this.mdTableIndex =
 			previousIndex !== null && previousIndex >= 0 && previousIndex < this.mdTables.length
 				? previousIndex
 				: needsTableIndexPrompt(this.mdTables)
 					? null
 					: 0;
+		this.mdTableIndexIsMeaningful = this.mdTableIndex !== null;
 		this.applyMarkdownTableSelection();
 		this.render();
 	}

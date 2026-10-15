@@ -259,6 +259,16 @@ vi.mock("obsidian", () => {
 		children: unknown[] = [];
 	}
 
+	// PR-8 (R5 fix): minimal stand-in so `loadCsvSample`/`loadMarkdownTableSample`'s own
+	// `file instanceof TFile` check can be driven for real against a fake `app.vault`, same reasoning
+	// as `FakeTFolder` above.
+	class FakeTFile {
+		path: string;
+		constructor(path = "") {
+			this.path = path;
+		}
+	}
+
 	return {
 		App: class {},
 		ButtonComponent: FakeButtonComponent,
@@ -266,13 +276,14 @@ vi.mock("obsidian", () => {
 		Notice: FakeNotice,
 		Platform: { isMobile: false },
 		Setting: FakeSetting,
+		TFile: FakeTFile,
 		TFolder: FakeTFolder,
 		requestUrl: async () => mockHttpResponse,
 		setTooltip: vi.fn(),
 	};
 });
 
-import { TFolder } from "obsidian";
+import { TFile, TFolder } from "obsidian";
 import { ApiSourceModal } from "../../src/api-source-modal";
 import { ApiSourceConfig } from "../../src/types";
 
@@ -708,6 +719,40 @@ describe("R1 — Markdown Table: no auto-pick of the first table when there's a 
 		expect((modal as any).mdTableIndex).toBe(1);
 		expect(settingNamed(modal, "Mapping mode")).toBeTruthy();
 		expect((modal as any).saveButton.disabled).toBe(false);
+	});
+
+	// PR-8 (R5 fix): the test above only ever hand-sets `mdTables`/`mdTableIndex` to simulate "the
+	// state right after Load sample" — it never actually drives `loadMarkdownTableSample` against a
+	// real multi-table file, so a regression in that method's own index decision (e.g. the R1 fix
+	// going back to always defaulting to 0) would still pass every assertion above. This drives the
+	// real method through a fake `app.vault` instead.
+	it("loadMarkdownTableSample itself leaves the index null for a real file with two or more tables, not just the hand-simulated state", async () => {
+		const path = "notes/table.md";
+		const text = "| id | name |\n|---|---|\n| 1 | One |\n\n| id | name |\n|---|---|\n| 2 | Two |\n";
+		const app = {
+			vault: {
+				getRoot: () => ({ path: "/", children: [] }),
+				getAbstractFileByPath: (p: string) => {
+					if (p !== path) return null;
+					const file = new TFile();
+					(file as unknown as { path: string }).path = p;
+					return file;
+				},
+				cachedRead: async () => text,
+			},
+		};
+		const modal = new ApiSourceModal(app as any, null, [], vi.fn());
+		(modal as any).onOpen();
+		settingNamed(modal, "Source type").components[0].select("markdown-table");
+		settingNamed(modal, "Markdown file").components[0].type(path);
+
+		await (modal as any).loadMarkdownTableSample();
+
+		expect((modal as any).mdTables).toHaveLength(2);
+		expect((modal as any).mdTableIndex).toBeNull();
+		const tableDropdown = settingNamed(modal, "Table").components[0];
+		expect(tableDropdown.value).toBe("");
+		expect(settingNamed(modal, "Mapping mode")).toBeUndefined();
 	});
 
 	it("a file with zero or exactly one table never shows the picker and the mapping UI renders immediately", () => {
