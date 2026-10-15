@@ -87,7 +87,13 @@ function tokenize(text: string): TokenizeResult {
 			i++;
 			continue;
 		}
-		if (c === '"') {
+		// R10 fix (G22/E3): a quote only opens a quoted field when it's the field's very first
+		// character — same rule RFC4180 uses. A quote appearing mid-field (e.g. `ab"c`) used to be
+		// treated as an opener too, silently merging everything up to the next quote (even across
+		// line breaks) into one field and losing whatever row that quote happened to close, uncounted.
+		// Treated as a literal character here instead, matching the leniency the rest of this parser
+		// already applies elsewhere.
+		if (c === '"' && field === "") {
 			inQuotes = true;
 			quoteOpenIndex = i;
 			i++;
