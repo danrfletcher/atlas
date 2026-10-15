@@ -42,7 +42,7 @@ function normalizeVaultFolderPath(raw: string): string {
 	return raw.trim().replace(/^\/+/, "").replace(/\/+$/, "");
 }
 
-const SOURCE_TYPE_OPTIONS: { value: DataSourceType; label: string }[] = [
+export const SOURCE_TYPE_OPTIONS: { value: DataSourceType; label: string }[] = [
 	{ value: "api", label: "API" },
 	{ value: "folder", label: "Folder" },
 	{ value: "markdown-table", label: "Markdown table" },
