@@ -31,25 +31,58 @@ export function rewriteRefPath(ref: UnitRef, oldPath: string, newPath: string): 
 	return rewritten === ref.path ? ref : { ...ref, path: rewritten };
 }
 
+/** PR-1.F1: the inverse of `unitRefKey` — recovers a `UnitRef` from a row's persisted
+ * `data-ref-key` string so `updateActiveHighlight` can decide a match without the render pass
+ * keeping a live `ViewNode`/`UnitRef` around for every row. Returns null for anything that isn't a
+ * well-formed `file:`/`folder:`/`block:` key (an unrecognised kind, or a `block:` key with no `#`),
+ * never throws.
+ *
+ * R5: a `block:` key's path/subpath boundary is genuinely ambiguous from the string alone whenever
+ * *either* half contains its own `#` — the open file's path can (`Draft #1.md`, R4), and so can the
+ * subpath, because a link can target a heading nested under another heading (`[[Ideas#H1#H2]]`
+ * promotes `{ path: 'Ideas.md', subpath: 'H1#H2' }`, key `'block:Ideas.md#H1#H2'`). Splitting at the
+ * first `#` misreads the former; splitting at the last `#` (this function's choice, kept only
+ * because it matches `unitRefKey`'s own round-trip for the common case of a `#`-free subpath)
+ * misreads the latter — no fixed split position is correct for both. Callers that already know the
+ * candidate path (`updateActiveHighlight` knows `activeFilePath`; `rewriteRefKeyPath` knows
+ * `oldPath`) must settle the boundary themselves via a prefix check (`key.startsWith(
+ * \`block:${knownPath}#\`)`) instead of trusting this function's guess — see `updateActiveHighlight`
+ * in explorer-view.ts and `rewriteRefKeyPath` below. */
+export function parseUnitRefKey(key: string): UnitRef | null {
+	const colon = key.indexOf(":");
+	if (colon < 0) return null;
+	const kind = key.slice(0, colon);
+	const rest = key.slice(colon + 1);
+	if (kind === "file" || kind === "folder") return { kind, path: rest };
+	if (kind === "block") {
+		const hash = rest.lastIndexOf("#");
+		if (hash < 0) return null;
+		return { kind: "block", path: rest.slice(0, hash), subpath: rest.slice(hash + 1) };
+	}
+	return null;
+}
+
 /** PR-4 (R8): rewrites the path embedded in a `unitRefKey` string (`'file:Proj/a.md'`,
  * `'folder:Proj'`, `'block:Proj/a.md#^abc'`) using the same rename-integrity rule as
  * `rewritePathString`. `FolderSourceConfig.removedRefs` stores these keys rather than `UnitRef`s
  * (it only needs to test membership), but still needs to stay in sync on rename like every other
  * ref in the view — otherwise a removed row's key stops matching the renamed path and the row comes
  * back on the next refresh. Returns the same string instance, unchanged, if the embedded path
- * doesn't match `oldPath`. */
+ * doesn't match `oldPath`.
+ *
+ * R5: for a `block:` key, matches against `oldPath` via prefix rather than splitting the key at any
+ * `#` first — unlike `parseUnitRefKey`, this function already knows the one path it's looking for,
+ * so it never has to guess where the path ends and the subpath (which can itself contain `#`,
+ * `[[Ideas#H1#H2]]`) begins. An exact match is `rest.startsWith('<oldPath>#')`; a descendant of a
+ * renamed folder is `rest.startsWith('<oldPath>/')`, mirroring `rewritePathString`'s own two cases. */
 export function rewriteRefKeyPath(key: string, oldPath: string, newPath: string): string {
 	const colon = key.indexOf(":");
 	if (colon < 0) return key;
 	const kind = key.slice(0, colon);
 	const rest = key.slice(colon + 1);
 	if (kind === "block") {
-		const hash = rest.indexOf("#");
-		if (hash < 0) return key;
-		const path = rest.slice(0, hash);
-		const subpath = rest.slice(hash + 1);
-		const rewritten = rewritePathString(path, oldPath, newPath);
-		return rewritten === path ? key : `block:${rewritten}#${subpath}`;
+		if (rest.startsWith(`${oldPath}#`) || rest.startsWith(`${oldPath}/`)) return `block:${newPath}${rest.slice(oldPath.length)}`;
+		return key;
 	}
 	const rewritten = rewritePathString(rest, oldPath, newPath);
 	return rewritten === rest ? key : `${kind}:${rewritten}`;

@@ -4,6 +4,7 @@ import { runJsMapping } from "./api-js-mapping";
 import { planApiRefresh } from "./api-refresh-plan";
 import { parseCsv } from "./csv-parsing";
 import { ConfirmDeleteAnswer } from "./api-source-controller";
+import { cacheSnapshot } from "./api-cache-snapshot";
 import { ApiCache, CsvSourceConfig, ViewNode } from "./types";
 
 export interface CsvRefreshDeps {
@@ -25,33 +26,6 @@ function emptyCache(prev: ApiCache | undefined, fetchedAt: number, error: string
 		truncated: prev?.truncated ?? false,
 		lastSuccessAt: prev?.lastSuccessAt,
 	};
-}
-
-/** PR-1 R4 fix: everything a refresh can write that matters for "did anything actually change" —
- * `fetchedAt`/`lastSuccessAt` are deliberately excluded, since they stamp every refresh (including
- * a no-op one) by design and would make every refresh look "changed". Per-row `lastSeenAt` is the
- * same kind of bookkeeping stamp (`mergeApiItems` touches it on every present row, every refresh —
- * R13), so it's stripped from each entry before comparing too. `notFound` is normalized to a real
- * boolean: `mergeApiItems` leaves it absent on a row's first-ever appearance but writes an explicit
- * `false` once the row has a `prev` to spread (R13's `{ ...prev, notFound: false, ... }`) — same
- * meaning, different JSON shape, which would otherwise read as a change on every second refresh. */
-function cacheSnapshot(node: ViewNode): string {
-	const itemState = node.apiItemState;
-	const comparableItemState = itemState
-		? Object.fromEntries(
-				Object.entries(itemState).map(([id, item]) => [id, { ...item, lastSeenAt: undefined, notFound: item.notFound ?? false }])
-			)
-		: itemState;
-	return JSON.stringify([
-		node.apiCache?.ok,
-		node.apiCache?.error,
-		node.apiCache?.rows,
-		node.apiCache?.skippedCount,
-		node.apiCache?.truncated,
-		comparableItemState,
-		node.apiItemOrder,
-		node.apiAwaitingConfirmation,
-	]);
 }
 
 /**

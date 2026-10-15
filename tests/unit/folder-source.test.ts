@@ -447,6 +447,21 @@ describe("removedRefs-rewrite-on-rename — R8", () => {
 		expect(rewritten.removedRefs).toEqual(["file:Unrelated/a.md"]);
 	});
 
+	it("R5: onVaultRename rewrites a removedRefs block key whose subpath itself contains '#' (a nested-heading link, [[Ideas#H1#H2]])", () => {
+		const vm = makeViewsManager();
+		const view = vm.getViews()[0];
+		const folder = vm.addMetaFolder(view.id, null, "Folder source")!;
+		vm.setFolderSource(view.id, folder.id, source({ path: "Projects", removedRefs: ["block:Projects/Ideas.md#H1#H2"] }));
+
+		vm.onVaultRename("Projects/Ideas.md", "Projects/Renamed.md");
+
+		const rewritten = vm.getNode(view.id, folder.id)!.folderSource!;
+		// Splitting at the last '#' (the R4 fix) would misread the path as 'Projects/Ideas.md#H1' and
+		// leave this key unrewritten; splitting at the first would misread a '#'-in-path case (R4).
+		// Only matching the known `oldPath` by prefix gets both right.
+		expect(rewritten.removedRefs).toEqual(["block:Projects/Renamed.md#H1#H2"]);
+	});
+
 	it("end-to-end: removing a managed child, then renaming it, then refreshing, does not resurrect it under its new name", () => {
 		const app = new MockApp();
 		app.vault.seedFolder("Proj");
@@ -536,6 +551,107 @@ describe("R1 end-to-end — a managed row survives refresh after being moved or 
 		vm.refreshFolderSource(view.id, folder.id);
 
 		expect(countRef(view.root, aRef)).toBe(0);
+	});
+});
+
+describe("R1 fix — removing a folder-source owner lifts a hand-nested grandchild of its managed child", () => {
+	/** Builds `owner` (a folder-source meta node) → `managed` (its managed child) → `grandchild`
+	 * (a plain, non-managed unit hand-nested under `managed` — something only possible for an
+	 * Inside-Vault owner, whose managed rows stay ordinary drop zones; an Outside-Vault managed row
+	 * is never a drop zone, but the tree shape is built the same way here to exercise the drop path
+	 * explicitly regardless). */
+	function buildOwnerWithManagedChild(location: "inside" | "outside") {
+		const vm = makeViewsManager();
+		const view = vm.getViews()[0];
+		const grandchild: ViewNode = { id: "grandchild", type: "unit", ref: { kind: "file", path: "Other.md" }, children: [] };
+		const managed: ViewNode = {
+			id: "managed",
+			type: "unit",
+			ref: { kind: "file", path: "Projects/a.md" },
+			children: [grandchild],
+			folderSourceManaged: true,
+			folderSourceOwnerId: "owner",
+		};
+		const owner: ViewNode = {
+			id: "owner",
+			type: "meta",
+			label: "Folder source",
+			children: [managed],
+			folderSource: source({ location, path: location === "inside" ? "Projects" : "" }),
+		};
+		view.root.push(owner);
+		return { vm, view };
+	}
+
+	it("Inside-Vault: the managed child and its hand-nested grandchild are promoted up one level, not dropped", () => {
+		const { vm, view } = buildOwnerWithManagedChild("inside");
+
+		vm.unplaceNode(view.id, "owner");
+
+		expect(view.root.some((n) => n.id === "managed")).toBe(true);
+		const promoted = vm.getNode(view.id, "managed")!;
+		expect(promoted).toBeDefined();
+		expect(promoted.children.some((n) => n.id === "grandchild")).toBe(true);
+		expect(vm.getNode(view.id, "grandchild")).toBeDefined();
+	});
+
+	it("Outside-Vault: the managed child and its hand-nested grandchild are still dropped with the owner", () => {
+		const { vm, view } = buildOwnerWithManagedChild("outside");
+
+		vm.unplaceNode(view.id, "owner");
+
+		expect(view.root).toEqual([]);
+		expect(vm.getNode(view.id, "managed")).toBeNull();
+		expect(vm.getNode(view.id, "grandchild")).toBeNull();
+	});
+
+	/** R1 fix (round 2): a promoted Inside-Vault row must lose its managed identity entirely, not just
+	 * move up a level still flagged `folderSourceManaged` with a now-dangling `folderSourceOwnerId` —
+	 * every lookup that gates on those fields (delete reconciliation, Swap, another source's own
+	 * reconcile) only checks `folderSourceManaged`/`folderSourceOwnerId`, never whether the owner they
+	 * point at still exists. */
+	it("Inside-Vault: the promoted row's folderSourceManaged/folderSourceOwnerId/folderSourceHiddenAtSave are all cleared", () => {
+		const { vm, view } = buildOwnerWithManagedChild("inside");
+		const managedBefore = vm.getNode(view.id, "managed")!;
+		managedBefore.folderSourceHiddenAtSave = true;
+
+		vm.unplaceNode(view.id, "owner");
+
+		const promoted = vm.getNode(view.id, "managed")!;
+		expect(promoted.folderSourceManaged).toBeUndefined();
+		expect(promoted.folderSourceOwnerId).toBeUndefined();
+		expect(promoted.folderSourceHiddenAtSave).toBeUndefined();
+	});
+
+	/** R1 (a): before this fix, `onVaultDelete` still matched the promoted row through
+	 * `collectManagedMatches` (it only checks `folderSourceManaged`), found no owner to compute a
+	 * placeholder from, and spliced the row out with nothing put back — the whole row vanished instead
+	 * of becoming a greyed missing row. Now that promotion clears `folderSourceManaged`, the row is an
+	 * ordinary unit node and `onVaultDelete` leaves it alone entirely, exactly like any other unit whose
+	 * file goes missing (rendered as a missing row elsewhere, never auto-removed). */
+	it("delete-after-removal: deleting the promoted row's file leaves it in the tree instead of vanishing", () => {
+		const { vm, view } = buildOwnerWithManagedChild("inside");
+
+		vm.unplaceNode(view.id, "owner");
+		vm.onVaultDelete("Projects/a.md");
+
+		const survivor = vm.getNode(view.id, "managed");
+		expect(survivor).toBeDefined();
+		expect(survivor!.ref).toEqual({ kind: "file", path: "Projects/a.md" });
+		expect(survivor!.folderSourceManaged).toBeUndefined();
+	});
+
+	/** R1 (b): before this fix, `canSwapNode`/`swapNodeWithUnit` refused the promoted row forever,
+	 * since both only check the still-true `folderSourceManaged` flag — "Swap with…" never appeared for
+	 * an otherwise-ordinary top-level row. */
+	it("swap-after-removal: the promoted row can now be swapped for another unit", () => {
+		const { vm, view } = buildOwnerWithManagedChild("inside");
+
+		vm.unplaceNode(view.id, "owner");
+		const didSwap = vm.swapNodeWithUnit(view.id, "managed", { kind: "file", path: "Elsewhere.md" });
+
+		expect(didSwap).toBe(true);
+		expect(vm.getNode(view.id, "managed")!.ref).toEqual({ kind: "file", path: "Elsewhere.md" });
 	});
 });
 

@@ -545,7 +545,10 @@ export class ViewsManager {
 	/** PR-1.S1 (E10): false until `metadataCache` has resolved, seeded in the constructor (T1). */
 	private metadataResolved: boolean;
 	/** PR-1.F2 R2 fix: bumped on every change notification, so `getFolderSourceOwners`'s cache knows
-	 * when a stored owner map might be stale without having to track every mutation site individually. */
+	 * when a stored owner map might be stale without having to track every mutation site individually.
+	 * PR-1 R3: this only holds if every write to a node's `folderSource` goes through `save()` or
+	 * `notifyChange()` — both bump this counter, so no mutation site needs to touch it directly. A
+	 * future direct mutation of `node.folderSource` that skips both would leave the cache stale. */
 	private folderSourceOwnersVersion = 0;
 	private folderSourceOwnersCache: { viewId: string; version: number; owners: Map<string, FolderSourceConfig> } | null = null;
 
@@ -568,7 +571,7 @@ export class ViewsManager {
 
 	/** Re-renders listeners without persisting anything — for a change that is only visible on screen
 	 * (e.g. an Outside-Vault source's unresolved/reconnected state), which `save` alone would skip. */
-	private notifyChange(): void {
+	notifyChange(): void {
 		this.folderSourceOwnersVersion++;
 		for (const cb of this.changeListeners) cb();
 	}
@@ -577,7 +580,13 @@ export class ViewsManager {
 	 * single tree walk and cached until the next change notification — `managedRowFilterState` used to
 	 * call `getNode` (its own whole-tree walk) for every managed row it was asked about, which made a
 	 * render with many managed rows O(n^2). Re-walks only when nothing cached yet, the view changed, or
-	 * a mutation has happened since the cached map was built. */
+	 * a mutation has happened since the cached map was built.
+	 *
+	 * PR-1 R3: this cache holds a single view's map at a time, so switching between views rebuilds it
+	 * on every switch rather than keeping one map per view — cheap today since every mutation site
+	 * (`setFolderSource`, the rename rewrite, sanitize) already routes through `save()`/`notifyChange()`
+	 * to bump `folderSourceOwnersVersion`. Neither is a bug now; both assumptions break if a future
+	 * mutation site writes `node.folderSource` directly without going through one of those two calls. */
 	private getFolderSourceOwners(viewId: string): Map<string, FolderSourceConfig> {
 		const cached = this.folderSourceOwnersCache;
 		if (cached && cached.viewId === viewId && cached.version === this.folderSourceOwnersVersion) return cached.owners;
@@ -802,9 +811,56 @@ export class ViewsManager {
 	 * "never open/drag/rename this" protections active (see `isOutsideManagedNodeId`), so promoting
 	 * it to a plain top-level row the same way an ordinary child is promoted would leave it broken
 	 * and live. Dropped along with the owner instead; a manually-placed, non-managed child is
-	 * promoted as before. */
+	 * promoted as before.
+	 *
+	 * R1 fix: an Inside-Vault owner's managed children ARE real vault paths, and stay ordinary drop
+	 * zones the whole time the owner lives (`isOutsideManagedUnit`/the row-level drop gate in
+	 * `explorer-view.ts` only ever block an Outside-Vault one), so a user can hand-nest their own unit
+	 * under one. Dropping every managed child here regardless of location silently discarded that
+	 * hand-nested grandchild along with its managed parent, instead of lifting it one level like
+	 * every other removal. Only an Outside-Vault owner's managed children are dropped now; an
+	 * Inside-Vault owner's are promoted like any other child, subtree and all.
+	 *
+	 * R1 fix (round 2): that last clause was wrong — a missing owner id is NOT treated as "not managed"
+	 * everywhere. `collectManagedMatches`/`reconcileFolderSourceDeletesForPath` still match a promoted
+	 * row purely on its own still-true `folderSourceManaged`, so a later delete of it finds no owner,
+	 * computes no placeholder, and the row vanishes outright instead of showing a greyed missing row
+	 * (the rename path already guards exactly this at `onVaultRename`'s `leftSource`; the delete path
+	 * had no equivalent). `canSwapNode`/`swapNodeWithUnit`/`swapNodeForAtlasFolder` refuse it too, since
+	 * they also only check `folderSourceManaged`. And `reconcileManagedChildren` never checks the owner
+	 * id at all, so a different source's reconcile would mistake it for one of its own already-managed
+	 * rows if the user ever re-nests it underneath. `releaseManagedChildren`, called by both callers of
+	 * this method, clears `folderSourceManaged`/`folderSourceOwnerId`/`folderSourceHiddenAtSave` from
+	 * every row the removed owner manages anywhere in the view, not just these direct children. */
 	private promotableChildren(node: ViewNode): ViewNode[] {
-		return node.children.filter((child) => !(child.folderSourceManaged && child.folderSourceOwnerId === node.id));
+		const dropsManagedChildren = node.folderSource?.location === "outside";
+		return node.children.filter((child) => !(dropsManagedChildren && child.folderSourceManaged && child.folderSourceOwnerId === node.id));
+	}
+
+	/** R1 fix (round 2): releases every row `node` still manages anywhere in `view` once `node` itself is
+	 * about to be removed — not only the direct children `promotableChildren` just promoted, but any
+	 * managed row the user has since dragged or nested elsewhere in the tree (`reconcileManagedChildren`'s
+	 * own "managed row that got dragged out" case). A released row loses its managed identity entirely, so
+	 * every lookup that gates on `folderSourceManaged` (delete reconciliation, Swap, another source's own
+	 * reconcile) treats it as an ordinary row from here on, exactly like one that was never Folder-source-
+	 * managed. An Outside-Vault owner's managed children are dropped whole by `promotableChildren` instead
+	 * (see its own doc comment) — their `ref.path` is never a real vault path without the owner, so there
+	 * is nothing left to release for those, and this is a no-op for them. Also a no-op for a node that
+	 * never carried a Folder source at all (an ordinary meta folder or unit), since nothing else in the
+	 * view can have `folderSourceOwnerId === node.id` in that case. */
+	private releaseManagedChildren(view: View, node: ViewNode): void {
+		if (node.folderSource?.location === "outside") return;
+		const release = (nodes: ViewNode[]): void => {
+			for (const n of nodes) {
+				if (n.folderSourceManaged && n.folderSourceOwnerId === node.id) {
+					delete n.folderSourceManaged;
+					delete n.folderSourceOwnerId;
+					delete n.folderSourceHiddenAtSave;
+				}
+				release(n.children);
+			}
+		};
+		release(view.root);
 	}
 
 	/** Removes one specific node instance by id, regardless of what other placements of the same
@@ -819,6 +875,7 @@ export class ViewsManager {
 		if (!found) return;
 		this.rememberFolderSourceRemoval(view, found.node);
 		found.siblings.splice(found.index, 1, ...this.promotableChildren(found.node));
+		this.releaseManagedChildren(view, found.node);
 		this.save();
 	}
 
@@ -943,8 +1000,9 @@ export class ViewsManager {
 	deleteMetaFolder(viewId: string, nodeId: string): void {
 		const view = this.getView(viewId);
 		const found = view && this.findNode(view.root, nodeId);
-		if (!found || found.node.type !== "meta") return;
+		if (!view || !found || found.node.type !== "meta") return;
 		found.siblings.splice(found.index, 1, ...this.promotableChildren(found.node));
+		this.releaseManagedChildren(view, found.node);
 		this.save();
 	}
 
@@ -1354,7 +1412,7 @@ export class ViewsManager {
 		const found = this.findNode(view.root, nodeId);
 		if (!found || !canHoldSource(found.node) || !found.node.folderSource) return false;
 		const ownerId = found.node.id;
-		// PR-1 R2 fix: `reconcileOutsideChildChanges` below can rename or demote a managed row the user
+		// PR-2 R2 fix: `reconcileOutsideChildChanges` below can rename or demote a managed row the user
 		// re-nested anywhere else in the view (`collectManagedMatches` walks the whole `view.root`, not
 		// just this owner's own children) — snapshotting only `found.node`'s own subtree missed those
 		// writes, so the save-vs-notify decision below could choose notifyChange() (render only) for a
@@ -1612,13 +1670,6 @@ export class ViewsManager {
 	 * other change here. */
 	notifyExternalMutation(): void {
 		this.save();
-	}
-
-	/** PR-1 R4 fix: the `CsvSourceController`/`MarkdownTableSourceController` equivalent of
-	 * `refreshFolderSource`'s own no-op branch — re-renders so an in-memory-only change (e.g. the dot's
-	 * `fetchedAt`) is still visible, without writing `data.json` for a refresh that found no change. */
-	notifyChangeOnly(): void {
-		this.notifyChange();
 	}
 
 	/** F9 rename integrity: rewrite every matching ref (exact + prefix) across every view. */
