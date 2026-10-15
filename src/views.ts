@@ -533,9 +533,10 @@ interface FoundNode {
 	index: number;
 }
 
-/** A managed row found by `ViewsManager.collectManagedMatches`: its parent list, its slot there, and how
- * deep it sits in the view. */
-type ManagedMatch = { list: ViewNode[]; index: number; node: ViewNode; depth: number };
+/** A managed row found by `ViewsManager.collectManagedMatches`: its parent list, the `ViewNode` that
+ * list belongs to (`undefined` only when the row sits at the view's own top level, with no parent
+ * row to attach a placeholder to), its slot there, and how deep it sits in the view. */
+type ManagedMatch = { list: ViewNode[]; parent: ViewNode | undefined; index: number; node: ViewNode; depth: number };
 
 /**
  * F9 — views (named arrangements of units into a bucket tree) with storage/integrity. The bucket
@@ -1729,14 +1730,14 @@ export class ViewsManager {
 	 * nested anywhere in the view. */
 	private collectManagedMatches(root: ViewNode[], isMatch: (node: ViewNode) => boolean): ManagedMatch[] {
 		const matches: ManagedMatch[] = [];
-		const collect = (list: ViewNode[], depth: number): void => {
+		const collect = (list: ViewNode[], parent: ViewNode | undefined, depth: number): void => {
 			for (let i = 0; i < list.length; i++) {
 				const node = list[i];
-				if (node.folderSourceManaged && isMatch(node)) matches.push({ list, index: i, node, depth });
-				collect(node.children, depth + 1);
+				if (node.folderSourceManaged && isMatch(node)) matches.push({ list, parent, index: i, node, depth });
+				collect(node.children, node, depth + 1);
 			}
 		};
-		collect(root, 0);
+		collect(root, undefined, 0);
 		return matches;
 	}
 
@@ -1757,7 +1758,7 @@ export class ViewsManager {
 	 * stale list, and no splice shifts another match's index. */
 	private demoteManagedMatches(matches: ManagedMatch[], byId: Map<string, ViewNode>, nowIso: string, deleted: boolean): void {
 		const ordered = [...matches].sort((a, b) => b.depth - a.depth || b.index - a.index);
-		for (const { list, index, node } of ordered) {
+		for (const { list, parent, index, node } of ordered) {
 			const owner = node.folderSourceOwnerId ? byId.get(node.folderSourceOwnerId) : undefined;
 			const ref = node.ref as UnitRef;
 			const mode = owner?.folderSource?.mode ?? "merge";
@@ -1765,19 +1766,29 @@ export class ViewsManager {
 			// the file still existed), rather than the raw last path segment — "a.md" showing where "a"
 			// used to be was the bug.
 			const label = basenameForDeletedRef(ref);
-			// R3 fix: `index` is this node's slot among `owner`'s real children right now, before the
-			// splice below removes it — `renderNodeList` uses it to put the resulting row back in
-			// (approximately) that same slot instead of always appending it after every real child.
+			// R3 fix: `index` is this node's slot in the list it's actually sitting in right now,
+			// before the splice below removes it — `renderNodeList` uses it to put the resulting row
+			// back in (approximately) that same slot instead of always appending it after every real
+			// child.
 			const base = { id: unitRefKey(ref), label, lastSeenAt: nowIso, explicitStatusId: node.explicitStatusId, position: index };
 			// A move-out is not a delete: the append placeholder gets no `noteRef` (nothing to clear), and
 			// the file's new location is never shown as a stale link.
 			const placeholder = reconcileFolderSourceChildDelete(mode, base, deleted ? ref : undefined);
 			list.splice(index, 1, ...node.children);
-			if (placeholder && owner) {
-				if (!owner.apiItemState) owner.apiItemState = {};
-				if (!owner.apiItemOrder) owner.apiItemOrder = [];
-				owner.apiItemState[placeholder.id] = placeholder;
-				if (!owner.apiItemOrder.includes(placeholder.id)) owner.apiItemOrder.push(placeholder.id);
+			// R6 fix: host the placeholder on the node the managed row is actually sitting under right
+			// now (`parent`), not always its Folder source's `owner`. A child the user renested
+			// elsewhere in the view (`managedElsewhere`, folder-source.ts) must stay in that list on
+			// delete too — attaching to `owner` instead would both jump the placeholder back under a
+			// node the user deliberately moved it out of, and record `position` against a list it was
+			// never a slot in. `parent` is only ever `undefined` for a row moved to the view's own top
+			// level, which has no `ViewNode` of its own to host a placeholder on — `owner` is the only
+			// reasonable fallback there, same as before this fix.
+			const host = parent ?? owner;
+			if (placeholder && host) {
+				if (!host.apiItemState) host.apiItemState = {};
+				if (!host.apiItemOrder) host.apiItemOrder = [];
+				host.apiItemState[placeholder.id] = placeholder;
+				if (!host.apiItemOrder.includes(placeholder.id)) host.apiItemOrder.push(placeholder.id);
 			}
 		}
 	}

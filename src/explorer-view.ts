@@ -554,7 +554,14 @@ function addSourceAndStatusItems(menu: Menu, plugin: AtlasPlugin, host: SourceMe
 						plugin.app,
 						`Remove the data source from "${node.label ?? unitBasename(node)}"? Its current children stay in place as plain units — it just stops refreshing.`,
 						"Remove",
-						() => plugin.viewsManager.setFolderSource(view.id, node.id, undefined)
+						() => {
+							plugin.viewsManager.setFolderSource(view.id, node.id, undefined);
+							// PR-5 R5: an Outside-Vault source's absolute path lives in
+							// FolderSourcePathStore (device-local, keyed by node id, never synced) — same
+							// reason Remove already drops an API source's headers above. Without this a
+							// stale absolute path piles up in localStorage once the source is removed.
+							plugin.folderSourcePathStore.delete(node.id);
+						}
 					).open();
 				})
 		);
@@ -646,6 +653,13 @@ export class AtlasExplorerView extends ItemView {
 	 * superseded (its container was emptied by the newer one) and must stop after each await rather
 	 * than register its redraw/observer against the newer render's DOM. */
 	private renderSeq = 0;
+	/** PR-5 (R10 fix): one `resolveOutsidePath` (fs.statSync) result per Outside-Vault source owner,
+	 * reused by every managed child row within a single render pass instead of re-stat'ing the same
+	 * path once per row. Cleared at the top of every `render()`, so a stale result never survives
+	 * past the pass that computed it — the indicator dot (which must stay live on every render, per
+	 * its own doc comment) deliberately keeps calling `resolveOutsidePath` directly and does not read
+	 * this cache. */
+	private outsideResolvedCache = new Map<string, boolean>();
 	/** PR-5 (G7/G8): whether dismissed inbox rows render inline, tagged "hidden". Mirrors
 	 * `inboxCollapsed` — a single instance field rather than per-view, matching this view's existing
 	 * convention that transient section-header UI state is shared across view switches within the
@@ -1353,7 +1367,13 @@ export class AtlasExplorerView extends ItemView {
 		if (!node.folderSourceManaged || !node.folderSourceOwnerId) return false;
 		const owner = this.plugin.viewsManager.getNode(view.id, node.folderSourceOwnerId);
 		if (owner?.folderSource?.location !== "outside") return false;
-		return !resolveOutsidePath(this.plugin.folderSourcePathStore.get(owner.id));
+		// PR-5 (R10 fix): one stat per owner per render pass, not one per managed child row.
+		let resolved = this.outsideResolvedCache.get(owner.id);
+		if (resolved === undefined) {
+			resolved = resolveOutsidePath(this.plugin.folderSourcePathStore.get(owner.id));
+			this.outsideResolvedCache.set(owner.id, resolved);
+		}
+		return !resolved;
 	}
 
 	/** PR-5 (R3 fix): true for any node (not just the one the caller already has in hand) that an
@@ -1405,6 +1425,7 @@ export class AtlasExplorerView extends ItemView {
 		// just above/below: capture before `container.empty()`, restore after rebuild.
 		const activeRowKey = activeEl instanceof HTMLElement && activeEl.dataset.selectKey ? activeEl.dataset.selectKey : null;
 
+		this.outsideResolvedCache.clear();
 		container.empty();
 		container.addClass("atlas-explorer");
 
@@ -2410,7 +2431,11 @@ export class AtlasExplorerView extends ItemView {
 		const row = container.createDiv({ cls: "atlas-row atlas-row-unit" });
 		if (info.missing) row.addClass("atlas-missing");
 		row.toggleClass("atlas-filtered-out", filteredOut);
-		row.dataset.refKey = unitRefKey(ref);
+		// PR-5 (R11 fix): an Outside-Vault-managed child's `ref.path` is root-relative, not a vault
+		// path, so its `unitRefKey` can collide with a same-named vault-root unit's. Leaving the
+		// attribute unset here means `updateActiveHighlight`'s `[data-ref-key=...]` query can never
+		// match this row for an unrelated vault file going active.
+		if (!outsideManaged) row.dataset.refKey = unitRefKey(ref);
 		row.dataset.selectKey = node.id;
 		row.toggleClass("is-selected", this.selectedBucketNodeIds.has(node.id));
 		row.style.paddingLeft = `${depth * 16}px`;
@@ -2450,7 +2475,10 @@ export class AtlasExplorerView extends ItemView {
 		// absolute external path, which is exactly the "rename affordance" the spec requires absent.
 		if (!info.missing && !outsideManaged && ref.kind === "folder") this.wireModuleRow(row, iconEl, ref.path);
 
-		this.setPlacementTooltip(row, ref);
+		// PR-5 (R11 fix): `getPlacements` keys by `unitRefKey`, which is meaningless for an
+		// Outside-Vault-managed row's root-relative `ref.path` — it would otherwise list the
+		// placements of a same-named vault-root unit instead. Cosmetic only; nothing persists.
+		if (!outsideManaged) this.setPlacementTooltip(row, ref);
 		row.addEventListener("click", (evt) => {
 			const consumed = this.handleSelectionClick(evt, node.id, "bucket", this.bucketVisibleOrder());
 			// R9(c): `ref.path` here is a bare name relative to the Outside source's root, never a vault
@@ -2466,7 +2494,7 @@ export class AtlasExplorerView extends ItemView {
 		row.addEventListener("keydown", (evt) => this.handleRowKeydown(evt, node, view));
 		row.addEventListener("contextmenu", (evt) => {
 			evt.preventDefault();
-			this.showUnitMenu(evt, ref, view, node, info.text);
+			this.showUnitMenu(evt, ref, view, node, info.text, outsideManaged);
 		});
 
 		// PR-1 (G11c): a unit holding a data source draws its rows even with an empty `children` array.
@@ -2937,11 +2965,16 @@ export class AtlasExplorerView extends ItemView {
 
 	// --- context menus -----------------------------------------------------------------------------
 
-	private showUnitMenu(evt: MouseEvent, ref: UnitRef, view: View, node: ViewNode, displayName: string): void {
+	private showUnitMenu(evt: MouseEvent, ref: UnitRef, view: View, node: ViewNode, displayName: string, outsideManaged = false): void {
 		const menu = new Menu();
-		menu.addItem((item) => item.setTitle("Open").setIcon("file").onClick(() => void this.openRef(ref)));
-		menu.addItem((item) => item.setTitle("Open in new tab").setIcon("file-plus").onClick(() => void this.openRef(ref, true)));
-		if (ref.kind === "file" || ref.kind === "folder") {
+		// PR-5 (R6 fix): `openRef`/`revealInNativeExplorer` only ever look up vault paths, so for an
+		// Outside-Vault-managed row (whose `ref.path` is root-relative to its external source, not a
+		// vault path) both silently do nothing. Hidden here rather than left to no-op.
+		if (!outsideManaged) {
+			menu.addItem((item) => item.setTitle("Open").setIcon("file").onClick(() => void this.openRef(ref)));
+			menu.addItem((item) => item.setTitle("Open in new tab").setIcon("file-plus").onClick(() => void this.openRef(ref, true)));
+		}
+		if (!outsideManaged && (ref.kind === "file" || ref.kind === "folder")) {
 			menu.addItem((item) => item.setTitle("Reveal in native explorer").setIcon("folder-open").onClick(() => this.revealInNativeExplorer(ref.path)));
 		}
 		// PR 16 (grilled): always offered for modules, not just governed ones — a governed module's
@@ -2972,7 +3005,12 @@ export class AtlasExplorerView extends ItemView {
 				// placed elsewhere in this view. PR-1 (G15a): a sourced unit confirms first.
 				.onClick(() => this.removeUnitsFromView(view.id, [node]))
 		);
-		menu.addItem((item) => item.setTitle("Place in view…").setIcon("arrow-right-left").onClick(() => this.placeInViewFlow(ref)));
+		// PR-5 (R6 fix): `placeInViewFlow` would put this row's absolute-path ref into another
+		// view, where no `UnitIndex` lookup can ever resolve it — it shows there as permanently
+		// missing. Hidden for Outside-Vault-managed rows rather than left to produce that.
+		if (!outsideManaged) {
+			menu.addItem((item) => item.setTitle("Place in view…").setIcon("arrow-right-left").onClick(() => this.placeInViewFlow(ref)));
+		}
 		// Create Module: only on a placed row for a root-level .md file (not inbox rows, not free
 		// blocks, nested or promoted files, interface notes, or non-notes).
 		addCreateModuleItem(menu, this.plugin.app.vault, unitForRef(this.plugin.unitIndex.getUnits(), ref), (file) => this.startCreateModule(file));
