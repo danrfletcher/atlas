@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { App } from "obsidian";
 import { App as MockApp } from "../../tests/mocks/obsidian";
 import { ViewsManager, nodeHasApiRows } from "../../src/views";
@@ -340,19 +340,31 @@ describe("PR-4 R3 — setFolderSource is mutually exclusive with api/csv/markdow
 		expect(after.apiSource).toBeUndefined();
 	});
 
-	it("self-heals legacy data.json where both apiSource and folderSource were saved together before this fix, api taking precedence", () => {
+	it("self-heals legacy data.json where both apiSource and folderSource were saved together before this fix, folderSource taking precedence (PR-1 R4: it's the user's most recent choice, and the one with irreplaceable config) and logging the drop", () => {
+		const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
 		const legacyRaw = {
 			id: "root",
 			type: "meta" as const,
 			label: "Folder",
 			children: [],
 			apiSource: makeSource(),
-			folderSource: folderSource(),
+			folderSource: folderSource({ path: "Archive" }),
 		};
 		const vm = new ViewsManager({} as App, [{ id: "v1", name: "Default", inboxMode: "view", root: [legacyRaw] }], "v1", () => {});
 		const node = vm.getNode("v1", "root")!;
-		expect(node.apiSource).toBeDefined();
-		expect(node.folderSource).toBeUndefined();
+		expect(node.folderSource).toMatchObject({ location: "inside", path: "Archive", showFiles: true, showFolders: true });
+		expect(node.apiSource).toBeUndefined();
+		expect(warnSpy).toHaveBeenCalledTimes(1);
+		expect(warnSpy.mock.calls[0][0]).toContain("root");
+		warnSpy.mockRestore();
+	});
+
+	it("does not log when only apiSource is present (no folderSource to prefer)", () => {
+		const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+		const legacyRaw = { id: "root", type: "meta" as const, label: "Folder", children: [], apiSource: makeSource() };
+		new ViewsManager({} as App, [{ id: "v1", name: "Default", inboxMode: "view", root: [legacyRaw] }], "v1", () => {});
+		expect(warnSpy).not.toHaveBeenCalled();
+		warnSpy.mockRestore();
 	});
 });
 

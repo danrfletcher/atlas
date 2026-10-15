@@ -214,14 +214,27 @@ function sanitizeApiFields(node: ViewNode): void {
 
 	// PR-4 R3 fix: data.json saved by a build predating the setApiSource/setCsvSource/
 	// setMarkdownTableSource/setFolderSource mutual-exclusion fix can have more than one source field
-	// set at once. Self-heal on load with the same api > folder > csv > markdown-table precedence the
-	// modal constructor's own `initial ? "api" : initialFolderSource ? "folder" : ...` already uses, so
-	// a reload never shows more than one data source for a node the live setters can no longer produce.
-	if (node.apiSource) {
-		node.folderSource = undefined;
+	// set at once. Self-heal on load so a reload never shows more than one data source for a node the
+	// live setters can no longer produce.
+	//
+	// PR-1 R4 fix: when both apiSource and folderSource are present, prefer folderSource and drop
+	// apiSource (not the api > folder precedence the modal constructor uses for its own unrelated
+	// "which type is pre-selected" question). The only way legacy data.json reaches this state is the
+	// pre-fix bug where switching API -> Folder left the old apiSource in place alongside the new
+	// folderSource — so folderSource is the user's most recent, intended choice, and discarding it
+	// instead would lose its irreplaceable config (path, filters, removedRefs). Log the drop since
+	// apiSource's own fetch config (and, for a Basic/Bearer source, its device-local headers) is
+	// unrecoverable once this runs. csv/markdown-table still fall back to the folder > csv >
+	// markdown-table precedence below; a legacy node can only ever have one of those three plus,
+	// possibly, apiSource, since their own live setters have always been mutually exclusive.
+	if (node.folderSource) {
+		if (node.apiSource) {
+			console.warn(`[Atlas] Dropping a legacy apiSource on node "${node.id}" in favor of its folderSource (both were set in data.json).`);
+		}
+		node.apiSource = undefined;
 		node.csvSource = undefined;
 		node.markdownTableSource = undefined;
-	} else if (node.folderSource) {
+	} else if (node.apiSource) {
 		node.csvSource = undefined;
 		node.markdownTableSource = undefined;
 	} else if (node.csvSource) {
