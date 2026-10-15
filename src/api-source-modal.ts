@@ -765,14 +765,27 @@ export class ApiSourceModal extends Modal {
 	/** PR-7: mirrors `fetchSample`'s role for CSV — reads+parses the selected file (G19) and derives
 	 * `sampleFields` from the parsed rows' own keys via the existing `sampleFieldsForArrayField`
 	 * helper, exactly as a plain-array API response would (CSV rows are already flat, so there's never
-	 * an array field to pick). Never touches `apiCache` — same contract `fetchSample`/`runTest` have. */
+	 * an array field to pick). Never touches `apiCache` — same contract `fetchSample`/`runTest` have.
+	 *
+	 * R7 fix: wrapped in try/catch — `vault.cachedRead` can reject (a permissions error, the file
+	 * vanishing between the picker list and this read), and nothing above this call catches that, so
+	 * it used to surface as an unhandled rejection with no Notice. R7 fix: a header-only file (zero
+	 * data rows) now falls back to the parsed header row itself for `sampleFields`, so drag mapping
+	 * can still be configured — `sampleFieldsForArrayField` has nothing to derive field names from
+	 * when there are no sample rows at all. */
 	private async loadCsvSample(): Promise<void> {
 		const file = this.app.vault.getAbstractFileByPath(this.csvPath.trim());
 		if (!(file instanceof TFile)) {
 			new Notice("Atlas: file not found.");
 			return;
 		}
-		const text = await this.app.vault.cachedRead(file);
+		let text: string;
+		try {
+			text = await this.app.vault.cachedRead(file);
+		} catch (err) {
+			new Notice(`Atlas: couldn't read the file (${err instanceof Error ? err.message : "unknown error"}).`);
+			return;
+		}
 		const parsed = parseCsv(text);
 		if (!parsed.ok) {
 			new Notice(`Atlas: ${parsed.error}`);
@@ -780,10 +793,12 @@ export class ApiSourceModal extends Modal {
 		}
 		this.lastResponse = parsed.rows;
 		this.arrayFieldCandidates = [];
-		this.sampleFields = sampleFieldsForArrayField(parsed.rows, undefined);
+		this.sampleFields = parsed.rows.length > 0 ? sampleFieldsForArrayField(parsed.rows, undefined) : parsed.headers;
 		this.testResult = null;
-		if (this.sampleFields.length === 0) {
-			new Notice("Atlas: the CSV file has no data rows to map yet.");
+		if (parsed.headers.length === 0) {
+			new Notice("Atlas: the CSV file is empty.");
+		} else if (parsed.rows.length === 0) {
+			new Notice("Atlas: the CSV file has no data rows yet — mapping fields are from its header row.");
 		}
 		this.render();
 	}
@@ -860,6 +875,14 @@ export class ApiSourceModal extends Modal {
 					.setValue(this.mdTablePath)
 					.onChange((value) => {
 						this.mdTablePath = value;
+						// PR-8 (R2 fix): a stale `mdTables` from whatever file was last loaded must not
+						// survive a path edit — left in place, the index-picker and sample-fields area
+						// kept showing the previous file's tables until the next "Load sample" happened
+						// to overwrite them, which risked a save with `tableIndex` pointed at a
+						// completely unrelated table in the new file.
+						this.mdTables = [];
+						this.sampleFields = [];
+						this.lastResponse = null;
 						this.updateSaveButton();
 						renderList(value);
 					})
@@ -889,19 +912,38 @@ export class ApiSourceModal extends Modal {
 	 * selected index starts at `null` (no auto-pick) — the index picker, rendered only when there's more
 	 * than one, is how the user then actually chooses; with zero or one table there's no real choice, so
 	 * it defaults to 0. Then derives `sampleFields` from whichever table (if any) is selected via
-	 * `applyMarkdownTableSelection`. */
+	 * `applyMarkdownTableSelection`.
+	 *
+	 * PR-7 R7 fix (same class as `loadCsvSample`'s): wrapped in try/catch — `vault.cachedRead` can
+	 * reject, and nothing above this call used to catch that. */
 	private async loadMarkdownTableSample(): Promise<void> {
 		const file = this.app.vault.getAbstractFileByPath(this.mdTablePath.trim());
 		if (!(file instanceof TFile)) {
 			new Notice("Atlas: file not found.");
 			return;
 		}
-		const text = await this.app.vault.cachedRead(file);
+		let text: string;
+		try {
+			text = await this.app.vault.cachedRead(file);
+		} catch (err) {
+			new Notice(`Atlas: couldn't read the file (${err instanceof Error ? err.message : "unknown error"}).`);
+			return;
+		}
 		this.mdTables = detectMarkdownTables(text);
 		if (this.mdTables.length === 0) {
 			new Notice("Atlas: no markdown table found in this file.");
 		}
-		this.mdTableIndex = needsTableIndexPrompt(this.mdTables) ? null : 0;
+		// PR-8 (R2 fix): a previously-stored or previously-picked index that is still in range for
+		// this file's tables is kept, rather than unconditionally reset — editing an existing source
+		// used to silently drop the saved `tableIndex` back to 0/null the moment "Load sample" ran,
+		// even when the same table was still at the same position.
+		const previousIndex = this.mdTableIndex;
+		this.mdTableIndex =
+			previousIndex !== null && previousIndex >= 0 && previousIndex < this.mdTables.length
+				? previousIndex
+				: needsTableIndexPrompt(this.mdTables)
+					? null
+					: 0;
 		this.applyMarkdownTableSelection();
 		this.render();
 	}

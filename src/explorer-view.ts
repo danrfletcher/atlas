@@ -1367,7 +1367,11 @@ export class AtlasExplorerView extends ItemView {
 		if (!node.folderSourceManaged || !node.folderSourceOwnerId) return false;
 		const owner = this.plugin.viewsManager.getNode(view.id, node.folderSourceOwnerId);
 		if (owner?.folderSource?.location !== "outside") return false;
-		// PR-5 (R10 fix): one stat per owner per render pass, not one per managed child row.
+		// PR-5 (R10 fix): one stat per owner per render pass, not one per managed child row. Lazily
+		// created here too — a caller that reaches this method without going through a real `render()`
+		// (e.g. a test driving `renderNodeList` directly against a bare fake `this`) still gets a
+		// working, if per-call, cache rather than a crash.
+		if (!this.outsideResolvedCache) this.outsideResolvedCache = new Map();
 		let resolved = this.outsideResolvedCache.get(owner.id);
 		if (resolved === undefined) {
 			resolved = resolveOutsidePath(this.plugin.folderSourcePathStore.get(owner.id));
