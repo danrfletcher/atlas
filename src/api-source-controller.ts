@@ -1,7 +1,7 @@
 import { isMapError, mapResponseRows } from "./api-mapping";
 import { runJsMapping } from "./api-js-mapping";
 import { planApiRefresh } from "./api-refresh-plan";
-import { MergeResult } from "./api-merge";
+import { MergeResult, applyMergeResult, splitFolderSourceDeleted } from "./api-merge";
 import { httpGetJson, HTTP_TIMEOUT_MS, RequestFn, ScheduleTimeout } from "./api-http";
 import { ApiCache, ApiHeader, ApiItemState, ApiSourceConfig, ViewNode } from "./types";
 
@@ -87,40 +87,14 @@ function emptyCache(prev: ApiCache | undefined, fetchedAt: number, error: string
 	};
 }
 
-/** PR-6 (R7 fix): a Folder-source-demoted placeholder row (`item.folderSourceDeleted`) can share this
- * node with a live `apiSource` (`setFolderSource`/`setApiSource` each leave the other's state alone —
- * see `sweepFolderSourceDeletedPlaceholders`'s own doc comment) — only the Folder-source sweep is
- * supposed to touch it (G13/G14's "no removal" via an API refresh). Left in `prevState`/`prevOrder`,
- * an Overwrite refresh would delete it outright as "genuinely vanished" (it never appears in the API's
- * own rows), and Merge/Append would otherwise leave it untouched only by accident. Split out here so
- * `planApiRefresh` never sees it, and folded back in unchanged by `applyApiMergeResult` below. */
-function splitFolderSourceDeleted(itemState: Record<string, ApiItemState> | undefined, itemOrder: string[] | undefined) {
-	const order = itemOrder ?? [];
-	const state = itemState ?? {};
-	const apiOrder: string[] = [];
-	const apiState: Record<string, ApiItemState> = {};
-	const deletedOrder: string[] = [];
-	const deletedState: Record<string, ApiItemState> = {};
-	for (const id of order) {
-		const item = state[id];
-		if (!item) continue;
-		if (item.folderSourceDeleted) {
-			deletedOrder.push(id);
-			deletedState[id] = item;
-		} else {
-			apiOrder.push(id);
-			apiState[id] = item;
-		}
-	}
-	return { apiState, apiOrder, deletedState, deletedOrder };
-}
-
 /** PR-6 (R7 fix): writes a `planApiRefresh` result back onto `node`, with any Folder-source-deleted
- * placeholders (set aside by `splitFolderSourceDeleted` before the plan was computed) appended back
- * exactly as they were — never reconciled, reordered or dropped by the API refresh that just ran. */
+ * placeholders (set aside by `splitFolderSourceDeleted` before the plan was computed, via
+ * `applyMergeResult`) folded back in exactly as they were — never reconciled, reordered or dropped
+ * by the API refresh that just ran. */
 function applyApiMergeResult(node: ViewNode, result: MergeResult, deletedState: Record<string, ApiItemState>, deletedOrder: string[]): void {
-	node.apiItemState = { ...result.itemState, ...deletedState };
-	node.apiItemOrder = [...result.order, ...deletedOrder];
+	const merged = applyMergeResult(result, deletedState, deletedOrder);
+	node.apiItemState = merged.itemState;
+	node.apiItemOrder = merged.order;
 }
 
 /**

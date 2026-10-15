@@ -195,10 +195,18 @@ export default class AtlasPlugin extends Plugin {
 		// G21: a saved `.csv` file re-triggers every CSV-sourced node pointed at it, same as the
 		// view-load/every-N-minutes triggers already do for API sources. PR-8: a saved `.md` file
 		// does the same for every Markdown-Table-sourced node pointed at it.
+		// PR-7 (R4 fix): gated by extension before walking any view tree at all — every other vault
+		// save (images, canvases, an ordinary note with no table, anything non-`.csv`/`.md`) used to
+		// pay that walk for nothing. `notifyCsvFileModified` can only ever match a `.csv` source;
+		// `notifyMarkdownTableFileModified` can only ever match a `.md` one — neither source type is
+		// ever configured with any other extension.
+		const isCsv = file.path.endsWith(".csv");
+		const isMd = file.path.endsWith(".md");
+		if (!isCsv && !isMd) return;
 		for (const leaf of this.app.workspace.getLeavesOfType(ATLAS_VIEW_TYPE)) {
 			if (leaf.view instanceof AtlasExplorerView) {
-				leaf.view.notifyCsvFileModified(file.path);
-				leaf.view.notifyMarkdownTableFileModified(file.path);
+				if (isCsv) leaf.view.notifyCsvFileModified(file.path);
+				if (isMd) leaf.view.notifyMarkdownTableFileModified(file.path);
 			}
 		}
 	}
