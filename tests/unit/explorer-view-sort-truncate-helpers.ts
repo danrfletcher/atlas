@@ -64,6 +64,10 @@ export interface FakeExplorer {
 	renderApiItemRow: ((...args: unknown[]) => unknown) | ReturnType<typeof vi.fn>;
 	isOutsideManagedAndUnresolved: ReturnType<typeof vi.fn>;
 	visibleFolderSourceRows: (...args: unknown[]) => unknown;
+	/** PR-1: stands in for the real `modifiedTimeForRef` (file-stat lookups), the same way
+	 * `resolveRef` stands in for display-text resolution — defaults to "no time" (`null`) for
+	 * every ref; a test exercising `sortMode: "modified"` overrides it per-ref. */
+	modifiedTimeForRef: ReturnType<typeof vi.fn>;
 }
 
 /** Builds a fake `this` for `renderNodeList`. `renderNode`/`renderApiItemRow` are stubbed with
@@ -92,6 +96,7 @@ export function makeFakeExplorer(sm: StatusesManager, overrides: Partial<FakeExp
 		}),
 		isOutsideManagedAndUnresolved: vi.fn(() => false),
 		visibleFolderSourceRows: proto.visibleFolderSourceRows,
+		modifiedTimeForRef: vi.fn(() => null),
 		...overrides,
 	};
 	return fake;
