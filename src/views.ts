@@ -768,6 +768,10 @@ export class ViewsManager {
 	 * has meta-nested children silently dropped the subtree. Fixed the same way `handleDrop`'s
 	 * reparent path and `unplaceUnit` already were — move the real node in place instead of
 	 * discarding and recreating it, so its id/children travel with it. */
+	/** PR-1 (G10/G15): also stamps `placedAt` — fresh on both branches, since placing a unit
+	 * always means "into its current parent right now," whether that's a brand-new node or one
+	 * moved here from wherever it was placed before (a drag-reorder within the same parent goes
+	 * through `moveNode` instead, which only restamps on an actual parent change). */
 	placeUnit(viewId: string, ref: UnitRef, parentId: string | null): void {
 		const view = this.getView(viewId);
 		if (!view) return;
@@ -776,9 +780,10 @@ export class ViewsManager {
 		const targetChildren = parent ? parent.node.children : view.root;
 		if (existing) {
 			const [node] = existing.siblings.splice(existing.index, 1);
+			node.placedAt = Date.now();
 			targetChildren.push(node);
 		} else {
-			const node: ViewNode = { id: generateNodeId(), type: "unit", ref, children: [] };
+			const node: ViewNode = { id: generateNodeId(), type: "unit", ref, children: [], placedAt: Date.now() };
 			targetChildren.push(node);
 		}
 		this.save();
@@ -973,10 +978,12 @@ export class ViewsManager {
 		return changed;
 	}
 
+	/** PR-1 (G10): a new Folder is "placed" into its parent (or the view root) the moment it's
+	 * created, so it's stamped the same as any other new node. */
 	addMetaFolder(viewId: string, parentId: string | null, label: string): ViewNode | null {
 		const view = this.getView(viewId);
 		if (!view) return null;
-		const node: ViewNode = { id: generateNodeId(), type: "meta", label: label.trim() || "New folder", children: [] };
+		const node: ViewNode = { id: generateNodeId(), type: "meta", label: label.trim() || "New folder", children: [], placedAt: Date.now() };
 		const parent = parentId ? this.findNode(view.root, parentId) : null;
 		(parent ? parent.node.children : view.root).push(node);
 		this.save();
@@ -1018,6 +1025,11 @@ export class ViewsManager {
 		const found = view && this.findNode(view.root, nodeId);
 		if (!found) return null;
 		const clone = this.cloneNode(found.node);
+		// PR-1 (G10/G16/E15): the clone's own root gets a fresh stamp (it's being newly placed as
+		// a sibling, right now); its cloned subtree keeps each node's original stamp unchanged —
+		// `cloneNode`'s `{ ...node }` spread already carried `placedAt` over for every descendant,
+		// so only this top-level override is needed.
+		clone.placedAt = Date.now();
 		found.siblings.splice(found.index + 1, 0, clone);
 		this.save();
 		return clone;
@@ -1089,7 +1101,13 @@ export class ViewsManager {
 	 * into its own descendant, or onto itself (Part 4 edge case / PR 12 — would disconnect the tree
 	 * or self-reference). PR 12: any node can now be a parent, not just meta folders — meta-nesting
 	 * via drop (issue 3) lets a module/file/block become an organizational parent the same way a
-	 * meta folder already could, without a real disk move. */
+	 * meta folder already could, without a real disk move.
+	 *
+	 * PR-1 (G10): also restamps `placedAt` — but only when the target parent container is actually
+	 * a *different* array from the one the node is moving out of (`samePParent`, captured before
+	 * either splice touches either array). A same-parent reorder (drag within one list) leaves the
+	 * stamp alone; moving to a different parent (including moving to/from the view root) always
+	 * counts as a fresh placement, same as `placeUnit`. */
 	moveNode(viewId: string, nodeId: string, newParentId: string | null, index: number): boolean {
 		const view = this.getView(viewId);
 		if (!view) return false;
@@ -1100,8 +1118,10 @@ export class ViewsManager {
 		const newParent = newParentId ? this.findNode(view.root, newParentId) : null;
 		if (newParentId && !newParent) return false;
 
-		found.siblings.splice(found.index, 1);
 		const targetChildren = newParent ? newParent.node.children : view.root;
+		const samePParent = targetChildren === found.siblings;
+		found.siblings.splice(found.index, 1);
+		if (!samePParent) found.node.placedAt = Date.now();
 		targetChildren.splice(Math.max(0, Math.min(index, targetChildren.length)), 0, found.node);
 		this.save();
 		return true;
@@ -1430,6 +1450,9 @@ export class ViewsManager {
 				children: [],
 				folderSourceManaged: true,
 				folderSourceOwnerId: ownerId,
+				// PR-1 (G10/E15): a new Folder-source row is placed the moment it's discovered,
+				// same stamping rule as any other new node.
+				placedAt: Date.now(),
 			}),
 			{
 				sourceNodeId: ownerId,
