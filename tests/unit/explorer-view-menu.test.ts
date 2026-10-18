@@ -268,9 +268,30 @@ describe("PR-1 G6/G7 — Sort children… menu", () => {
 	});
 
 	function sortFake() {
-		return {
-			plugin: { app: {}, unitIndex: { getUnits: () => [] }, viewsManager: { getNode: () => null, updateStatusGovernance: vi.fn() } },
+		const vault = {
+			create: vi.fn(),
+			createFolder: vi.fn(),
+			createBinary: vi.fn(),
+			modify: vi.fn(),
+			modifyBinary: vi.fn(),
+			append: vi.fn(),
+			delete: vi.fn(),
+			trash: vi.fn(),
+			rename: vi.fn(),
+			copy: vi.fn(),
 		};
+		return {
+			plugin: { app: { vault, fileManager: { renameFile: vi.fn() } }, unitIndex: { getUnits: () => [] }, viewsManager: { getNode: () => null, updateStatusGovernance: vi.fn() } },
+		};
+	}
+
+	/** F1: none of a Vault's disk-write methods (nor `fileManager.renameFile`) were ever called. */
+	function expectNoVaultWrite(fake: ReturnType<typeof sortFake>): void {
+		const vault = fake.plugin.app.vault as unknown as Record<string, ReturnType<typeof vi.fn>>;
+		for (const name of ["create", "createFolder", "createBinary", "modify", "modifyBinary", "append", "delete", "trash", "rename", "copy"]) {
+			expect(vault[name]).not.toHaveBeenCalled();
+		}
+		expect(fake.plugin.app.fileManager.renameFile).not.toHaveBeenCalled();
 	}
 
 	function build(method: "showMetaFolderMenu" | "showUnitMenu" | "showBucketHeaderMenu", node?: ViewNode, ref: { kind: "file"; path: string } = { kind: "file", path: "U.md" }) {
@@ -356,5 +377,34 @@ describe("PR-1 G6/G7 — Sort children… menu", () => {
 		const chooser = openChooser(menu);
 		chooser.items.find((i) => i.title === "Time added")!.clickHandler!();
 		expect(fake.plugin.viewsManager.updateStatusGovernance).toHaveBeenCalledWith("v1", null, { sortMode: "time-added", sortReverse: false });
+	});
+
+	it("F1: picking any sort mode or toggling Reverse never writes, renames or deletes a vault file — only data.json (via updateStatusGovernance) changes", () => {
+		const node = unitNode({ sortMode: "modified", sortReverse: true });
+		const { menu, fake } = build("showUnitMenu", node);
+
+		const chooser1 = openChooser(menu);
+		chooser1.items.find((i) => i.title === "A-Z")!.clickHandler!();
+		const chooser2 = openChooser(menu);
+		chooser2.items.find((i) => i.title === "Reverse order")!.clickHandler!();
+		const chooser3 = openChooser(menu);
+		chooser3.items.find((i) => i.title === "Manual")!.clickHandler!();
+
+		expect(fake.plugin.viewsManager.updateStatusGovernance).toHaveBeenCalledTimes(3);
+		expectNoVaultWrite(fake);
+	});
+
+	it("F1: the same holds for a Folder row and the Bucket header", () => {
+		const metaFake = build("showMetaFolderMenu", metaNode({ id: "f1" }));
+		openChooser(metaFake.menu)
+			.items.find((i) => i.title === "Modified")!
+			.clickHandler!();
+		expectNoVaultWrite(metaFake.fake);
+
+		const bucketFake = build("showBucketHeaderMenu");
+		openChooser(bucketFake.menu)
+			.items.find((i) => i.title === "Time added")!
+			.clickHandler!();
+		expectNoVaultWrite(bucketFake.fake);
 	});
 });
