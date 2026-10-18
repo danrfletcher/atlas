@@ -99,3 +99,90 @@ export function displayNameFor(node: ViewNode, resolvedText: string | undefined)
 	if (node.type === "meta") return node.label ?? "";
 	return resolvedText ?? "";
 }
+
+/** PR-2: the effective (mode, direction) a list actually renders by, once "absent falls back to
+ * an inherited status sort" (G19) is resolved. `null` means effectively Manual — no icon (G13),
+ * no sort pass. */
+export interface EffectiveSort {
+	mode: SortMode;
+	reverse: boolean;
+}
+
+/** PR-2 (G12/G19/E5): combines a list's own direct governor (`ownGovernance` — a `ViewNode` or the
+ * `View` root; never an inherited one, F6) with the nearest reachable status governor
+ * (`statusGovernor`, from `StatusesManager.findSortGovernor`) into the one effective sort this
+ * list actually renders by. An explicit own `sortMode` — any value, including `"manual"` — always
+ * wins outright; only an *absent* own setting ever falls through to an inherited status sort.
+ * Shared by the render pass's own status-sort activation, the "Sort children…" menu's Status
+ * tick/label and the G13 sort indicator, so the three can't drift apart on what "currently sorted
+ * by status" means. */
+export function activeSortFor(
+	ownGovernance: Pick<StatusGovernance, "sortMode" | "sortReverse">,
+	statusGovernor: Pick<StatusGovernance, "sortMode" | "sortReverse"> | null
+): EffectiveSort | null {
+	const ownMode = ownGovernance.sortMode;
+	if (ownMode !== undefined) {
+		if (ownMode === "manual") return null;
+		return { mode: ownMode, reverse: !!ownGovernance.sortReverse };
+	}
+	if (statusGovernor?.sortMode === "status") {
+		return { mode: "status", reverse: !!statusGovernor.sortReverse };
+	}
+	return null;
+}
+
+/** PR-2 (G13/G21): the mode+direction phrase for the sort indicator's tooltip ("Sorted: <this>").
+ * A-Z's reverse has its own name (Z-A) rather than "A-Z, reversed"; every other mode mirrors the
+ * explicit "Modified, newest/oldest first" wording from the spec's own example strings. */
+export function sortModeLabel(mode: SortMode, reverse: boolean): string {
+	switch (mode) {
+		case "alphabetical":
+			return reverse ? "Z-A" : "A-Z";
+		case "modified":
+			return `Modified, ${reverse ? "oldest" : "newest"} first`;
+		case "time-added":
+			return `Time added, ${reverse ? "oldest" : "newest"} first`;
+		case "status":
+			return reverse ? "Status, reversed" : "Status";
+		default:
+			return "Manual";
+	}
+}
+
+/** PR-2 (G21): the icon per mode for the "Sort children…" item and the G13 sort indicator. No
+ * icon is ever shown for `"manual"` (an effectively-Manual list shows no indicator at all). */
+export const SORT_MODE_ICONS: Record<SortMode, string> = {
+	manual: "",
+	alphabetical: "arrow-down-a-z",
+	modified: "clock",
+	"time-added": "calendar-plus",
+	status: "list-ordered",
+};
+
+/** PR-2 (G9/E4): governs *when* a Modified-sorted list's file-mtime snapshot may be refreshed —
+ * "the next time the explorer refreshes" means one of four triggers (pane regains focus, view
+ * loads, a sort changes, the tree changes), never a plain autosave/vault `modify`, and never while
+ * a drag is in progress (deferred until the drag ends, per the edge case). Holds no reference to
+ * the mtimes themselves — the caller (`AtlasExplorerView`) owns that cache; this only decides
+ * *when* it's allowed to recompute, so it's testable with no DOM/vault involved at all. Starts
+ * dirty: a view's very first render is itself "the view loads". */
+export class SortRefreshGate {
+	private dirty = true;
+
+	/** Call from any of the four trigger points. Idempotent — marking dirty twice before the next
+	 * `consume()` behaves the same as marking it once. */
+	markDirty(): void {
+		this.dirty = true;
+	}
+
+	/** Call once per render pass. Returns true exactly when this render should recompute
+	 * sort-relevant data (a trigger fired since the last successful refresh) and no drag is
+	 * currently in progress — consuming the pending flag only when it returns true, so a render
+	 * that's skipped only because a drag is active leaves the flag set for the first render after
+	 * the drag ends. */
+	consume(dragging: boolean): boolean {
+		if (dragging || !this.dirty) return false;
+		this.dirty = false;
+		return true;
+	}
+}
