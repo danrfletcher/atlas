@@ -61,6 +61,9 @@ export interface FakeExplorer {
 	renderTruncationGroupHeader: ReturnType<typeof vi.fn>;
 	renderNode: ReturnType<typeof vi.fn>;
 	renderConnectionDots: (...args: unknown[]) => unknown;
+	/** PR-2 (G13): the sort indicator — real (not stubbed) by default, same reasoning as
+	 * `renderConnectionDots`, since it's a thin, directly-assertable DOM-building method. */
+	renderSortIndicator: (...args: unknown[]) => unknown;
 	renderApiItemRow: ((...args: unknown[]) => unknown) | ReturnType<typeof vi.fn>;
 	isOutsideManagedAndUnresolved: ReturnType<typeof vi.fn>;
 	visibleFolderSourceRows: (...args: unknown[]) => unknown;
@@ -68,6 +71,14 @@ export interface FakeExplorer {
 	 * `resolveRef` stands in for display-text resolution — defaults to "no time" (`null`) for
 	 * every ref; a test exercising `sortMode: "modified"` overrides it per-ref. */
 	modifiedTimeForRef: ReturnType<typeof vi.fn>;
+	/** PR-2 (G9): the real caching wrapper around `modifiedTimeForRef` — left real (not stubbed) so
+	 * tests exercise the actual cache/gate interaction; its own two backing fields below default to
+	 * "always allowed to recompute", matching every pre-PR-2 test's assumption that a changed
+	 * `modifiedTimeForRef` return value is always picked up. A refresh-timing test overrides
+	 * `sortRefreshAllowedForThisRender` (and/or pre-seeds `modifiedMtimeCache`) to exercise caching. */
+	resolvedMtimeForSort: (...args: unknown[]) => unknown;
+	modifiedMtimeCache: Map<string, number | null>;
+	sortRefreshAllowedForThisRender: boolean;
 }
 
 /** Builds a fake `this` for `renderNodeList`. `renderNode`/`renderApiItemRow` are stubbed with
@@ -91,12 +102,16 @@ export function makeFakeExplorer(sm: StatusesManager, overrides: Partial<FakeExp
 			container.createDiv({ cls: "marker-node", attr: { "data-id": node.id } });
 		}),
 		renderConnectionDots: proto.renderConnectionDots,
+		renderSortIndicator: proto.renderSortIndicator,
 		renderApiItemRow: vi.fn((item: { id: string }, container: HTMLElement) => {
 			container.createDiv({ cls: "marker-api", attr: { "data-id": item.id } });
 		}),
 		isOutsideManagedAndUnresolved: vi.fn(() => false),
 		visibleFolderSourceRows: proto.visibleFolderSourceRows,
 		modifiedTimeForRef: vi.fn(() => null),
+		resolvedMtimeForSort: proto.resolvedMtimeForSort,
+		modifiedMtimeCache: new Map<string, number | null>(),
+		sortRefreshAllowedForThisRender: true,
 		...overrides,
 	};
 	return fake;
