@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { ApiItemState, StatusGovernance, View, ViewNode } from "../../src/types";
+import { activeSortFor } from "../../src/sort";
 import { callRenderNodeList, folderGovernor, makeFakeExplorer, makeStatusesManager, proto, realNode, rowOrder, view } from "./explorer-view-sort-truncate-helpers";
 
 function apiItem(id: string, explicitStatusId?: string): ApiItemState {
@@ -461,5 +462,78 @@ describe("PR-1 E6 — a sort set while the folder is collapsed is applied, ready
 		expect(wrap.classList.contains("is-collapsed")).toBe(true); // still visually collapsed
 		const inner = wrap.querySelector(".atlas-meta-children-inner") as HTMLElement;
 		expect(rowOrder(inner)).toEqual(["apple", "zebra"]); // already sorted underneath
+	});
+});
+
+// PR-2 (G9/E4): `resolvedMtimeForSort`'s cache/gate interaction, exercised through the real render
+// path (`renderNodeList` → `sortKeyFor`) rather than the gate class in isolation — proves the
+// caching wrapper itself (not just `SortRefreshGate`) behaves as documented.
+describe("PR-2 G9/E4 — a Modified-sorted list only re-reads file mtimes when this render is allowed to", () => {
+	it("serves the cached mtime and ignores a changed modifiedTimeForRef while sortRefreshAllowedForThisRender is false, then picks up the change once it's true again", async () => {
+		const sm = makeStatusesManager();
+		const folder = folderGovernor({ sortMode: "modified" });
+		const a = realNode("a", { ref: { kind: "file", path: "A.md" } });
+		const b = realNode("b", { ref: { kind: "file", path: "B.md" } });
+
+		let times: Record<string, number> = { "A.md": 100, "B.md": 200 };
+		const modifiedTimeForRef = vi.fn((ref: { path: string }) => times[ref.path]);
+		const fake = makeFakeExplorer(sm, { modifiedTimeForRef });
+		const container = document.createElement("div");
+
+		// First render: no cache entry yet, so it reads real mtimes regardless of the flag — B (200)
+		// is newer than A (100), and Modified defaults to newest-first.
+		fake.sortRefreshAllowedForThisRender = false;
+		await callRenderNodeList(fake, [a, b], container, view, 1, [folder]);
+		expect(rowOrder(container)).toEqual(["b", "a"]);
+		expect(modifiedTimeForRef).toHaveBeenCalledTimes(2);
+
+		// E4: the underlying files changed (A is now the newer one), but no refresh trigger fired —
+		// sortRefreshAllowedForThisRender stays false, so the stale cached mtimes are served and the
+		// row order does not move, even though a plain re-render happened.
+		times = { "A.md": 300, "B.md": 50 };
+		modifiedTimeForRef.mockClear();
+		container.empty();
+		await callRenderNodeList(fake, [a, b], container, view, 1, [folder]);
+		expect(rowOrder(container)).toEqual(["b", "a"]); // unchanged — still serving the stale cache
+		expect(modifiedTimeForRef).not.toHaveBeenCalled();
+
+		// A refresh trigger fires (e.g. the pane regains focus) — this render is now allowed to
+		// recompute, and the row order catches up to the real (changed) mtimes.
+		fake.sortRefreshAllowedForThisRender = true;
+		container.empty();
+		await callRenderNodeList(fake, [a, b], container, view, 1, [folder]);
+		expect(rowOrder(container)).toEqual(["a", "b"]);
+		expect(modifiedTimeForRef).toHaveBeenCalledTimes(2);
+	});
+});
+
+// PR-2 (G19/E5): `activeSortFor` is the single source of truth both the render pass's own
+// status-sort activation and the "Sort children…" menu's tick use — this table pins its exact
+// absent/explicit-Manual/explicit-other/explicit-status resolution against an inherited governor.
+describe("PR-2 G19/E5 — activeSortFor: absent vs. explicit Manual vs. explicit other vs. explicit Status, against an inherited status governor", () => {
+	const governor: StatusGovernance = { statusEnabled: true, statusSetId: "S", sortMode: "status" };
+
+	it("absent own setting + a reaching status governor: resolves to status (inherited)", () => {
+		expect(activeSortFor({}, governor)).toEqual({ mode: "status", reverse: false });
+	});
+
+	it("absent own setting + no governor at all: resolves to nothing (effectively Manual)", () => {
+		expect(activeSortFor({}, null)).toBeNull();
+	});
+
+	it("explicit Manual overrides an inherited status sort — rows return to manual order", () => {
+		expect(activeSortFor({ sortMode: "manual" }, governor)).toBeNull();
+	});
+
+	it("explicit A-Z overrides an inherited status sort — the governor is ignored, not blended", () => {
+		expect(activeSortFor({ sortMode: "alphabetical", sortReverse: true }, governor)).toEqual({ mode: "alphabetical", reverse: true });
+	});
+
+	it("explicit Status on this row itself resolves the same way as an inherited one, direction included", () => {
+		expect(activeSortFor({ sortMode: "status", sortReverse: true }, governor)).toEqual({ mode: "status", reverse: true });
+	});
+
+	it("explicit Status on this row with no governor reachable at all still resolves to status (G19's own setting wins, independent of governance)", () => {
+		expect(activeSortFor({ sortMode: "status" }, null)).toEqual({ mode: "status", reverse: false });
 	});
 });

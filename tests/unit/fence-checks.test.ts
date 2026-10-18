@@ -1,15 +1,18 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { App } from "obsidian";
+import { Menu } from "obsidian";
 import { App as MockApp } from "../../tests/mocks/obsidian";
 import { ViewsManager } from "../../src/views";
-import { FolderSourceConfig } from "../../src/types";
+import { FolderSourceConfig, ViewNode } from "../../src/types";
 import { registerAddBlockCommand } from "../../src/commands";
 import { registerF10Commands } from "../../src/f10-commands";
 import { DEFAULT_SETTINGS } from "../../src/settings";
-import { compareInboxRows } from "../../src/explorer-view";
+import { AtlasExplorerView, compareInboxRows } from "../../src/explorer-view";
 import type { InboxSortRow } from "../../src/explorer-view";
+import { SORT_MODE_CHOICES } from "../../src/sort";
+import { callRenderNodeList, makeFakeExplorer, makeStatusesManager, rowOrder, view as sortView } from "./explorer-view-sort-truncate-helpers";
 
 /** F5: "Folder source introduces no new disk-moving behavior beyond the three existing named
  * exceptions (module-icon drop, block graduation, Create)" — none of which live in this PR's own
@@ -150,5 +153,102 @@ describe("PR-1 F5 — no global sort setting, no bucket toolbar change, inbox or
 		const b: InboxSortRow = { unit: { type: "root-file", path: "Alpha.md" }, text: "Alpha" };
 		const lookup = () => null;
 		expect(compareInboxRows(a, b, true, lookup)).toBeGreaterThan(0); // Alpha before Zeta
+	});
+});
+
+// PR-2 F2 — a sort is purely a render-order transform; it never rewrites `ViewNode.children`.
+describe("PR-2 F2 — sort never rewrites a node's stored children order", () => {
+	it("A-Z sorts the rendered rows but leaves the input node array itself in its original order", async () => {
+		const sm = makeStatusesManager();
+		const folder: ViewNode = { id: "folder", type: "meta", label: "Folder", children: [], sortMode: "alphabetical" };
+		const zebra: ViewNode = { id: "zebra", type: "meta", label: "Zebra", children: [] };
+		const apple: ViewNode = { id: "apple", type: "meta", label: "Apple", children: [] };
+		const mango: ViewNode = { id: "mango", type: "meta", label: "Mango", children: [] };
+		const nodes = [zebra, apple, mango];
+
+		const fake = makeFakeExplorer(sm);
+		const container = document.createElement("div");
+		await callRenderNodeList(fake, nodes, container, sortView, 1, [folder]);
+
+		// Rendered order is sorted...
+		expect(rowOrder(container)).toEqual(["apple", "mango", "zebra"]);
+		// ...but the array `renderNodeList` was handed is untouched, both by reference and by order.
+		expect(nodes).toEqual([zebra, apple, mango]);
+		expect(nodes[0]).toBe(zebra);
+	});
+});
+
+// PR-2 F4 — the menu's four unconditional choices never grow a fifth by accident; Status is
+// appended conditionally at the call site (explorer-view-menu.test.ts covers that half).
+describe("PR-2 F4 — the sort menu's unconditional choices are exactly Manual, A-Z, Modified, Time added", () => {
+	it("SORT_MODE_CHOICES holds exactly those four modes, in that order", () => {
+		expect(SORT_MODE_CHOICES.map((c) => c.mode)).toEqual(["manual", "alphabetical", "modified", "time-added"]);
+		expect(SORT_MODE_CHOICES.map((c) => c.label)).toEqual(["Manual", "A-Z", "Modified", "Time added"]);
+	});
+});
+
+// PR-2 F8 — Reverse is disabled (never a live control) for Manual, and choosing Manual explicitly
+// always resets sortReverse to false rather than leaving a stale `true` behind.
+describe("PR-2 F8 — Reverse order is disabled for Manual and Manual never carries a Reverse value", () => {
+	function openChooser(node: ViewNode): Menu {
+		const fake = {
+			plugin: {
+				viewsManager: { updateStatusGovernance: () => {} },
+				statusesManager: { findSortGovernor: () => null },
+			},
+		};
+		let built: Menu | undefined;
+		const show = vi.spyOn(Menu.prototype, "showAtMouseEvent").mockImplementation(function (this: Menu) {
+			built = this;
+		});
+		(AtlasExplorerView.prototype as unknown as { showMetaFolderMenu: (...a: unknown[]) => void }).showMetaFolderMenu.call(
+			fake,
+			new MouseEvent("contextmenu"),
+			node,
+			{ id: "v1", name: "Default", inboxMode: "view", root: [] }
+		);
+		show.mockRestore();
+		let chooser: Menu | undefined;
+		const showChooser = vi.spyOn(Menu.prototype, "showAtPosition").mockImplementation(function (this: Menu) {
+			chooser = this;
+		});
+		built!.items.find((i) => i.title === "Sort children…")!.clickHandler!();
+		showChooser.mockRestore();
+		return chooser!;
+	}
+
+	it("Reverse order is disabled on a Manual (unset) folder", () => {
+		const chooser = openChooser({ id: "f", type: "meta", label: "Folder", children: [] });
+		expect(chooser.items.find((i) => i.title === "Reverse order")!.disabled).toBe(true);
+	});
+
+	it("choosing Manual explicitly (from a Reversed Modified sort) resets sortReverse to false in the same patch", () => {
+		const node: ViewNode = { id: "f", type: "meta", label: "Folder", children: [], sortMode: "modified", sortReverse: true };
+		const calls: unknown[] = [];
+		const fake = {
+			plugin: {
+				viewsManager: { updateStatusGovernance: (...args: unknown[]) => calls.push(args) },
+				statusesManager: { findSortGovernor: () => null },
+			},
+		};
+		let built: Menu | undefined;
+		const show = vi.spyOn(Menu.prototype, "showAtMouseEvent").mockImplementation(function (this: Menu) {
+			built = this;
+		});
+		(AtlasExplorerView.prototype as unknown as { showMetaFolderMenu: (...a: unknown[]) => void }).showMetaFolderMenu.call(
+			fake,
+			new MouseEvent("contextmenu"),
+			node,
+			{ id: "v1", name: "Default", inboxMode: "view", root: [] }
+		);
+		show.mockRestore();
+		let chooser: Menu | undefined;
+		const showChooser = vi.spyOn(Menu.prototype, "showAtPosition").mockImplementation(function (this: Menu) {
+			chooser = this;
+		});
+		built!.items.find((i) => i.title === "Sort children…")!.clickHandler!();
+		showChooser.mockRestore();
+		chooser!.items.find((i) => i.title === "Manual")!.clickHandler!();
+		expect(calls).toEqual([["v1", "f", { sortMode: "manual", sortReverse: false }]]);
 	});
 });
