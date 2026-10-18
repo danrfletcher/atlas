@@ -5,6 +5,11 @@ import type { App } from "obsidian";
 import { App as MockApp } from "../../tests/mocks/obsidian";
 import { ViewsManager } from "../../src/views";
 import { FolderSourceConfig } from "../../src/types";
+import { registerAddBlockCommand } from "../../src/commands";
+import { registerF10Commands } from "../../src/f10-commands";
+import { DEFAULT_SETTINGS } from "../../src/settings";
+import { compareInboxRows } from "../../src/explorer-view";
+import type { InboxSortRow } from "../../src/explorer-view";
 
 /** F5: "Folder source introduces no new disk-moving behavior beyond the three existing named
  * exceptions (module-icon drop, block graduation, Create)" — none of which live in this PR's own
@@ -92,5 +97,58 @@ describe("F5 behavioral check — driving the real Folder-source paths never rec
 		vm.refreshFolderSource(view.id, folder.id);
 
 		expect(app.vault.calls).toEqual([]);
+	});
+});
+
+// PR-1 (R1 fix) — F9: no new command-palette entry and no new keyboard shortcut is registered.
+describe("PR-1 F9 — no new command or keyboard shortcut", () => {
+	it("the registered command id set is exactly the pre-existing seven, with no sort command added", () => {
+		const ids: string[] = [];
+		const fakePlugin = { addCommand: (cmd: { id: string }) => ids.push(cmd.id) } as unknown as Parameters<typeof registerF10Commands>[0];
+		registerF10Commands(fakePlugin);
+		registerAddBlockCommand(fakePlugin);
+
+		expect(ids.sort()).toEqual(
+			["open-explorer", "switch-view", "place-active-file-in-view", "reveal-active-file", "new-view", "rebuild-index", "add-block"].sort()
+		);
+	});
+
+	it("no registered command declares a hotkey", () => {
+		const cmds: { id: string; hotkeys?: unknown }[] = [];
+		const fakePlugin = { addCommand: (cmd: { id: string; hotkeys?: unknown }) => cmds.push(cmd) } as unknown as Parameters<typeof registerF10Commands>[0];
+		registerF10Commands(fakePlugin);
+		registerAddBlockCommand(fakePlugin);
+
+		expect(cmds.length).toBe(7);
+		for (const cmd of cmds) expect(cmd.hotkeys).toBeUndefined();
+	});
+});
+
+// PR-1 (R1 fix) — F5: no global default sort setting and no bucket toolbar change; the inbox
+// toolbar toggle and the inbox's own ordering are untouched by this PR.
+describe("PR-1 F5 — no global sort setting, no bucket toolbar change, inbox ordering unchanged", () => {
+	it("AtlasSettings carries no global sort-related field", () => {
+		const keys = Object.keys(DEFAULT_SETTINGS).map((k) => k.toLowerCase());
+		expect(keys.some((k) => k.includes("sort"))).toBe(false);
+	});
+
+	it("renderInboxSection's own source has no reference to the new per-folder sort machinery", () => {
+		const body = folderSourceSlice("src/explorer-view.ts", "private async renderInboxSection(", "\n	private renderInboxRow(");
+		// Deliberately excludes the bare `sortMode`/`sortReverse` property names: this function
+		// legitimately reads the pre-existing `this.sortMode` bucket-toolbar toggle (a different,
+		// older feature). What must stay absent here is the new PR's own machinery.
+		for (const name of ["isDirectSortMode", "compareSortKeys(", "currentSortMode(", "SORT_MODE_CHOICES", "findSortGovernor("]) {
+			expect(body).not.toContain(name);
+		}
+	});
+
+	it("the inbox comparator (compareInboxRows) is unchanged by this PR: alphabetical/newest-first ordering still behaves exactly as before", () => {
+		// A direct, minimal regression guard alongside inbox-sort.test.ts's own full comparator
+		// coverage — this PR must not have touched `compareInboxRows`'s own alphabetical-mode
+		// behavior (the only mode shared in spirit with G8's A-Z).
+		const a: InboxSortRow = { unit: { type: "root-file", path: "Zeta.md" }, text: "Zeta" };
+		const b: InboxSortRow = { unit: { type: "root-file", path: "Alpha.md" }, text: "Alpha" };
+		const lookup = () => null;
+		expect(compareInboxRows(a, b, true, lookup)).toBeGreaterThan(0); // Alpha before Zeta
 	});
 });
