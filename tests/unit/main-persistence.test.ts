@@ -7,6 +7,7 @@ import { AtlasSettings, DEFAULT_SETTINGS } from "../../src/settings";
 import { UnitIndex } from "../../src/unit-index";
 import { ViewsManager } from "../../src/views";
 import { StatusesManager } from "../../src/statuses";
+import { McpTokenStore } from "../../src/mcp-token-store";
 import type { AddedItem, UnitRef } from "../../src/types";
 
 /** Bypasses `AtlasPlugin`'s constructor (which needs a real Obsidian `app`/`manifest`) so these
@@ -214,5 +215,37 @@ describe("highlightOpenNote persistence (PR-1.F2, F3)", () => {
 		expect(topLevelKeys).toEqual(
 			["settings", "manualPromotions", "views", "activeViewId", "expandedModuleFolders", "statusSets", "colorPalette", "dismissedByView", "dismissedGlobal", "addedItems"].sort()
 		);
+	});
+});
+
+describe("R6/F6 — the MCP bearer token never reaches data.json", () => {
+	it("persistNow's saved object contains no trace of the real MCP token, anywhere, at any depth", async () => {
+		const plugin = makePlugin();
+		const app = new App();
+		const settings: AtlasSettings = { ...DEFAULT_SETTINGS, mcpServerEnabled: true };
+		const saved: unknown[] = [];
+
+		// A real token, generated the same way `McpTokenStore` does — present on the plugin
+		// instance (as it would be on a real one, via `initMcpServer`) but never wired into
+		// anything `persistNow` reads from, since the token store writes to Obsidian's own
+		// per-device `localStorage`, never through `saveData`/`data.json`.
+		app.saveLocalStorage("atlas-mcp-server", { port: 27202, token: "f6-leak-canary-00112233" });
+
+		Object.assign(plugin, {
+			settings,
+			unitIndex: new UnitIndex(app, settings, []),
+			viewsManager: new ViewsManager(app, [], "default", () => {}),
+			statusesManager: new StatusesManager([], [], () => {}),
+			expandedModuleFolders: new Set<string>(),
+			mcpTokenStore: new McpTokenStore(app),
+			saveData: async (data: unknown) => {
+				saved.push(data);
+			},
+		});
+
+		await (plugin as unknown as { persistNow(): Promise<void> }).persistNow();
+
+		expect(saved).toHaveLength(1);
+		expect(JSON.stringify(saved[0])).not.toContain("f6-leak-canary-00112233");
 	});
 });

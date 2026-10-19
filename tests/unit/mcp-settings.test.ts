@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { Notice } from "obsidian";
 import { AtlasSettingTab, DEFAULT_SETTINGS } from "../../src/settings";
 import type { AtlasSettings } from "../../src/settings";
 import { McpTokenStore } from "../../src/mcp-token-store";
@@ -164,7 +165,7 @@ async function buildTab(mcpServerEnabled: boolean) {
 	const plugin = {
 		settings,
 		mcpTokenStore,
-		mcpServer: { start: vi.fn(async () => {}), stop: vi.fn(async () => {}) },
+		mcpServer: { start: vi.fn(async () => {}), stop: vi.fn(async () => {}), isRunning: vi.fn(() => false) },
 		saveSettings: vi.fn(async () => {}),
 	};
 	const tab = new AtlasSettingTab(new App() as never, plugin as never);
@@ -184,13 +185,13 @@ describe("MCP server settings section", () => {
 		expect(rows.find((r) => r.name === "Token")).toBeUndefined();
 	});
 
-	it("toggle on: the port and token rows render, disabled, with the current credentials", async () => {
+	it("toggle on: the port and token rows render with the current credentials; the port is editable, the token is not", async () => {
 		const { rows, mcpTokenStore } = await buildTab(true);
 		const credentials = mcpTokenStore.get();
 
 		const portRow = rows.find((r) => r.name === "Port")!;
 		expect(portRow.texts[0].value).toBe(String(credentials.port));
-		expect(portRow.texts[0].disabled).toBe(true);
+		expect(portRow.texts[0].disabled).not.toBe(true);
 
 		const tokenRow = rows.find((r) => r.name === "Token")!;
 		expect(tokenRow.texts[0].value).toBe(credentials.token);
@@ -237,5 +238,76 @@ describe("MCP server settings section", () => {
 		const tokenRowAfter = rows.filter((r) => r.name === "Token").at(-1)!;
 		expect(tokenRowAfter.texts[0].value).toBe(after);
 		expect(tokenRowAfter.texts[0].value).not.toBe(before);
+	});
+
+	describe("R7 — the port is configurable, not stuck on the default", () => {
+		it("entering a valid port writes it to McpTokenStore", async () => {
+			const { rows, mcpTokenStore } = await buildTab(true);
+			const portRow = rows.find((r) => r.name === "Port")!;
+			await portRow.texts[0].onChange?.("9100");
+			expect(mcpTokenStore.get().port).toBe(9100);
+		});
+
+		it("a port below 1024 is rejected — the stored value is left untouched", async () => {
+			const { rows, mcpTokenStore } = await buildTab(true);
+			const before = mcpTokenStore.get().port;
+			const portRow = rows.find((r) => r.name === "Port")!;
+			await portRow.texts[0].onChange?.("80");
+			expect(mcpTokenStore.get().port).toBe(before);
+		});
+
+		it("a port above 65535 is rejected — the stored value is left untouched", async () => {
+			const { rows, mcpTokenStore } = await buildTab(true);
+			const before = mcpTokenStore.get().port;
+			const portRow = rows.find((r) => r.name === "Port")!;
+			await portRow.texts[0].onChange?.("70000");
+			expect(mcpTokenStore.get().port).toBe(before);
+		});
+
+		it("non-numeric input is rejected — the stored value is left untouched", async () => {
+			const { rows, mcpTokenStore } = await buildTab(true);
+			const before = mcpTokenStore.get().port;
+			const portRow = rows.find((r) => r.name === "Port")!;
+			await portRow.texts[0].onChange?.("not-a-port");
+			expect(mcpTokenStore.get().port).toBe(before);
+		});
+
+		it("changing the port while the server is running stops and restarts it so the new port takes effect immediately", async () => {
+			const { rows, plugin } = await buildTab(true);
+			(plugin.mcpServer as unknown as { isRunning: () => boolean }).isRunning = () => true;
+			const portRow = rows.find((r) => r.name === "Port")!;
+
+			await portRow.texts[0].onChange?.("9200");
+
+			expect(plugin.mcpServer.stop).toHaveBeenCalledTimes(1);
+			expect(plugin.mcpServer.start).toHaveBeenCalledTimes(1);
+		});
+
+		it("changing the port while the server is stopped never calls start()/stop() at all", async () => {
+			const { rows, plugin } = await buildTab(true);
+			(plugin.mcpServer as unknown as { isRunning: () => boolean }).isRunning = () => false;
+			const portRow = rows.find((r) => r.name === "Port")!;
+
+			await portRow.texts[0].onChange?.("9300");
+
+			expect(plugin.mcpServer.stop).not.toHaveBeenCalled();
+			expect(plugin.mcpServer.start).not.toHaveBeenCalled();
+		});
+	});
+
+	it("R6/F6 — Copy and Regenerate never put the real token value into a Notice message", async () => {
+		const { rows, mcpTokenStore } = await buildTab(true);
+		const realToken = mcpTokenStore.get().token;
+		Notice.reset();
+		Object.assign(navigator, { clipboard: { writeText: vi.fn(async () => {}) } });
+
+		const tokenRow = rows.find((r) => r.name === "Token")!;
+		tokenRow.extraButtons.find((b) => b.icon === "copy")!.onClick?.();
+		tokenRow.buttons.find((b) => b.text === "Regenerate")!.onClick?.();
+
+		expect(Notice.instances.length).toBeGreaterThan(0);
+		for (const notice of Notice.instances) {
+			expect(notice.message).not.toContain(realToken);
+		}
 	});
 });
