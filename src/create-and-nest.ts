@@ -86,7 +86,11 @@ export type CreateOnDiskResult =
 /** Creates the one new item on disk for `kind` — block in the pool, file at the vault root, or a
  * module folder plus its same-named note — and takes the inbox hold before the first write. `name`
  * is assumed already trimmed and validated by the caller (the dialog wording differs by caller, so
- * that stays with them).
+ * that stays with them). `content`, when given, is written verbatim instead of
+ * `buildBlockContent(name)` — PR-3.F1's Add under > Block has no name dialog at all and writes a
+ * genuinely empty file (same shape as the toolbar's "Add block"), where `createFromMeta`'s Block
+ * replace-in-place path (prompted, non-empty name) still gets its usual `# <name>` heading by
+ * omitting this param.
  *
  * On success, returns `{ ref, path, rollback, release }`: the hold is still held, and it's the
  * caller's job to call `release()` once the item has actually been nested (replaced in place, or
@@ -97,7 +101,7 @@ export type CreateOnDiskResult =
  *
  * On failure, this function has already rolled back anything it made and released the hold; the
  * caller only needs to show its own Notice with `reason` (+ `leftover` if non-empty). */
-export async function createOnDisk(deps: CreateOnDiskDeps, kind: CreateKind, name: string): Promise<CreateOnDiskResult> {
+export async function createOnDisk(deps: CreateOnDiskDeps, kind: CreateKind, name: string, content?: string): Promise<CreateOnDiskResult> {
 	const { vault } = deps.app;
 	const made: { file?: TFile; folder?: TFolder; pool?: TFolder } = {};
 	/** Removes what this run made (files first), each only if it is still what we created. Best effort. */
@@ -130,19 +134,19 @@ export async function createOnDisk(deps: CreateOnDiskDeps, kind: CreateKind, nam
 			const free = freeBlockPath(vault, pool, deps.now?.() ?? new Date(), deps.random);
 			if (!free) return { ok: false, reason: "no free block ID was available", leftover: await rollback() };
 			hold(free);
-			made.file = await vault.create(free, buildBlockContent(name));
+			made.file = await vault.create(free, content ?? buildBlockContent(name));
 			path = free;
 			ref = { kind: "file", path };
 		} else if (kind === "file") {
 			path = filePath(name);
 			hold(path);
-			made.file = await vault.create(path, buildBlockContent(name));
+			made.file = await vault.create(path, content ?? buildBlockContent(name));
 			ref = { kind: "file", path };
 		} else {
 			const paths = modulePaths(name);
 			hold(paths.folder);
 			made.folder = await vault.createFolder(paths.folder);
-			made.file = await vault.create(paths.note, buildBlockContent(name));
+			made.file = await vault.create(paths.note, content ?? buildBlockContent(name));
 			path = paths.folder;
 			ref = { kind: "folder", path };
 		}

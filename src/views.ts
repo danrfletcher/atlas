@@ -767,21 +767,26 @@ export class ViewsManager {
 	 * placement per ref per view was ever possible), now reachable: "Place in view…" onto a ref that
 	 * has meta-nested children silently dropped the subtree. Fixed the same way `handleDrop`'s
 	 * reparent path and `unplaceUnit` already were — move the real node in place instead of
-	 * discarding and recreating it, so its id/children travel with it. */
-	placeUnit(viewId: string, ref: UnitRef, parentId: string | null): void {
+	 * discarding and recreating it, so its id/children travel with it. PR-3.F1: returns the placed
+	 * (or moved) node — `null` only if the view itself is gone — so a caller like Add under > Block
+	 * can select and expand onto it without a second lookup; every existing caller still ignores
+	 * the return value, so this is not a behaviour change for them. */
+	placeUnit(viewId: string, ref: UnitRef, parentId: string | null): ViewNode | null {
 		const view = this.getView(viewId);
-		if (!view) return;
+		if (!view) return null;
 		const existing = this.findUnitNode(view.root, ref);
 		const parent = parentId ? this.findNode(view.root, parentId) : null;
 		const targetChildren = parent ? parent.node.children : view.root;
+		let node: ViewNode;
 		if (existing) {
-			const [node] = existing.siblings.splice(existing.index, 1);
+			[node] = existing.siblings.splice(existing.index, 1);
 			targetChildren.push(node);
 		} else {
-			const node: ViewNode = { id: generateNodeId(), type: "unit", ref, children: [] };
+			node = { id: generateNodeId(), type: "unit", ref, children: [] };
 			targetChildren.push(node);
 		}
 		this.save();
+		return node;
 	}
 
 	/** Removes *every* placement of `ref` in this view — used when the ref itself has stopped being
