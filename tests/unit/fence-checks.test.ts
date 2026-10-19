@@ -12,6 +12,8 @@ import { DEFAULT_SETTINGS } from "../../src/settings";
 import { AtlasExplorerView, compareInboxRows } from "../../src/explorer-view";
 import type { InboxSortRow } from "../../src/explorer-view";
 import { SORT_MODE_CHOICES } from "../../src/sort";
+import { file, meta, unit } from "../integration/create-from-meta-fixtures";
+import { renderUnitRow } from "./folder-source-outside-children-behavior.test";
 import { callRenderNodeList, makeFakeExplorer, makeStatusesManager, rowOrder, view as sortView } from "./explorer-view-sort-truncate-helpers";
 
 /** F5: "Folder source introduces no new disk-moving behavior beyond the three existing named
@@ -337,5 +339,41 @@ describe("PR-4 fence — the sorted-drop gating has no disk-write call", () => {
 		vm.placeUnit(view.id, { kind: "file", path: "C.md" }, null, 1);
 
 		expect(app.vault.calls).toEqual([]);
+	});
+});
+
+// PR-4 (T3/T7/C32 fix): F10 — a child of an Outside-Vault source folder stays un-draggable (no
+// `draggable` attribute, no `dragstart` wiring), so it never takes part in an edge drop or a
+// batch -- true whether or not this PR's new sorted-drop gating is in play, since the row never
+// gets a drag payload to begin with. Drives the real (unstubbed) `renderNode` the same way
+// `folder-source-outside-children-behavior.test.ts`'s own G8/F7 block does.
+describe("PR-4 fence F10 — a child of an Outside-Vault source folder stays un-draggable", () => {
+	it("an Outside-Vault-managed child renders with no draggable attribute at all, sorted owner or not", async () => {
+		const owner = meta("owner", "Folder", [], {
+			folderSource: { location: "outside", path: "", showFiles: true, showFolders: true },
+			sortMode: "alphabetical",
+		});
+		const childNode = unit("c1", file("/Volumes/External/Notes/a.md"), { folderSourceManaged: true, folderSourceOwnerId: "owner" });
+
+		const { row } = await renderUnitRow(childNode, { ownerNode: owner });
+
+		expect(row.getAttribute("draggable")).toBe("false");
+	});
+
+	it("firing dragstart on an Outside-Vault-managed row never records a drag payload", async () => {
+		const owner = meta("owner", "Folder", [], { folderSource: { location: "outside", path: "", showFiles: true, showFolders: true } });
+		const childNode = unit("c1", file("/Volumes/External/Notes/a.md"), { folderSourceManaged: true, folderSourceOwnerId: "owner" });
+
+		const { row, fake } = await renderUnitRow(childNode, { ownerNode: owner });
+		row.dispatchEvent(new Event("dragstart"));
+
+		expect((fake as { dragPayload: unknown }).dragPayload).toBeNull();
+	});
+
+	it("an ordinary (non-managed) row stays draggable, control case", async () => {
+		const childNode = unit("c2", file("Notes/a.md"));
+		const { row } = await renderUnitRow(childNode);
+
+		expect(row.getAttribute("draggable")).toBe("true");
 	});
 });
