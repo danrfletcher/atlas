@@ -21,6 +21,7 @@ import { addBlock } from "./commands";
 import { addCreateModuleItem, startCreateModule, unitForRef } from "./create-module";
 import { CreateKind, addCreateItem, startCreateFromMeta } from "./create-from-meta";
 import { AddUnderKind, addAddUnderItem, canAddUnder, startAddUnder } from "./add-under";
+import { AddUnderFolderDeps, startAddUnderFolder } from "./add-under-folder";
 import { SwapCandidate, SwapPickerModal, SwapSourceBlock, buildSwapCandidates, canSwapForAtlasFolder, canSwapNode } from "./swap";
 import { noticeIfLinksNotUpdated } from "./links-notice";
 import { generateBlockId } from "./display-text";
@@ -3103,10 +3104,43 @@ export class AtlasExplorerView extends ItemView {
 		);
 	}
 
-	/** PR-2.F1: the seam every "Add under" choice calls. A thin forward to the no-op in `add-under.ts`
-	 * — same wrapping pattern as `startCreateModule`/`startCreateFromMeta` just above/below. */
+	/** PR-2.F1: the seam every "Add under" choice calls. PR-2.F2: Folder gets its real create-and-nest
+	 * flow here; Block, File and Module still forward to the no-op in `add-under.ts` until PR-3.F1-F3. */
 	private startAddUnder(kind: AddUnderKind, view: View, node: ViewNode): void {
+		if (kind === "folder") {
+			void this.runAddUnderFolder(view, node);
+			return;
+		}
 		startAddUnder(kind, view, node);
+	}
+
+	/** PR-2.F2 (G4/G10): runs the Folder add-under flow against the real `ViewsManager` and this
+	 * view's own selection state, then — once the view has re-rendered with the new row selected and
+	 * its parent expanded — checks whether the new row actually has a rendered element. If the
+	 * bucket's active sort, grouping, truncation or filter kept it from showing, says so with a
+	 * Notice rather than leaving the user wondering where it went (G10); the node, selection and
+	 * expansion are unaffected either way. */
+	private async runAddUnderFolder(view: View, node: ViewNode): Promise<void> {
+		const created = await startAddUnderFolder(this.addUnderFolderDeps(), view.id, node.id);
+		if (!created) return;
+		await this.render();
+		if (this.bucketListEl && !this.bucketListEl.querySelector(`[data-select-key="${CSS.escape(created.id)}"]`)) {
+			new Notice(`Atlas: added "${created.label ?? "New folder"}" under ${node.label ?? unitBasename(node)} — hidden by the current filter, sort or grouping`);
+		}
+	}
+
+	private addUnderFolderDeps(): AddUnderFolderDeps {
+		const { plugin } = this;
+		return {
+			app: plugin.app,
+			getNode: (viewId, nodeId) => plugin.viewsManager.getNode(viewId, nodeId),
+			addMetaFolder: (viewId, parentId, label) => plugin.viewsManager.addMetaFolder(viewId, parentId, label),
+			expandParent: (viewId, parentId) => plugin.viewsManager.setNodeCollapsed(viewId, parentId, false),
+			selectOnly: (nodeId) => {
+				this.selectedBucketNodeIds.clear();
+				this.selectedBucketNodeIds.add(nodeId);
+			},
+		};
 	}
 
 	private startCreateFromMeta(kind: CreateKind, view: View, node: ViewNode): void {
