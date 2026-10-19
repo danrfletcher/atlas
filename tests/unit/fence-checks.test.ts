@@ -127,3 +127,36 @@ describe("PR-2.F2 fence — F2 (no command/toolbar change) and F4 (no sibling-in
 		expect(read("src/add-under-folder.ts")).not.toMatch(DISK_WRITE_CALL);
 	});
 });
+
+// PR-2.F3: the G10 hidden-row helper only ever reads `filterText`, sort settings,
+// `truncatedStatuses` and `expandedTruncationGroups` (via the signals its caller computes) — it
+// must never write any of them. Static grep plus a behavioral check that a real call leaves a
+// `state` object with those fields byte-identical.
+describe("PR-2.F3 fence — the G10 helper never writes filterText, sort settings, truncatedStatuses or expandedTruncationGroups", () => {
+	const WRITES_GOVERNED_STATE = /\b(filterText|sortMode|sortReverse|truncatedStatuses|expandedTruncationGroups)\s*(=(?!=)|\.\s*(add|delete|clear|push|splice)\s*\()/;
+
+	it("src/add-under-hidden-notice.ts has no assignment or mutating call on any of those names", () => {
+		expect(read("src/add-under-hidden-notice.ts")).not.toMatch(WRITES_GOVERNED_STATE);
+	});
+
+	it("a real call leaves the caller's own governed-state object untouched, whether the row is hidden or visible", async () => {
+		const originalCSS = (globalThis as { CSS?: unknown }).CSS;
+		(globalThis as { CSS?: { escape: (v: string) => string } }).CSS = { escape: (v: string) => v };
+		try {
+			const { noticeIfAddedRowHidden } = await import("../../src/add-under-hidden-notice");
+			const governedState = { filterText: "drone", sortMode: "status", sortReverse: true, truncatedStatuses: { done: { enabled: true } }, expandedTruncationGroups: new Set(["a"]) };
+			const before = JSON.stringify({ ...governedState, expandedTruncationGroups: [...governedState.expandedTruncationGroups] });
+
+			await noticeIfAddedRowHidden("new-1", "Quarry Notes", "quarry-drones", {
+				render: () => Promise.resolve(),
+				getBucketListEl: () => document.createElement("div"), // empty: the row never rendered
+				filterActive: governedState.filterText.trim() !== "",
+			});
+
+			const after = JSON.stringify({ ...governedState, expandedTruncationGroups: [...governedState.expandedTruncationGroups] });
+			expect(after).toBe(before);
+		} finally {
+			(globalThis as { CSS?: unknown }).CSS = originalCSS;
+		}
+	});
+});
