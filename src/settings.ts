@@ -325,22 +325,45 @@ export class AtlasSettingTab extends PluginSettingTab {
 
 		new Setting(containerEl)
 			.setName("Port")
-			.setDesc("127.0.0.1 only — never reachable from another device. 1024–65535. Changing it restarts the server if it's currently running.")
-			.addText((text) =>
-				text.setValue(String(credentials.port)).onChange(async (value) => {
-					const parsed = Number.parseInt(value, 10);
+			.setDesc(
+				"127.0.0.1 only — never reachable from another device. 1024–65535. Committed on blur or Enter (not every keystroke), and restarts the server if it's enabled."
+			)
+			.addText((text) => {
+				text.setValue(String(credentials.port));
+				let pendingValue = String(credentials.port);
+				text.onChange((value) => {
+					pendingValue = value;
+				});
+				// R12: the previous version committed (and restarted) on every keystroke, so typing
+				// "30000" character by character bound 3000 along the way — and if some in-range
+				// prefix happened to already be taken, the server was left stopped by a port the
+				// user never actually chose, with no further commit to recover since the final
+				// keystroke saw `isRunning() === false` and skipped the restart. Deferring the
+				// commit to blur/Enter means only the value the user actually settled on is ever
+				// validated, stored or bound.
+				const commitPort = async () => {
+					const parsed = Number.parseInt(pendingValue, 10);
 					if (!Number.isInteger(parsed) || parsed < 1024 || parsed > 65535) return;
 					const current = this.plugin.mcpTokenStore.get();
 					if (parsed === current.port) return;
 					this.plugin.mcpTokenStore.set({ ...current, port: parsed });
-					// R7: picked up live by `getPort()` on the next start — a restart applies it at
-					// once when the server's already running, rather than waiting for the next toggle.
-					if (this.plugin.mcpServer?.isRunning()) {
-						await this.plugin.mcpServer.stop();
-						await this.plugin.mcpServer.start();
+					// R12: restart against the user's own saved intent (`settings.mcpServerEnabled`),
+					// not `isRunning()` — a prior failed start (e.g. the old port was taken) leaves
+					// `isRunning()` false even though the user's intent is "on"; reading intent
+					// instead means fixing the port by committing a free one still brings the server
+					// up, rather than leaving it silently off because of a stale `isRunning()` read.
+					if (this.plugin.settings.mcpServerEnabled) {
+						await this.plugin.mcpServer?.stop();
+						await this.plugin.mcpServer?.start();
 					}
-				})
-			);
+				};
+				text.inputEl.addEventListener("blur", () => void commitPort());
+				text.inputEl.addEventListener("keydown", (evt) => {
+					if (evt.key !== "Enter") return;
+					evt.preventDefault();
+					void commitPort();
+				});
+			});
 
 		new Setting(containerEl)
 			.setName("Token")

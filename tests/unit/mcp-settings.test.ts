@@ -8,6 +8,7 @@ interface TextState {
 	value?: string;
 	disabled?: boolean;
 	onChange?: (value: string) => unknown;
+	inputEl?: HTMLInputElement;
 }
 interface ButtonState {
 	text?: string;
@@ -74,12 +75,20 @@ vi.mock("obsidian", async (importOriginal) => {
 				setDisabled: (v: boolean) => unknown;
 				setPlaceholder: (p: string) => unknown;
 				onChange: (fn: (v: string) => unknown) => unknown;
+				inputEl: HTMLInputElement;
 			}) => void
 		) {
 			const state: TextState = {};
+			// R12: a real `<input>` element, mirroring Obsidian's own `TextComponent.inputEl` — the
+			// production Port field attaches its blur/Enter commit listeners directly to this, not
+			// through `onChange`, so the mock has to expose it for that code path to be exercised.
+			const inputEl = document.createElement("input");
+			state.inputEl = inputEl;
 			const component = {
+				inputEl,
 				setValue: (v: string) => {
 					state.value = v;
+					inputEl.value = v;
 					return component;
 				},
 				setDisabled: (v: boolean) => {
@@ -240,64 +249,114 @@ describe("MCP server settings section", () => {
 		expect(tokenRowAfter.texts[0].value).not.toBe(before);
 	});
 
-	describe("R7 — the port is configurable, not stuck on the default", () => {
-		it("entering a valid port writes it to McpTokenStore", async () => {
+	describe("R7/R12 — the port is configurable, not stuck on the default, and commits on blur/Enter rather than every keystroke", () => {
+		/** Simulates a user typing `value` into the Port field (one `onChange` call, as a real
+		 * `<input>`'s own "input" event would fire) and then leaving the field — the point at
+		 * which R12's production code actually commits. */
+		async function typeAndBlur(portRow: Row, value: string): Promise<void> {
+			await portRow.texts[0].onChange?.(value);
+			portRow.texts[0].inputEl!.dispatchEvent(new Event("blur"));
+			// The commit handler is async (`stop()`/`start()` awaits); let its microtasks settle.
+			await Promise.resolve();
+			await Promise.resolve();
+		}
+
+		it("entering a valid port and blurring writes it to McpTokenStore", async () => {
 			const { rows, mcpTokenStore } = await buildTab(true);
 			const portRow = rows.find((r) => r.name === "Port")!;
-			await portRow.texts[0].onChange?.("9100");
+			await typeAndBlur(portRow, "9100");
 			expect(mcpTokenStore.get().port).toBe(9100);
 		});
 
-		it("a port below 1024 is rejected — the stored value is left untouched", async () => {
+		it("a port below 1024 is rejected on blur — the stored value is left untouched", async () => {
 			const { rows, mcpTokenStore } = await buildTab(true);
 			const before = mcpTokenStore.get().port;
 			const portRow = rows.find((r) => r.name === "Port")!;
-			await portRow.texts[0].onChange?.("80");
+			await typeAndBlur(portRow, "80");
 			expect(mcpTokenStore.get().port).toBe(before);
 		});
 
-		it("a port above 65535 is rejected — the stored value is left untouched", async () => {
+		it("a port above 65535 is rejected on blur — the stored value is left untouched", async () => {
 			const { rows, mcpTokenStore } = await buildTab(true);
 			const before = mcpTokenStore.get().port;
 			const portRow = rows.find((r) => r.name === "Port")!;
-			await portRow.texts[0].onChange?.("70000");
+			await typeAndBlur(portRow, "70000");
 			expect(mcpTokenStore.get().port).toBe(before);
 		});
 
-		it("non-numeric input is rejected — the stored value is left untouched", async () => {
+		it("non-numeric input is rejected on blur — the stored value is left untouched", async () => {
 			const { rows, mcpTokenStore } = await buildTab(true);
 			const before = mcpTokenStore.get().port;
 			const portRow = rows.find((r) => r.name === "Port")!;
-			await portRow.texts[0].onChange?.("not-a-port");
+			await typeAndBlur(portRow, "not-a-port");
 			expect(mcpTokenStore.get().port).toBe(before);
 		});
 
-		it("changing the port while the server is running stops and restarts it so the new port takes effect immediately", async () => {
+		it("committing a new port while the server is enabled stops and restarts it so the new port takes effect immediately", async () => {
 			const { rows, plugin } = await buildTab(true);
-			(plugin.mcpServer as unknown as { isRunning: () => boolean }).isRunning = () => true;
 			const portRow = rows.find((r) => r.name === "Port")!;
 
-			await portRow.texts[0].onChange?.("9200");
+			await typeAndBlur(portRow, "9200");
 
 			expect(plugin.mcpServer.stop).toHaveBeenCalledTimes(1);
 			expect(plugin.mcpServer.start).toHaveBeenCalledTimes(1);
 		});
 
-		it("changing the port while the server is stopped never calls start()/stop() at all", async () => {
+		it("R12: restart decides from settings.mcpServerEnabled, not isRunning() — a port fix after a failed start still restarts", async () => {
 			const { rows, plugin } = await buildTab(true);
+			// Mirrors a prior failed start (e.g. the old port was already taken): the user's
+			// intent is still "on" (mcpServerEnabled stays true), but isRunning() reads false.
 			(plugin.mcpServer as unknown as { isRunning: () => boolean }).isRunning = () => false;
 			const portRow = rows.find((r) => r.name === "Port")!;
 
-			await portRow.texts[0].onChange?.("9300");
+			await typeAndBlur(portRow, "9300");
 
+			expect(plugin.mcpServer.stop).toHaveBeenCalledTimes(1);
+			expect(plugin.mcpServer.start).toHaveBeenCalledTimes(1);
+		});
+
+		it("R12: typing a port character-by-character (passing through in-range prefixes) never commits or restarts until blur", async () => {
+			const { rows, plugin, mcpTokenStore } = await buildTab(true);
+			const before = mcpTokenStore.get().port; // DEFAULT_MCP_PORT (27202) on a fresh store
+			const portRow = rows.find((r) => r.name === "Port")!;
+
+			// "38080" passes through "3", "38", "380", "3808" on the way — every one of those is
+			// itself a syntactically in-range (1024–65535) port value, and the previous
+			// per-keystroke commit would have bound (and then re-bound) the server on each of
+			// them in turn. None of them may touch the store or the server at all. The target
+			// value is deliberately distinct from the default port so a real commit is observable.
+			for (const prefix of ["3", "38", "380", "3808", "38080"]) {
+				await portRow.texts[0].onChange?.(prefix);
+			}
+			expect(mcpTokenStore.get().port).toBe(before);
 			expect(plugin.mcpServer.stop).not.toHaveBeenCalled();
 			expect(plugin.mcpServer.start).not.toHaveBeenCalled();
+
+			portRow.texts[0].inputEl!.dispatchEvent(new Event("blur"));
+			await Promise.resolve();
+			await Promise.resolve();
+
+			expect(mcpTokenStore.get().port).toBe(38080);
+			expect(plugin.mcpServer.stop).toHaveBeenCalledTimes(1);
+			expect(plugin.mcpServer.start).toHaveBeenCalledTimes(1);
+		});
+
+		it("Enter commits immediately too, without waiting for blur", async () => {
+			const { rows, mcpTokenStore } = await buildTab(true);
+			const portRow = rows.find((r) => r.name === "Port")!;
+
+			await portRow.texts[0].onChange?.("9400");
+			portRow.texts[0].inputEl!.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter" }));
+			await Promise.resolve();
+			await Promise.resolve();
+
+			expect(mcpTokenStore.get().port).toBe(9400);
 		});
 	});
 
-	it("R6/F6 — Copy and Regenerate never put the real token value into a Notice message", async () => {
+	it("R6/F6/R14 — Copy and Regenerate never put the real token value into a Notice message", async () => {
 		const { rows, mcpTokenStore } = await buildTab(true);
-		const realToken = mcpTokenStore.get().token;
+		const beforeToken = mcpTokenStore.get().token;
 		Notice.reset();
 		Object.assign(navigator, { clipboard: { writeText: vi.fn(async () => {}) } });
 
@@ -305,9 +364,16 @@ describe("MCP server settings section", () => {
 		tokenRow.extraButtons.find((b) => b.icon === "copy")!.onClick?.();
 		tokenRow.buttons.find((b) => b.text === "Regenerate")!.onClick?.();
 
+		// R14: the token actually in the store *after* Regenerate — not just the value read
+		// before it ran — so a Notice that printed the newly generated token (rather than the
+		// stale pre-regenerate one) would still fail this assertion.
+		const afterToken = mcpTokenStore.get().token;
+		expect(afterToken).not.toBe(beforeToken);
+
 		expect(Notice.instances.length).toBeGreaterThan(0);
 		for (const notice of Notice.instances) {
-			expect(notice.message).not.toContain(realToken);
+			expect(notice.message).not.toContain(beforeToken);
+			expect(notice.message).not.toContain(afterToken);
 		}
 	});
 });
