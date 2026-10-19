@@ -17,5 +17,27 @@ export function isAuthorized(authorizationHeader: string | string[] | undefined 
 	if (!match) return false;
 	const provided = match[1].trim();
 	if (provided.length === 0) return false;
-	return provided === currentToken;
+	return timingSafeStringEqual(provided, currentToken);
+}
+
+/**
+ * R9: a credential comparison on a network listener must not short-circuit on the first
+ * mismatched character — a plain `===` lets another local process recover the token one byte at
+ * a time by timing repeated 401s. Compares every character regardless of where the first
+ * mismatch falls, then reports whether any mismatch occurred at all.
+ *
+ * Deliberately not `node:crypto`'s `timingSafeEqual`: that needs `Buffer`s and, more importantly,
+ * a static `require("node:crypto")` here would run on every platform this module loads on
+ * (mobile included, via `main.ts` -> `mcp-server.ts` -> `mcp-auth.ts`) — the exact mobile-breaking
+ * import shape R8 flags elsewhere in this PR. A length mismatch still returns immediately (per
+ * the review: that's not timing-sensitive data worth paying to hide), only the equal-length
+ * comparison itself is constant-time.
+ */
+function timingSafeStringEqual(a: string, b: string): boolean {
+	if (a.length !== b.length) return false;
+	let mismatch = 0;
+	for (let i = 0; i < a.length; i++) {
+		mismatch |= a.charCodeAt(i) ^ b.charCodeAt(i);
+	}
+	return mismatch === 0;
 }
