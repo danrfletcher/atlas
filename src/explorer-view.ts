@@ -3136,9 +3136,17 @@ export class AtlasExplorerView extends ItemView {
 			getNode: (viewId, nodeId) => plugin.viewsManager.getNode(viewId, nodeId),
 			addMetaFolder: (viewId, parentId, label) => plugin.viewsManager.addMetaFolder(viewId, parentId, label),
 			expandParent: (viewId, parentId) => plugin.viewsManager.setNodeCollapsed(viewId, parentId, false),
+			// R1 fix: bucket and inbox selections are mutually exclusive (E5) — right-clicking a
+			// bucket row doesn't itself change the selection, so a prior inbox selection could still
+			// be live when this runs. Clear it too, and set the anchor the same way
+			// `buildNodeDragPayload` does (src/explorer-view.ts), so a later shift-click extends from
+			// the new row rather than a stale anchor left over from before the add.
 			selectOnly: (nodeId) => {
+				this.selectedInboxRefKeys.clear();
 				this.selectedBucketNodeIds.clear();
 				this.selectedBucketNodeIds.add(nodeId);
+				this.selectionAnchor = nodeId;
+				this.selectionAnchorScope = "bucket";
 			},
 		};
 	}
