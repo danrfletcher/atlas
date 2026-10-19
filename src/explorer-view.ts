@@ -3179,9 +3179,18 @@ export class AtlasExplorerView extends ItemView {
 	 * computed fresh against the live tree right after the add — `parentNode` is whatever the caller
 	 * captured at menu-build time, possibly stale by now, so this re-reads the live parent and child
 	 * by id before resolving status. Filter/truncation/hidden-status are read-only lookups; nothing
-	 * here writes `filterText`, `truncatedStatuses` or `expandedTruncationGroups` (fence). */
+	 * here writes `filterText`, `truncatedStatuses` or `expandedTruncationGroups` (fence).
+	 *
+	 * R1 fix: `renderNode`'s meta branch (src/explorer-view.ts) renders a Folder row unconditionally
+	 * — only a unit row returns early on `!matchesFilter`. So an active filter can never be why a new
+	 * Folder's own row fails to render; naming it anyway broke G10's "whichever applies" whenever a
+	 * filter happened to be active while adding a Folder (the row always shows regardless). PR-3
+	 * (Block/File/Module) adds a unit-kind row here instead, where the filter *can* be the cause — but
+	 * only when that new row's own display text itself fails `matchesFilter`, since a matching row
+	 * bypasses hide and truncate the same way it does today; PR-3 should compute that per-node-kind
+	 * check here rather than reusing this fallback. */
 	private addUnderHiddenSignals(view: View, parentNode: ViewNode, newNode: ViewNode): AddUnderHiddenNoticeSignals {
-		const filterActive = this.filterText.trim() !== "";
+		const filterActive = newNode.type !== "meta" && this.filterText.trim() !== "";
 		const liveParent = this.plugin.viewsManager.getNode(view.id, parentNode.id);
 		if (!liveParent) return { filterActive };
 		const liveNode = liveParent.children.find((c) => c.id === newNode.id) ?? newNode;

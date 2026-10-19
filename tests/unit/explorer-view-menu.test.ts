@@ -337,58 +337,87 @@ describe("PR-2.F2 — Add under… > Folder calls startAddUnder(\"folder\", view
 	});
 });
 
-// PR-2.F3 (G10): the real Folder add-under flow, with an active filter — not just the dispatch
-// checked above. Proves the new child lands as the parent's own last child via the real
-// `ViewsManager`, that the filter text itself is never touched (read-only per the helper's own doc
-// comment), and that the G10 Notice names "the current filter" as the reason the row can't be
-// found (this harness's `bucketListEl` is a plain unrendered `<div>`, so the row is never there).
-describe("PR-2.F3 — Add under… > Folder with a filter active: G10 Notice names the filter, filterText itself is untouched", () => {
-	it("nests the new Folder as the parent's last child and shows the Notice", async () => {
+// PR-2.F3 (G10): the real Folder add-under flow against the real `ViewsManager`. R1 fix: a Folder
+// (meta) row renders unconditionally in `renderNode`'s meta branch — only a unit row returns early
+// on `!matchesFilter` — so an active filter can never be the reason a new Folder's row fails to
+// render. These two cases prove that directly: a filter alone (no other cause) gives no Notice at
+// all, and a real governance-driven cause (hideCompleted) still gets named correctly even while a
+// filter happens to be active, rather than the filter wrongly winning the "named first" tie-break.
+// (The old version of this test asserted "(hidden by the current filter)" here, which real
+// rendering never produces for a Folder — see R1. The filter-as-cause case only applies to a
+// unit-kind row (Block/File/Module) and belongs in PR-3's own tests.)
+describe("PR-2.F3 — Add under… > Folder: an active filter is never named as the hidden reason", () => {
+	function runAdd(statusesManager: { findGoverningAncestor: () => unknown; resolveNodeStatus: () => unknown }) {
+		const app = new App();
+		const vm = new ViewsManager(app as unknown as App, [{ id: "v1", name: "Default", inboxMode: "view", root: [meta("projects", "Projects", [])] }], "v1", () => {});
+		const liveView = vm.getViews()[0];
+		const parentNode = vm.getNode("v1", "projects")!;
+
+		const fakeThis = {
+			plugin: { app, statusesManager, viewsManager: vm },
+			filterText: "drone",
+			bucketListEl: document.createElement("div"), // never gets the new row appended: a plain fixture, not a real render
+			selectedBucketNodeIds: new Set<string>(),
+			selectedInboxRefKeys: new Set<string>(),
+			selectionAnchor: null as string | null,
+			selectionAnchorScope: null as "bucket" | "inbox" | null,
+			render: vi.fn(() => Promise.resolve()),
+			awaitRenderSettled: vi.fn(() => Promise.resolve()),
+		};
+		const proto = AtlasExplorerView.prototype as unknown as {
+			runAddUnderFolder(view: View, node: ViewNode): Promise<void>;
+			addUnderFolderDeps(this: unknown): unknown;
+			addUnderHiddenSignals(this: unknown, ...a: unknown[]): unknown;
+			ancestorsForNode(this: unknown, ...a: unknown[]): unknown;
+		};
+		(fakeThis as Record<string, unknown>).addUnderFolderDeps = proto.addUnderFolderDeps;
+		(fakeThis as Record<string, unknown>).addUnderHiddenSignals = proto.addUnderHiddenSignals;
+		(fakeThis as Record<string, unknown>).ancestorsForNode = proto.ancestorsForNode;
+
+		return { fakeThis, parentNode, promise: proto.runAddUnderFolder.call(fakeThis, liveView, parentNode) };
+	}
+
+	it("filter active, no governance cause: nests the Folder, filterText untouched, no Notice at all", async () => {
 		Notice.reset();
 		captured.prompts.length = 0;
 		const originalCSS = (globalThis as { CSS?: unknown }).CSS;
 		(globalThis as { CSS?: { escape: (v: string) => string } }).CSS = { escape: (v: string) => v };
 		try {
-			const app = new App();
-			const vm = new ViewsManager(app as unknown as App, [{ id: "v1", name: "Default", inboxMode: "view", root: [meta("projects", "Projects", [])] }], "v1", () => {});
-			const liveView = vm.getViews()[0];
-			const parentNode = vm.getNode("v1", "projects")!;
-
-			const fakeThis = {
-				plugin: {
-					app,
-					statusesManager: { findGoverningAncestor: () => null, resolveNodeStatus: () => null },
-					viewsManager: vm,
-				},
-				filterText: "drone",
-				bucketListEl: document.createElement("div"), // never gets the new row appended: a plain fixture, not a real render
-				selectedBucketNodeIds: new Set<string>(),
-				selectedInboxRefKeys: new Set<string>(),
-				selectionAnchor: null as string | null,
-				selectionAnchorScope: null as "bucket" | "inbox" | null,
-				render: vi.fn(() => Promise.resolve()),
-				awaitRenderSettled: vi.fn(() => Promise.resolve()),
-			};
-			const proto = AtlasExplorerView.prototype as unknown as {
-				runAddUnderFolder(view: View, node: ViewNode): Promise<void>;
-				addUnderFolderDeps(this: unknown): unknown;
-				addUnderHiddenSignals(this: unknown, ...a: unknown[]): unknown;
-				ancestorsForNode(this: unknown, ...a: unknown[]): unknown;
-			};
-			(fakeThis as Record<string, unknown>).addUnderFolderDeps = proto.addUnderFolderDeps;
-			(fakeThis as Record<string, unknown>).addUnderHiddenSignals = proto.addUnderHiddenSignals;
-			(fakeThis as Record<string, unknown>).ancestorsForNode = proto.ancestorsForNode;
-
-			const promise = proto.runAddUnderFolder.call(fakeThis, liveView, parentNode);
+			const { fakeThis, parentNode, promise } = runAdd({ findGoverningAncestor: () => null, resolveNodeStatus: () => null });
 			expect(captured.prompts).toHaveLength(1);
 			captured.prompts[0].onSubmit("Archive");
 			await promise;
 
 			expect(parentNode.children.map((c) => c.label)).toEqual(["Archive"]);
 			expect(fakeThis.filterText).toBe("drone"); // the helper only ever reads filterText, per its own doc comment
+			// Even though the fixture's bucketListEl never gets the row (a bare, unrendered <div>), no
+			// reason applies — a Folder row is never filtered out — so `noticeIfAddedRowHidden` never
+			// invents one (its own documented no-op case).
+			expect(Notice.instances).toHaveLength(0);
+		} finally {
+			(globalThis as { CSS?: unknown }).CSS = originalCSS;
+		}
+	});
+
+	it("filter active AND hideCompleted governance: Notice names sort/grouping, not the filter", async () => {
+		Notice.reset();
+		captured.prompts.length = 0;
+		const originalCSS = (globalThis as { CSS?: unknown }).CSS;
+		(globalThis as { CSS?: { escape: (v: string) => string } }).CSS = { escape: (v: string) => v };
+		try {
+			const { parentNode, promise } = runAdd({
+				findGoverningAncestor: () => ({ hideCompleted: true, hideCancelled: false }),
+				resolveNodeStatus: () => ({ id: "done", label: "Done", isCompleted: true, isCancelled: false }),
+			});
+			expect(captured.prompts).toHaveLength(1);
+			captured.prompts[0].onSubmit("Archive");
+			await promise;
+
+			expect(parentNode.children.map((c) => c.label)).toEqual(["Archive"]);
 			expect(Notice.instances).toHaveLength(1);
 			expect(Notice.instances[0].message).toContain("Added Archive under Projects");
-			expect(Notice.instances[0].message).toContain("(hidden by the current filter)");
+			expect(Notice.instances[0].message).toContain("(hidden by the current sort or grouping)");
+			expect(Notice.instances[0].message).not.toContain("filter");
 		} finally {
 			(globalThis as { CSS?: unknown }).CSS = originalCSS;
 		}
