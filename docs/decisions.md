@@ -16,6 +16,8 @@ Judgement calls made during the build, the alternative considered, and why. Newe
 
 **Decision:** "Create" sits in a meta folder's right-click menu after "Rename folder". Obsidian's public `Menu` has no submenu API (`minAppVersion` 1.5.0, public APIs only), so choosing it pops a second small menu (Block, File, Module) at the same spot. It is still two clicks. Nothing else was added: no command, palette entry or setting.
 
+**PR-1.F1 update:** the menu entry's label is renamed "Replace with…" (was "Create"), so it reads consistently alongside the later-added "Swap with…" entry right below it (plan G5/Q4). This is a label-only change — the operation described above (Block/File/Module chooser, dialog titles, body, failure order, replace-in-place) is unchanged, so "Create" below still refers to the operation and its dialogs, not the menu's wording.
+
 **Decision:** every file Create writes has the body `# <name>` plus one trailing newline (Block, File and the Module's note alike). The name is trimmed when the dialog returns it, and validated again against the live vault root at create time, because the dialog can stay open while other things change. Block only needs a non-empty name (its file is named by ID); File and Module use the full name rules.
 
 **Decision:** Create is not `addBlock` with a different name. `addBlock` opens the new file; Create must not. It shares only the ID generator, which now takes an injectable random source so the collision loop is testable. The ID loop never returns an occupied path and gives up after 100 tries.

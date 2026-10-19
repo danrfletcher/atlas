@@ -167,7 +167,7 @@ describe("PR-1 G11e — shared source/status menu items on a meta and a unit men
 });
 
 // PR-2 (G1-G4): Swap items. "Swap with…" on any swappable bucket node; "Swap for Atlas folder" on units only;
-// both directly above "Remove from view" on a unit, and "Swap with…" right after "Create" on an Atlas folder.
+// both directly above "Remove from view" on a unit, and "Swap with…" right after "Replace with…" on an Atlas folder.
 describe("PR-2 G1-G4 — Swap menu items", () => {
 	const SWAP = ["Swap with…", "Swap for Atlas folder"];
 
@@ -212,10 +212,10 @@ describe("PR-2 G1-G4 — Swap menu items", () => {
 		expect(titles).toEqual(expect.arrayContaining(SWAP));
 	});
 
-	it("an Atlas folder offers only Swap with…, straight after Create", () => {
+	it("an Atlas folder offers only Swap with…, straight after Replace with…", () => {
 		const titles = build("showMetaFolderMenu", metaNode()).menu.titles();
 		expect(titles).not.toContain("Swap for Atlas folder");
-		const at = titles.indexOf("Create");
+		const at = titles.indexOf("Replace with…");
 		expect(titles[at + 1]).toBe("Swap with…");
 	});
 

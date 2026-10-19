@@ -89,10 +89,11 @@ await page_(`
 			await __cfm.sleep(200);
 		},
 		async closeMenus() { document.body.click(); document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })); await __cfm.sleep(100); },
-		/** Right-click the meta row, then Create, then the kind. Leaves the name dialog open. */
+		/** Right-click the meta row, then Replace with… (PR-1.F1: renamed from Create), then the kind.
+		 * Leaves the name dialog open. */
 		async choose(label, kind) {
 			await __cfm.rightClick(__cfm.rowByText(label));
-			await __cfm.pickMenu("Create");
+			await __cfm.pickMenu("Replace with…");
 			await __cfm.pickMenu(kind);
 		},
 		dialog() {
@@ -188,14 +189,15 @@ const groups = {
 	async menu() {
 		await page_(`await __cfm.rightClick(__cfm.rowByText("Field tech"));`);
 		const titles = await page_(`return __cfm.menuTitles();`);
-		check("AC-1 Create is in the meta menu, once, after Rename folder", titles.filter((t) => t === "Create").length === 1 && titles.indexOf("Create") > titles.indexOf("Rename folder"), titles);
-		await page_(`await __cfm.pickMenu("Create");`);
+		check("AC-1/G5 Replace with… is in the meta menu, once, after Rename folder, and old label Create is gone", titles.filter((t) => t === "Replace with…").length === 1 && titles.indexOf("Replace with…") > titles.indexOf("Rename folder") && !titles.includes("Create"), titles);
+		await page_(`await __cfm.pickMenu("Replace with…");`);
 		const chooser = await page_(`return __cfm.menuTitles();`);
 		check("AC-1 the chooser offers Block, File, Module in that order", JSON.stringify(chooser.slice(-3)) === JSON.stringify(["Block", "File", "Module"]), chooser);
 		await page_(`await __cfm.closeMenus(); await __cfm.closeMenus();`);
 		for (const [label, text] of [["F-4 unit row (file)", "Existing"], ["F-4 unit row (pdf)", "Report.pdf"]]) {
 			await page_(`await __cfm.rightClick(__cfm.rowByText(${JSON.stringify(text)}));`);
-			check(`${label}: no Create`, !(await page_(`return __cfm.menuTitles();`)).includes("Create"));
+			const unitTitles = await page_(`return __cfm.menuTitles();`);
+			check(`${label}: no Create or Replace with…`, !unitTitles.includes("Create") && !unitTitles.includes("Replace with…"), unitTitles);
 			await page_(`await __cfm.closeMenus();`);
 		}
 		const commands = await page_(`return Object.keys(app.commands.commands).filter((id) => id.startsWith("atlas:")).sort();`);

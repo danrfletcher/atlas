@@ -84,12 +84,12 @@ describe("UT-10 display text of the new block", () => {
 });
 
 describe("UT-11 the menu builders", () => {
-	it("Create is one item titled `Create`, and its chooser lists Block, File, Module in that order", () => {
+	it("Create is one item titled `Replace with…`, and its chooser lists Block, File, Module in that order", () => {
 		const menu = new Menu();
 		const chosen: CreateKind[] = [];
 		addCreateItem(menu, { clientX: 12, clientY: 34 }, (k) => chosen.push(k));
 		expect(menu.titles()).toEqual([CREATE_ITEM_TITLE]);
-		expect(CREATE_ITEM_TITLE).toBe("Create");
+		expect(CREATE_ITEM_TITLE).toBe("Replace with…");
 		expect(Menu.shownAtPosition).toEqual([]);
 		menu.items[0].clickHandler!();
 		expect(Menu.shownAtPosition).toHaveLength(1);
@@ -122,11 +122,11 @@ describe("UT-11 the menu builders", () => {
 		return { menu: built!, fake };
 	}
 
-	it("a meta folder's menu gains Create between Rename and the rest, in the old order otherwise", () => {
+	it("a meta folder's menu gains Replace with… between Rename and the rest, in the old order otherwise", () => {
 		const empty = metaMenu(meta("m", "Empty"));
-		expect(empty.menu.titles()).toEqual(["Duplicate (Meta)", "Rename folder", "Create", "Swap with…", "Data source…", "Delete folder"]);
+		expect(empty.menu.titles()).toEqual(["Duplicate (Meta)", "Rename folder", "Replace with…", "Swap with…", "Data source…", "Delete folder"]);
 		const full = metaMenu(meta("m", "Full", [unit("u", file("Existing.md"))]));
-		expect(full.menu.titles()).toEqual(["Duplicate (Meta)", "Rename folder", "Create", "Swap with…", "Statuses", "Data source…", "Delete folder"]);
+		expect(full.menu.titles()).toEqual(["Duplicate (Meta)", "Rename folder", "Replace with…", "Swap with…", "Statuses", "Data source…", "Delete folder"]);
 	});
 
 	it("choosing Block, File or Module in the chooser starts that flow for this folder", () => {
@@ -138,7 +138,7 @@ describe("UT-11 the menu builders", () => {
 		expect(fake.startCreateFromMeta).toHaveBeenCalledWith("file", view, node);
 	});
 
-	it("unit rows offer no Create at all", () => {
+	it("unit rows offer no Create or Replace with… at all", () => {
 		const fake = {
 			plugin: { app: new App(), unitIndex: { getUnits: () => [{ type: "root-file", path: "Existing.md" }] } },
 			startCreateModule: vi.fn(),
@@ -157,6 +157,7 @@ describe("UT-11 the menu builders", () => {
 		(AtlasExplorerView.prototype as unknown as { showUnitMenu: (...a: unknown[]) => void }).showUnitMenu.call(fake, new MouseEvent("contextmenu"), ref, view, unit("u", ref));
 		show.mockRestore();
 		expect(built!.titles()).not.toContain("Create");
+		expect(built!.titles()).not.toContain(CREATE_ITEM_TITLE);
 	});
 });
 

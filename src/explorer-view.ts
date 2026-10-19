@@ -3346,11 +3346,12 @@ export class AtlasExplorerView extends ItemView {
 					}).open();
 				})
 		);
-		// Create: turns this meta folder into a real block, file or module (one item on disk, the row
-		// keeps its place, settings and children). Offered on every meta folder, whatever its children,
-		// depth or fold state; ignores any multi-selection, so it only ever acts on this one row.
+		// Replace with… (PR-1.F1: renamed from "Create" to sit beside "Swap with…"): turns this meta
+		// folder into a real block, file or module (one item on disk, the row keeps its place, settings
+		// and children). Offered on every meta folder, whatever its children, depth or fold state;
+		// ignores any multi-selection, so it only ever acts on this one row.
 		addCreateItem(menu, evt, (kind) => this.startCreateFromMeta(kind, view, node));
-		// PR-2 (G3): on an Atlas folder, right after "Create". Only "Swap with…" applies here (G4).
+		// PR-2 (G3): on an Atlas folder, right after "Replace with…". Only "Swap with…" applies here (G4).
 		addSwapItems(menu, this, view, node, node.label ?? "");
 		addSourceAndStatusItems(menu, this.plugin, this, view, node);
 		menu.addSeparator();
