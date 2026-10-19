@@ -3311,6 +3311,10 @@ export class AtlasExplorerView extends ItemView {
 				this.selectionAnchor = nodeId;
 				this.selectionAnchorScope = "bucket";
 			},
+			// R1: a flushed, awaited save — same as `startCreateFromMeta`'s own `save` dep — so a
+			// rejection surfaces as a "created but not saved" Notice instead of vanishing into the
+			// debounced persist's fire-and-forget write.
+			save: () => plugin.flushSave(),
 		};
 	}
 

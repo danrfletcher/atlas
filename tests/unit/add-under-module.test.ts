@@ -65,6 +65,7 @@ function setup(root: ViewNode[] = tree(), extraRootFiles: string[] = [], extraRo
 			selection.clear();
 			selection.add(nodeId);
 		},
+		save: vi.fn(async () => {}),
 	};
 	return { app, vm, index, deps, selection, placeNewUnit, getParentLabel };
 }
@@ -82,6 +83,7 @@ function minimalDeps(overrides: Partial<AddUnderModuleDeps> = {}): AddUnderModul
 		placeNewUnit: () => null,
 		expandParent: () => {},
 		selectOnly: () => {},
+		save: async () => {},
 		...overrides,
 	};
 }
@@ -269,6 +271,7 @@ describe("startAddUnderModule — E4 parent-exists checks", () => {
 		expect(result).toBeNull();
 		expect(createSpy).not.toHaveBeenCalled();
 		expect(Notice.instances).toHaveLength(1);
+		expect(Notice.instances[0].message).toContain("Archive");
 		expect(Notice.instances[0].message).toContain("no longer exists");
 	});
 
@@ -288,6 +291,7 @@ describe("startAddUnderModule — E4 parent-exists checks", () => {
 		expect(s.app.vault.getAbstractFileByPath("Field Ops")).toBeNull();
 		expect(s.app.vault.getAbstractFileByPath("Field Ops/Field Ops.md")).toBeNull();
 		expect(Notice.instances).toHaveLength(1);
+		expect(Notice.instances[0].message).toContain("Field Ops");
 		expect(Notice.instances[0].message).toContain("no longer exists");
 	});
 });
@@ -307,6 +311,7 @@ describe("startAddUnderModule — G9 failure rolls back", () => {
 		expect(result).toBeNull();
 		expect(s.app.vault.getAbstractFileByPath("Field Ops")).toBeNull();
 		expect(Notice.instances).toHaveLength(1);
+		expect(Notice.instances[0].message).toContain("Field Ops");
 		expect(Notice.instances[0].message).toContain("disk full");
 		expect(s.selection.size).toBe(0);
 
@@ -326,7 +331,7 @@ describe("startAddUnderModule — G9 failure rolls back", () => {
 		expect(result).toBeNull();
 		expect(s.app.vault.getAbstractFileByPath("Field Ops")).toBeNull();
 		expect(Notice.instances).toHaveLength(1);
-		expect(Notice.instances[0].message).toContain("module");
+		expect(Notice.instances[0].message).toContain("Field Ops");
 		expect(Notice.instances[0].message).toContain("note write failed");
 		expect(s.selection.size).toBe(0);
 	});
@@ -341,6 +346,7 @@ describe("startAddUnderModule — G9 failure rolls back", () => {
 		expect(result).toBeNull();
 		expect(s.app.vault.getAbstractFileByPath("Field Ops")).toBeNull();
 		expect(Notice.instances).toHaveLength(1);
+		expect(Notice.instances[0].message).toContain("Field Ops");
 		expect(Notice.instances[0].message).toContain("no longer exists");
 		expect(s.selection.size).toBe(0);
 	});
@@ -371,6 +377,44 @@ describe("startAddUnderModule — G9 failure rolls back", () => {
 		expect(s.app.vault.getAbstractFileByPath("Field Ops/extra.md")).not.toBeNull();
 		expect(Notice.instances).toHaveLength(1);
 		expect(Notice.instances[0].message).toContain("isn't empty");
+	});
+});
+
+describe("startAddUnderModule — R1 (G3 edge case): a save failure after a successful add", () => {
+	it("flushSave rejecting leaves the module and its node in place and shows its own Notice, not a rollback", async () => {
+		const s = setup();
+		s.deps.save = vi.fn(async () => Promise.reject(new Error("disk full")));
+		dialogMock.impl = async () => "Field Ops";
+
+		const created = await startAddUnderModule(s.deps, VIEW_ID, "quarry-drones");
+
+		// The add itself still succeeded: real node, real files on disk, nested and selected —
+		// none of that is rolled back just because the save afterwards failed.
+		expect(created).not.toBeNull();
+		expect(created!.ref).toEqual({ kind: "folder", path: "Field Ops" });
+		expect(s.app.vault.getAbstractFileByPath("Field Ops")).not.toBeNull();
+		expect(s.app.vault.contents.get("Field Ops/Field Ops.md")).toBe("# Field Ops\n");
+		const parent = s.vm.getNode(VIEW_ID, "quarry-drones")!;
+		expect(parent.children.at(-1)!.id).toBe(created!.id);
+		expect([...s.selection]).toEqual([created!.id]);
+
+		expect(s.deps.save).toHaveBeenCalledTimes(1);
+		expect(Notice.instances).toHaveLength(1);
+		expect(Notice.instances[0].message).toContain("Field Ops");
+		expect(Notice.instances[0].message).toContain("created");
+		expect(Notice.instances[0].message).toContain("saving");
+		expect(Notice.instances[0].message).toContain("disk full");
+	});
+
+	it("a resolving save shows no Notice at all", async () => {
+		const s = setup();
+		dialogMock.impl = async () => "Field Ops";
+
+		const created = await startAddUnderModule(s.deps, VIEW_ID, "quarry-drones");
+
+		expect(created).not.toBeNull();
+		expect(s.deps.save).toHaveBeenCalledTimes(1);
+		expect(Notice.instances).toHaveLength(0);
 	});
 });
 

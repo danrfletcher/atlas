@@ -6,6 +6,10 @@ import { UnitRef, ViewNode } from "./types";
 const ERROR_NOTICE_MS = 8000;
 const CONFIRM_LABEL = "Add";
 
+function describe(error: unknown): string {
+	return error instanceof Error ? error.message : String(error);
+}
+
 /** PR-3.F3 (G3): "Add under… > Module" on the clicked row — a real folder-plus-note module at the
  * vault root, nested as the clicked row's last child. Mirrors `add-under-file.ts` (PR-3.F2) almost
  * exactly: same shared create-and-hold foundation (`createOnDisk`, `acquireParentLock`,
@@ -31,10 +35,19 @@ export interface AddUnderModuleDeps extends CreateOnDiskDeps, ParentExistsDeps {
 	expandParent(viewId: string, parentId: string): void;
 	/** Replaces the current bucket selection with exactly the new node's id (E5). */
 	selectOnly(nodeId: string): void;
+	/** Writes data.json now, so a reload right after the add can't lose the new node (R1). A
+	 * rejection is caught and shown as its own Notice — the module and its node are never rolled
+	 * back for a save failure; only the write to disk failed, not the add itself. */
+	save(): Promise<void>;
 }
 
-function fail(reason: string, extra = ""): void {
-	new Notice(`Atlas: couldn't add a module here: ${reason}${extra}`, ERROR_NOTICE_MS);
+/** `name` is included once it's known (every call site after the name dialog resolves), so a
+ * failure Notice always names the module it was trying to add, not just the reason (G9, R2). The
+ * two checks that can fail before a name exists (parent gone before the dialog even opens) still
+ * fall back to the generic "a module here" wording. */
+function fail(reason: string, extra = "", name: string | null = null): void {
+	const subject = name ? `module "${name}" here` : "a module here";
+	new Notice(`Atlas: couldn't add ${subject}: ${reason}${extra}`, ERROR_NOTICE_MS);
 }
 
 /** PR-3.F3 (G3/E1/E2/E4/E5/E6/F5): takes the same per-parent lock every add-under kind shares
@@ -65,12 +78,12 @@ export async function startAddUnderModule(deps: AddUnderModuleDeps, viewId: stri
 
 		// The parent may have gone while the dialog was open.
 		if (!parentExists(deps, viewId, parentId)) {
-			fail("the parent no longer exists");
+			fail("the parent no longer exists", "", name);
 			return null;
 		}
 		const made = await createOnDisk(deps, "module", name);
 		if (!made.ok) {
-			fail(made.reason, made.leftover);
+			fail(made.reason, made.leftover, name);
 			return null;
 		}
 
@@ -79,7 +92,7 @@ export async function startAddUnderModule(deps: AddUnderModuleDeps, viewId: stri
 		if (!parentExists(deps, viewId, parentId)) {
 			const leftover = await made.rollback();
 			made.release();
-			fail("the parent no longer exists", leftover);
+			fail("the parent no longer exists", leftover, name);
 			return null;
 		}
 		// `deps.placeNewUnit` is `ViewsManager.placeNewUnit` in production — synchronous and never
@@ -95,7 +108,7 @@ export async function startAddUnderModule(deps: AddUnderModuleDeps, viewId: stri
 		if (!node) {
 			const leftover = await made.rollback();
 			made.release();
-			fail("the parent no longer exists", leftover);
+			fail("the parent no longer exists", leftover, name);
 			return null;
 		}
 		// The unit stays held through the nest and is released right after it, so any redraw (the
@@ -104,6 +117,14 @@ export async function startAddUnderModule(deps: AddUnderModuleDeps, viewId: stri
 		made.release();
 		deps.expandParent(viewId, parentId);
 		deps.selectOnly(node.id);
+		// R1 (G3 edge case): the add itself has already succeeded — the module is on disk and
+		// nested — so a save failure here is reported, not rolled back. `flushSave` (production's
+		// `deps.save`) is the only thing that can still fail at this point.
+		try {
+			await deps.save();
+		} catch (error) {
+			new Notice(`Atlas: the module "${name}" was created, but saving the views failed: ${describe(error)}`, ERROR_NOTICE_MS);
+		}
 		return node;
 	} finally {
 		release();
