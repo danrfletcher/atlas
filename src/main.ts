@@ -36,6 +36,7 @@ import { McpTokenStore } from "./mcp-token-store";
 import { McpServer, shouldAutoStartMcpServer } from "./mcp-server";
 import { createAtlasStatusTool } from "./mcp-tools";
 import { McpTool } from "./mcp-protocol";
+import { createGetNodeStatusTool, createListNodesTool, createListStatusSetsTool, createListViewsTool, createSetNodeStatusTool } from "./mcp-status-tools";
 
 interface AtlasData {
 	settings: AtlasSettings;
@@ -233,6 +234,20 @@ export default class AtlasPlugin extends Plugin {
 				getToolNames: () => Array.from(tools.keys()),
 			})
 		);
+		// PR-2.F1 (G2/G3/G7): the read and status-write tools, registered on this same map — they
+		// inherit the bearer-token check and JSON-RPC transport `atlas_status` already has for free,
+		// since both go through the one `McpServer.handleRequest` path.
+		const statusToolsContext = {
+			getViewsManager: () => this.viewsManager,
+			getStatusesManager: () => this.statusesManager,
+			getVaultName: () => this.app.vault.getName(),
+			getVaultPath: () => this.getVaultBasePath(),
+		};
+		tools.set("list_views", createListViewsTool(statusToolsContext));
+		tools.set("list_nodes", createListNodesTool(statusToolsContext));
+		tools.set("list_status_sets", createListStatusSetsTool(statusToolsContext));
+		tools.set("get_node_status", createGetNodeStatusTool(statusToolsContext));
+		tools.set("set_node_status", createSetNodeStatusTool(statusToolsContext));
 		return new McpServer({
 			getToken: () => this.mcpTokenStore.get().token,
 			getPort: () => this.mcpTokenStore.get().port,
