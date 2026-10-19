@@ -1,5 +1,3 @@
-import { randomBytes } from "node:crypto";
-
 /** The MCP server's device-local identity for this vault on this device: which port it listens
  * on, and the bearer token every request must present. */
 export interface McpCredentials {
@@ -60,7 +58,14 @@ export class McpTokenStore {
 }
 
 /** 24 random bytes (192 bits) as hex — plenty for a device-local bearer token, and cheap to
- * compare/copy/display as a plain string. */
+ * compare/copy/display as a plain string. Uses the Web Crypto `getRandomValues` global rather
+ * than `node:crypto` (R8): this module is imported statically from `main.ts`, so a top-level
+ * `require("node:crypto")` would run on every platform the plugin loads on, mobile included,
+ * where Node builtins don't exist and a failed require would stop the whole plugin loading — the
+ * opposite of F5. `getRandomValues` is a standard global in both Obsidian's desktop (Electron
+ * renderer) and mobile (Capacitor/WebView) runtimes, and in the Node test environment. */
 function generateToken(): string {
-	return randomBytes(24).toString("hex");
+	const bytes = new Uint8Array(24);
+	crypto.getRandomValues(bytes);
+	return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
