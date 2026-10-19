@@ -150,10 +150,16 @@ export function sortModeLabel(mode: SortMode, reverse: boolean): string {
 }
 
 /** PR-2 (G21): the icon per mode for the "Sort children…" item and the G13 sort indicator. No
- * icon is ever shown for `"manual"` (an effectively-Manual list shows no indicator at all). */
+ * icon is ever shown for `"manual"` (an effectively-Manual list shows no indicator at all).
+ *
+ * PR-2 (T1): the alphabetical id is `"arrow-down-az"`, not the hyphenated `"arrow-down-a-z"` the
+ * spec's prose uses — the installed Obsidian build (1.14.4) only registers the Lucide icon under
+ * `arrow-down-az`; `arrow-down-a-z` doesn't exist, so `setIcon()` silently no-ops and the
+ * indicator renders as an empty 0x0 element. Confirmed by grepping `resources/obsidian.asar` in
+ * that build. */
 export const SORT_MODE_ICONS: Record<SortMode, string> = {
 	manual: "",
-	alphabetical: "arrow-down-a-z",
+	alphabetical: "arrow-down-az",
 	modified: "clock",
 	"time-added": "calendar-plus",
 	status: "list-ordered",

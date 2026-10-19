@@ -487,7 +487,7 @@ function addSortMenuItem(
 	menu.addItem((item) =>
 		item
 			.setTitle("Sort children…")
-			.setIcon("arrow-down-a-z")
+			.setIcon("arrow-down-az")
 			.onClick(() => {
 				const chooser = new Menu();
 				// PR-2 (R1/G19/E5): the ticks and the Reverse-disabled state are derived from
@@ -1882,7 +1882,7 @@ export class AtlasExplorerView extends ItemView {
 		toolbar.createDiv({ cls: "atlas-toolbar-sep" });
 
 		// --- section 3: view controls ------------------------------------------------------------
-		this.toolbarButton(toolbar, this.sortMode === "manual" ? "arrow-up-down" : "arrow-down-a-z", "Sort: manual / A–Z", () => {
+		this.toolbarButton(toolbar, this.sortMode === "manual" ? "arrow-up-down" : "arrow-down-az", "Sort: manual / A–Z", () => {
 			this.sortMode = this.sortMode === "manual" ? "alphabetical" : "manual";
 			void this.render();
 		});
