@@ -325,11 +325,22 @@ export class AtlasSettingTab extends PluginSettingTab {
 
 		new Setting(containerEl)
 			.setName("Port")
-			.setDesc("127.0.0.1 only — never reachable from another device.")
-			.addText((text) => {
-				text.setValue(String(credentials.port));
-				text.setDisabled(true);
-			});
+			.setDesc("127.0.0.1 only — never reachable from another device. 1024–65535. Changing it restarts the server if it's currently running.")
+			.addText((text) =>
+				text.setValue(String(credentials.port)).onChange(async (value) => {
+					const parsed = Number.parseInt(value, 10);
+					if (!Number.isInteger(parsed) || parsed < 1024 || parsed > 65535) return;
+					const current = this.plugin.mcpTokenStore.get();
+					if (parsed === current.port) return;
+					this.plugin.mcpTokenStore.set({ ...current, port: parsed });
+					// R7: picked up live by `getPort()` on the next start — a restart applies it at
+					// once when the server's already running, rather than waiting for the next toggle.
+					if (this.plugin.mcpServer?.isRunning()) {
+						await this.plugin.mcpServer.stop();
+						await this.plugin.mcpServer.start();
+					}
+				})
+			);
 
 		new Setting(containerEl)
 			.setName("Token")
