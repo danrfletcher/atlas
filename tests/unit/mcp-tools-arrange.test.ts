@@ -1,10 +1,12 @@
 import type { App } from "obsidian";
 import { Vault } from "obsidian";
+import type { CachedMetadata } from "obsidian";
 import { describe, expect, it, vi } from "vitest";
-import { View, ViewNode } from "../../src/types";
+import { Unit, UnitRef, View, ViewNode } from "../../src/types";
 import { ViewsManager } from "../../src/views";
 import {
 	McpArrangeToolsContext,
+	McpOutsideManagedError,
 	McpUnitNotFoundError,
 	McpWrongUnitKindError,
 	createAddNodeTool,
@@ -36,18 +38,58 @@ function metaNode(id: string, label: string, children: ViewNode[] = []): ViewNod
 	return { id, type: "meta", label, children };
 }
 
+function fileUnit(path: string): Unit {
+	return { type: "promoted-file", path, topLevelFolder: "" };
+}
+
+function folderUnit(path: string): Unit {
+	return { type: "promoted-folder", path, topLevelFolder: "" };
+}
+
+function blockUnit(path: string, subpath: string): Unit {
+	return { type: "promoted-block", path, subpath };
+}
+
+/** The same shape `createMoveNodeTool`/`createAddNodeTool` need from `ctx.getUnitIndex()`,
+ * `ctx.getMetadataCache()`, `ctx.promoteUnit` and `ctx.forgetDeviceLocalSourceState` — fully
+ * test-controlled rather than driven by the real `UnitIndex`/`MetadataCache`, since this file's
+ * job is to test the arranging tools' own validation logic, not re-prove `UnitIndex`'s own rules
+ * (that's `tests/unit/unit-index.test.ts`'s job). Default: every path is a recognised unit (so
+ * every pre-existing test below keeps passing unmodified), nothing is excluded, nothing is an
+ * interface note, and every attempted promotion/removal is just recorded, never refused. */
 function setup(root: ViewNode[], viewOverrides: Partial<View> = {}) {
 	const persist = vi.fn();
 	const view: View = { id: "view-1", name: "Job Hunt", inboxMode: "view", root, ...viewOverrides };
 	const viewsManager = new ViewsManager({} as App, [view], view.id, persist);
 	const vault = new Vault();
+	const knownUnits: Unit[] = [];
+	const excludedPaths = new Set<string>();
+	const interfaceNotePaths = new Set<string>();
+	const fileCaches = new Map<string, CachedMetadata>();
+	const promotedRefs: UnitRef[] = [];
+	const forgottenNodeIds: string[] = [];
 	const ctx: McpArrangeToolsContext = {
 		getViewsManager: () => viewsManager,
 		getVaultName: () => VAULT_NAME,
 		getVaultPath: () => VAULT_PATH,
 		getVault: () => vault,
+		getUnitIndex: () => ({
+			getUnits: () => knownUnits,
+			isExcludedPath: (path: string) => excludedPaths.has(path),
+			isInterfaceNoteFile: (file: { path: string }) => interfaceNotePaths.has(file.path),
+		}),
+		getMetadataCache: () => ({
+			getFileCache: (file: { path: string }) => fileCaches.get(file.path) ?? null,
+		}),
+		promoteUnit: (ref) => {
+			promotedRefs.push(ref);
+			knownUnits.push(ref.kind === "block" ? blockUnit(ref.path, ref.subpath) : ref.kind === "folder" ? folderUnit(ref.path) : fileUnit(ref.path));
+		},
+		forgetDeviceLocalSourceState: (nodeId) => {
+			forgottenNodeIds.push(nodeId);
+		},
 	};
-	return { ctx, viewsManager, view, persist, vault };
+	return { ctx, viewsManager, view, persist, vault, knownUnits, excludedPaths, interfaceNotePaths, fileCaches, promotedRefs, forgottenNodeIds };
 }
 
 // --- G4/E9 — add_node path resolution ------------------------------------------------------------
@@ -112,6 +154,11 @@ describe("resolveVaultPathToRef — G4 path-resolution rules", () => {
 		expect(resolveVaultPathToRef(vault, "a.md", "file")).toEqual({ kind: "file", path: "a.md" });
 		expect(resolveVaultPathToRef(vault, "Recruiting", "folder")).toEqual({ kind: "folder", path: "Recruiting" });
 		expect(resolveVaultPathToRef(vault, "b.md#^x", "block")).toEqual({ kind: "block", path: "b.md", subpath: "^x" });
+	});
+
+	it("R4 review: \"/\" (the vault root) resolves to a folder ref, same as real Obsidian's getAbstractFileByPath", () => {
+		const vault = new Vault();
+		expect(resolveVaultPathToRef(vault, "/")).toEqual({ kind: "folder", path: "/" });
 	});
 });
 
@@ -219,6 +266,201 @@ describe("add_node — G4/GP1/GP3", () => {
 	});
 });
 
+// --- R1 review: add_node must refuse a self/descendant cycle, same as move_node -------------------
+
+describe("add_node — R1 review: refuses a cycle instead of losing the subtree", () => {
+	it("refuses parentNodeId naming the node's own existing placement (self), leaving the tree untouched", () => {
+		const child = unitNode("child", { kind: "file", path: "a.md" });
+		const a = unitNode("a", { kind: "folder", path: "A" }, { children: [child] });
+		const { ctx, view, knownUnits } = setup([a]);
+		knownUnits.push(fileUnit("a.md"), folderUnit("A"));
+		(ctx.getVault() as Vault).seedFolder("A");
+		(ctx.getVault() as Vault).seedFile("a.md");
+		const tool = createAddNodeTool(ctx);
+
+		expect(() => tool.handler({ view: "Job Hunt", path: "A", parentNodeId: "a" })).toThrow(/already placed/);
+		expect(view.root).toEqual([a]);
+		expect(a.children.map((c) => c.id)).toEqual(["child"]);
+	});
+
+	it("refuses parentNodeId naming one of the node's own descendants, leaving the tree untouched", () => {
+		const child = unitNode("child", { kind: "file", path: "a.md" });
+		const a = unitNode("a", { kind: "folder", path: "A" }, { children: [child] });
+		const { ctx, view, knownUnits } = setup([a]);
+		knownUnits.push(fileUnit("a.md"), folderUnit("A"));
+		(ctx.getVault() as Vault).seedFolder("A");
+		(ctx.getVault() as Vault).seedFile("a.md");
+		const tool = createAddNodeTool(ctx);
+
+		expect(() => tool.handler({ view: "Job Hunt", path: "A", parentNodeId: "child" })).toThrow(/already placed/);
+		expect(view.root).toEqual([a]);
+		expect(a.children.map((c) => c.id)).toEqual(["child"]);
+	});
+});
+
+// --- R2 review: add_node must report the node it actually moved/created, never a re-walk ----------
+
+describe("add_node — R2 review: reports the moved/created node id directly, never re-derived", () => {
+	it("a duplicated ref: add_node reports the id of the copy it actually moved, not the other copy", () => {
+		const d1 = unitNode("d1", { kind: "file", path: "a.md" });
+		const d2 = unitNode("d2", { kind: "file", path: "a.md" });
+		const f = metaNode("f", "Folder");
+		const { ctx, view } = setup([d1, d2, f]);
+		(ctx.getVault() as Vault).seedFile("a.md");
+		const tool = createAddNodeTool(ctx);
+
+		const result = tool.handler({ view: "Job Hunt", path: "a.md", parentNodeId: "f" }) as Record<string, unknown>;
+
+		// placeUnit moves the first DFS match (d1) under f — the reply must name that exact node,
+		// not fall back to a second findUnitNode walk that could land on d2 instead.
+		expect(result.nodeId).toBe("d1");
+		expect(f.children.map((c) => c.id)).toEqual(["d1"]);
+		expect(view.root.map((n) => n.id)).toEqual(["d2", "f"]);
+	});
+});
+
+// --- R4 review: add_node must validate against real Atlas units, not just "exists on disk" --------
+
+describe("add_node — R4 review: validates against the plugin's own unit classification", () => {
+	it("a module-internal file that isn't a recognised unit yet is promoted (manual promotion) and placed", () => {
+		const { ctx, view, viewsManager, promotedRefs } = setup([]);
+		(ctx.getVault() as Vault).seedFolder("Recruiting");
+		(ctx.getVault() as Vault).seedFile("Recruiting/Datadog.md");
+		const tool = createAddNodeTool(ctx);
+
+		const result = tool.handler({ view: "Job Hunt", path: "Recruiting/Datadog.md" }) as Record<string, unknown>;
+
+		expect(promotedRefs).toEqual([{ kind: "file", path: "Recruiting/Datadog.md" }]);
+		expect(viewsManager.getNode(view.id, result.nodeId as string)?.ref).toEqual({ kind: "file", path: "Recruiting/Datadog.md" });
+	});
+
+	it("a nested (unpromoted) module-internal folder is promoted and placed", () => {
+		const { ctx, promotedRefs } = setup([]);
+		(ctx.getVault() as Vault).seedFolder("Recruiting");
+		(ctx.getVault() as Vault).seedFolder("Recruiting/Archive");
+		const tool = createAddNodeTool(ctx);
+
+		tool.handler({ view: "Job Hunt", path: "Recruiting/Archive" });
+		expect(promotedRefs).toEqual([{ kind: "folder", path: "Recruiting/Archive" }]);
+	});
+
+	it("a non-md attachment inside a module is promoted and placed like any other module-internal file", () => {
+		const { ctx, promotedRefs } = setup([]);
+		(ctx.getVault() as Vault).seedFolder("Recruiting");
+		(ctx.getVault() as Vault).seedFile("Recruiting/photo.png");
+		const tool = createAddNodeTool(ctx);
+
+		tool.handler({ view: "Job Hunt", path: "Recruiting/photo.png" });
+		expect(promotedRefs).toEqual([{ kind: "file", path: "Recruiting/photo.png" }]);
+	});
+
+	it("already-known units are placed as is, with no promotion call at all", () => {
+		const { ctx, knownUnits, promotedRefs } = setup([]);
+		(ctx.getVault() as Vault).seedFolder("Recruiting");
+		(ctx.getVault() as Vault).seedFile("Recruiting/Datadog.md");
+		knownUnits.push(fileUnit("Recruiting/Datadog.md"));
+		const tool = createAddNodeTool(ctx);
+
+		tool.handler({ view: "Job Hunt", path: "Recruiting/Datadog.md" });
+		expect(promotedRefs).toEqual([]);
+	});
+
+	it("AGENTS.md: a folder's own interface note (<Folder>/<Folder>.md) is refused, not promoted", () => {
+		const { ctx, interfaceNotePaths, promotedRefs } = setup([]);
+		(ctx.getVault() as Vault).seedFolder("Recruiting");
+		(ctx.getVault() as Vault).seedFile("Recruiting/Recruiting.md");
+		interfaceNotePaths.add("Recruiting/Recruiting.md");
+		const tool = createAddNodeTool(ctx);
+
+		expect(() => tool.handler({ view: "Job Hunt", path: "Recruiting/Recruiting.md" })).toThrow(/interface note/);
+		expect(promotedRefs).toEqual([]);
+	});
+
+	it("a path inside an excluded folder is refused, not promoted", () => {
+		const { ctx, excludedPaths, promotedRefs } = setup([]);
+		(ctx.getVault() as Vault).seedFolder(".obsidian");
+		(ctx.getVault() as Vault).seedFile(".obsidian/config.json");
+		excludedPaths.add(".obsidian/config.json");
+		const tool = createAddNodeTool(ctx);
+
+		expect(() => tool.handler({ view: "Job Hunt", path: ".obsidian/config.json" })).toThrow(/excluded folder/);
+		expect(promotedRefs).toEqual([]);
+	});
+
+	it("a block reference whose #subpath doesn't exist in the file is refused as not found, not promoted", () => {
+		const { ctx, promotedRefs } = setup([]);
+		(ctx.getVault() as Vault).seedFile("Notes.md");
+		const tool = createAddNodeTool(ctx);
+
+		expect(() => tool.handler({ view: "Job Hunt", path: "Notes.md#^ghost" })).toThrow(McpUnitNotFoundError);
+		expect(promotedRefs).toEqual([]);
+	});
+
+	it("a block reference whose #^id block does exist is promoted and placed", () => {
+		const { ctx, fileCaches, promotedRefs } = setup([]);
+		(ctx.getVault() as Vault).seedFile("Notes.md");
+		fileCaches.set("Notes.md", { blocks: { abc123: { id: "abc123", position: { start: { line: 0, col: 0, offset: 0 }, end: { line: 0, col: 0, offset: 0 } } } } });
+		const tool = createAddNodeTool(ctx);
+
+		tool.handler({ view: "Job Hunt", path: "Notes.md#^abc123" });
+		expect(promotedRefs).toEqual([{ kind: "block", path: "Notes.md", subpath: "^abc123" }]);
+	});
+
+	it("a block reference whose #Heading does exist (case/whitespace-insensitive) is promoted and placed", () => {
+		const { ctx, fileCaches, promotedRefs } = setup([]);
+		(ctx.getVault() as Vault).seedFile("Notes.md");
+		fileCaches.set("Notes.md", {
+			headings: [{ heading: " My Heading ", level: 1, position: { start: { line: 0, col: 0, offset: 0 }, end: { line: 0, col: 0, offset: 0 } } }],
+		});
+		const tool = createAddNodeTool(ctx);
+
+		tool.handler({ view: "Job Hunt", path: "Notes.md#my heading" });
+		expect(promotedRefs).toEqual([{ kind: "block", path: "Notes.md", subpath: "my heading" }]);
+	});
+
+	it('"/" (the vault root) is refused outright, never placed or promoted', () => {
+		const { ctx, promotedRefs, view } = setup([]);
+		const tool = createAddNodeTool(ctx);
+
+		expect(() => tool.handler({ view: "Job Hunt", path: "/" })).toThrow(/vault root/);
+		expect(promotedRefs).toEqual([]);
+		expect(view.root).toHaveLength(0);
+	});
+});
+
+// --- R5 review: add_node/create_folder refuse an Outside-Vault-managed row as a parent -------------
+
+describe("add_node/create_folder — R5 review: refuse an Outside-Vault-managed parent", () => {
+	function outsideOwnerFixture() {
+		const managedChild = unitNode("managed-child", { kind: "file", path: "ext/child.md" }, { folderSourceManaged: true, folderSourceOwnerId: "owner" });
+		const owner: ViewNode = {
+			id: "owner",
+			type: "meta",
+			label: "Outside source",
+			children: [managedChild],
+			folderSource: { type: "folder", location: "outside", path: "", showFiles: true, showFolders: false, mode: "merge" },
+		};
+		return { owner, managedChild };
+	}
+
+	it("add_node refuses an Outside-Vault-managed node as parentNodeId", () => {
+		const { owner } = outsideOwnerFixture();
+		const { ctx } = setup([owner]);
+		(ctx.getVault() as Vault).seedFile("a.md");
+		const tool = createAddNodeTool(ctx);
+
+		expect(() => tool.handler({ view: "Job Hunt", path: "a.md", parentNodeId: "managed-child" })).toThrow(McpOutsideManagedError);
+	});
+
+	it("create_folder refuses an Outside-Vault-managed node as parentNodeId", () => {
+		const { owner } = outsideOwnerFixture();
+		const { ctx } = setup([owner]);
+		const tool = createCreateFolderTool(ctx);
+
+		expect(() => tool.handler({ view: "Job Hunt", label: "X", parentNodeId: "managed-child" })).toThrow(McpOutsideManagedError);
+	});
+});
+
 // --- G5 — move_node -------------------------------------------------------------------------------
 
 describe("move_node — G5/E-cases", () => {
@@ -301,6 +543,76 @@ describe("move_node — G5/E-cases", () => {
 	});
 });
 
+// --- R7 review: move_node must report the node's actual landed position, never the raw request ----
+
+describe("move_node — R7 review: reply index reflects where the node actually landed", () => {
+	it("an omitted index reports the real append position, never the Number.MAX_SAFE_INTEGER sentinel", () => {
+		const a = unitNode("a", { kind: "file", path: "a.md" });
+		const b = unitNode("b", { kind: "file", path: "b.md" });
+		const folder = metaNode("folder", "Folder", [a]);
+		const { ctx } = setup([folder, b]);
+		const tool = createMoveNodeTool(ctx);
+
+		const result = tool.handler({ view: "Job Hunt", nodeId: "b", newParentId: "folder" }) as Record<string, unknown>;
+		expect(result.index).toBe(1); // appended after "a", not Number.MAX_SAFE_INTEGER
+	});
+
+	it("an out-of-range index reports the real clamped position, never the raw out-of-range value", () => {
+		const a = unitNode("a", { kind: "file", path: "a.md" });
+		const b = unitNode("b", { kind: "file", path: "b.md" });
+		const { ctx } = setup([a, b]);
+		const tool = createMoveNodeTool(ctx);
+
+		const result = tool.handler({ view: "Job Hunt", nodeId: "a", newParentId: null, index: 999 }) as Record<string, unknown>;
+		expect(result.index).toBe(1); // clamped to the end of a 2-node root, not 999
+	});
+
+	it("an in-range index reports that same position when it matches where the node landed", () => {
+		const a = unitNode("a", { kind: "file", path: "a.md" });
+		const b = unitNode("b", { kind: "file", path: "b.md" });
+		const c = unitNode("c", { kind: "file", path: "c.md" });
+		const { ctx } = setup([a, b, c]);
+		const tool = createMoveNodeTool(ctx);
+
+		const result = tool.handler({ view: "Job Hunt", nodeId: "c", newParentId: null, index: 1 }) as Record<string, unknown>;
+		expect(result.index).toBe(1);
+	});
+});
+
+// --- R5 review: move_node refuses an Outside-Vault-managed node as either the target or parent -----
+
+describe("move_node — R5 review: refuses an Outside-Vault-managed row", () => {
+	function outsideOwnerFixture() {
+		const managedChild = unitNode("managed-child", { kind: "file", path: "ext/child.md" }, { folderSourceManaged: true, folderSourceOwnerId: "owner" });
+		const owner: ViewNode = {
+			id: "owner",
+			type: "meta",
+			label: "Outside source",
+			children: [managedChild],
+			folderSource: { type: "folder", location: "outside", path: "", showFiles: true, showFolders: false, mode: "merge" },
+		};
+		return { owner, managedChild };
+	}
+
+	it("refuses moving an Outside-Vault-managed node itself", () => {
+		const { owner } = outsideOwnerFixture();
+		const other = metaNode("other", "Other");
+		const { ctx } = setup([owner, other]);
+		const tool = createMoveNodeTool(ctx);
+
+		expect(() => tool.handler({ view: "Job Hunt", nodeId: "managed-child", newParentId: "other", index: 0 })).toThrow(McpOutsideManagedError);
+	});
+
+	it("refuses an Outside-Vault-managed node as the new parent", () => {
+		const { owner } = outsideOwnerFixture();
+		const plain = unitNode("plain", { kind: "file", path: "a.md" });
+		const { ctx } = setup([owner, plain]);
+		const tool = createMoveNodeTool(ctx);
+
+		expect(() => tool.handler({ view: "Job Hunt", nodeId: "plain", newParentId: "managed-child", index: 0 })).toThrow(McpOutsideManagedError);
+	});
+});
+
 // --- G5 — remove_node ------------------------------------------------------------------------------
 
 describe("remove_node — G5/Edge", () => {
@@ -314,6 +626,7 @@ describe("remove_node — G5/Edge", () => {
 
 		expect(result.removedNodeId).toBe("child");
 		expect(result.liftedChildIds).toEqual(["grandchild"]);
+		expect(result.sourceRemoved).toBe(false);
 		expect(view.root.map((n) => n.id)).toEqual(["grandchild"]); // lifted into child's old slot
 	});
 
@@ -349,6 +662,51 @@ describe("remove_node — G5/Edge", () => {
 		const { ctx } = setup([]);
 		const tool = createRemoveNodeTool(ctx);
 		expect(() => tool.handler({ view: "Job Hunt" })).toThrow(/"nodeId"/);
+	});
+});
+
+// --- R3 review: remove_node must clear a sourced node's device-local state, same as the UI ---------
+
+describe("remove_node — R3 review: clears device-local source state for a sourced node", () => {
+	it("a node with a live apiSource has forgetDeviceLocalSourceState called and reports sourceRemoved: true", () => {
+		const sourced = unitNode("sourced", { kind: "file", path: "a.md" }, {
+			apiSource: { url: "https://api.example.com/items", method: "GET", mapping: { idField: "id", labelField: "name" }, mode: "merge", refreshOnViewLoad: false },
+		});
+		const { ctx, forgottenNodeIds } = setup([sourced]);
+		const tool = createRemoveNodeTool(ctx);
+
+		const result = tool.handler({ view: "Job Hunt", nodeId: "sourced" }) as Record<string, unknown>;
+
+		expect(result.sourceRemoved).toBe(true);
+		expect(forgottenNodeIds).toEqual(["sourced"]);
+	});
+
+	it("a plain node (no live source) never calls forgetDeviceLocalSourceState and reports sourceRemoved: false", () => {
+		const plain = unitNode("plain", { kind: "file", path: "a.md" });
+		const { ctx, forgottenNodeIds } = setup([plain]);
+		const tool = createRemoveNodeTool(ctx);
+
+		const result = tool.handler({ view: "Job Hunt", nodeId: "plain" }) as Record<string, unknown>;
+
+		expect(result.sourceRemoved).toBe(false);
+		expect(forgottenNodeIds).toEqual([]);
+	});
+
+	it("a Folder-source owner node (meta, folderSource set) also has its device-local state cleared", () => {
+		const owner: ViewNode = {
+			id: "owner",
+			type: "meta",
+			label: "Outside source",
+			children: [],
+			folderSource: { type: "folder", location: "outside", path: "", showFiles: true, showFolders: false, mode: "merge" },
+		};
+		const { ctx, forgottenNodeIds } = setup([owner]);
+		const tool = createRemoveNodeTool(ctx);
+
+		const result = tool.handler({ view: "Job Hunt", nodeId: "owner" }) as Record<string, unknown>;
+
+		expect(result.sourceRemoved).toBe(true);
+		expect(forgottenNodeIds).toEqual(["owner"]);
 	});
 });
 
@@ -485,19 +843,24 @@ describe("schema validation — table-driven across every arranging tool", () =>
 		{ name: "add_node missing view", make: (ctx) => () => createAddNodeTool(ctx).handler({ path: "b.md" }), message: /requires a "view"/ },
 		{ name: "add_node missing path", make: (ctx) => () => createAddNodeTool(ctx).handler({ view: "Job Hunt" }), message: /"path"/ },
 		{ name: "add_node unknown view", make: (ctx) => () => createAddNodeTool(ctx).handler({ view: "Ghost View", path: "b.md" }), message: /No view named or with id/ },
+		{ name: "add_node wrong-type view", make: (ctx) => () => createAddNodeTool(ctx).handler({ view: 42, path: "b.md" }), message: /requires a "view"/ },
 		{ name: "move_node missing view", make: (ctx) => () => createMoveNodeTool(ctx).handler({ nodeId: "unit-1" }), message: /requires a "view"/ },
 		{ name: "move_node missing nodeId", make: (ctx) => () => createMoveNodeTool(ctx).handler({ view: "Job Hunt" }), message: /"nodeId"/ },
 		{ name: "move_node unknown view", make: (ctx) => () => createMoveNodeTool(ctx).handler({ view: "Ghost View", nodeId: "unit-1" }), message: /No view named or with id/ },
+		{ name: "move_node wrong-type nodeId", make: (ctx) => () => createMoveNodeTool(ctx).handler({ view: "Job Hunt", nodeId: 42 }), message: /"nodeId"/ },
 		{ name: "remove_node missing view", make: (ctx) => () => createRemoveNodeTool(ctx).handler({ nodeId: "unit-1" }), message: /requires a "view"/ },
 		{ name: "remove_node missing nodeId", make: (ctx) => () => createRemoveNodeTool(ctx).handler({ view: "Job Hunt" }), message: /"nodeId"/ },
 		{ name: "remove_node unknown view", make: (ctx) => () => createRemoveNodeTool(ctx).handler({ view: "Ghost View", nodeId: "unit-1" }), message: /No view named or with id/ },
+		{ name: "remove_node wrong-type nodeId", make: (ctx) => () => createRemoveNodeTool(ctx).handler({ view: "Job Hunt", nodeId: true }), message: /"nodeId"/ },
 		{ name: "create_folder missing view", make: (ctx) => () => createCreateFolderTool(ctx).handler({ label: "X" }), message: /requires a "view"/ },
 		{ name: "create_folder missing label", make: (ctx) => () => createCreateFolderTool(ctx).handler({ view: "Job Hunt" }), message: /"label"/ },
 		{ name: "create_folder unknown view", make: (ctx) => () => createCreateFolderTool(ctx).handler({ view: "Ghost View", label: "X" }), message: /No view named or with id/ },
+		{ name: "create_folder wrong-type label", make: (ctx) => () => createCreateFolderTool(ctx).handler({ view: "Job Hunt", label: 42 }), message: /"label"/ },
 		{ name: "rename_folder missing view", make: (ctx) => () => createRenameFolderTool(ctx).handler({ nodeId: "meta-1", label: "X" }), message: /requires a "view"/ },
 		{ name: "rename_folder missing nodeId", make: (ctx) => () => createRenameFolderTool(ctx).handler({ view: "Job Hunt", label: "X" }), message: /"nodeId"/ },
 		{ name: "rename_folder missing label", make: (ctx) => () => createRenameFolderTool(ctx).handler({ view: "Job Hunt", nodeId: "meta-1" }), message: /"label"/ },
 		{ name: "rename_folder unknown view", make: (ctx) => () => createRenameFolderTool(ctx).handler({ view: "Ghost View", nodeId: "meta-1", label: "X" }), message: /No view named or with id/ },
+		{ name: "rename_folder wrong-type label", make: (ctx) => () => createRenameFolderTool(ctx).handler({ view: "Job Hunt", nodeId: "meta-1", label: 42 }), message: /"label"/ },
 	];
 
 	for (const { name, make, message } of cases) {
@@ -506,4 +869,59 @@ describe("schema validation — table-driven across every arranging tool", () =>
 			expect(make(ctx)).toThrow(message);
 		});
 	}
+});
+
+
+// --- F4 review: none of the five tools ever reads or writes a node's status fields ----------------
+
+describe("F4 — none of the five tools touches explicitStatusId/apiItemState or any other status field", () => {
+	it("move_node leaves the moved node's own explicitStatusId exactly as it was", () => {
+		const a = unitNode("a", { kind: "file", path: "a.md" }, { explicitStatusId: "in-progress" });
+		const folder = metaNode("folder", "Folder");
+		const { ctx } = setup([a, folder]);
+		const tool = createMoveNodeTool(ctx);
+
+		tool.handler({ view: "Job Hunt", nodeId: "a", newParentId: "folder", index: 0 });
+		expect(folder.children[0].explicitStatusId).toBe("in-progress");
+	});
+
+	it("remove_node leaves a lifted child's own explicitStatusId exactly as it was", () => {
+		const child = unitNode("child", { kind: "file", path: "c.md" }, { explicitStatusId: "blocked" });
+		const parent = metaNode("parent", "Parent", [child]);
+		const { ctx, view } = setup([parent]);
+		const tool = createRemoveNodeTool(ctx);
+
+		tool.handler({ view: "Job Hunt", nodeId: "parent" });
+		expect(view.root[0].explicitStatusId).toBe("blocked");
+	});
+
+	it("create_folder's new node has no explicitStatusId/apiItemState of its own", () => {
+		const { ctx, view } = setup([]);
+		const tool = createCreateFolderTool(ctx);
+
+		tool.handler({ view: "Job Hunt", label: "Recruiting" });
+		expect(view.root[0].explicitStatusId).toBeUndefined();
+		expect(view.root[0].apiItemState).toBeUndefined();
+	});
+
+	it("rename_folder leaves the renamed node's own explicitStatusId exactly as it was", () => {
+		const meta = metaNode("meta-1", "Old label");
+		meta.explicitStatusId = "done";
+		const { ctx, viewsManager, view } = setup([meta]);
+		const tool = createRenameFolderTool(ctx);
+
+		tool.handler({ view: "Job Hunt", nodeId: "meta-1", label: "New label" });
+		expect(viewsManager.getNode(view.id, "meta-1")?.explicitStatusId).toBe("done");
+	});
+
+	it("add_node's newly created node has no explicitStatusId/apiItemState of its own", () => {
+		const { ctx, view, viewsManager } = setup([]);
+		(ctx.getVault() as Vault).seedFile("a.md");
+		const tool = createAddNodeTool(ctx);
+
+		const result = tool.handler({ view: "Job Hunt", path: "a.md" }) as Record<string, unknown>;
+		const node = viewsManager.getNode(view.id, result.nodeId as string);
+		expect(node?.explicitStatusId).toBeUndefined();
+		expect(node?.apiItemState).toBeUndefined();
+	});
 });

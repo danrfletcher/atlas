@@ -528,3 +528,31 @@ describe("UnitIndex.removeAdded — PR-1.F2 (G10) inbox Remove on a missing adde
 		expect(index.getAddedItems()).toEqual([]);
 	});
 });
+
+
+// --- PR-3.F1 (R4 review): public wrappers the `add_node` MCP tool validates against ---------------
+
+describe("isExcludedPath/isInterfaceNoteFile — public wrappers for the MCP add_node tool", () => {
+	it("isExcludedPath matches the same rule classifyBaseUnits applies, pool folder carved out", () => {
+		const { index } = makeIndex([], ["Recruiting", ".obsidian", "_pool"], {}, {}, [], { excludedFolders: [".obsidian"], poolFolder: "_pool" });
+		expect(index.isExcludedPath("Recruiting/Datadog.md")).toBe(false);
+		expect(index.isExcludedPath(".obsidian")).toBe(true);
+		expect(index.isExcludedPath(".obsidian/config")).toBe(true);
+		expect(index.isExcludedPath("_pool/20260101120000-abcd.md")).toBe(false); // pool contents carved out
+	});
+
+	it("isInterfaceNoteFile is true only for a folder's own <Folder>/<Folder>.md", () => {
+		const { app, index } = makeIndex(["Recruiting/Recruiting.md", "Recruiting/Datadog.md"], ["Recruiting"], {}, {});
+		const note = app.vault.getAbstractFileByPath("Recruiting/Recruiting.md") as TFile;
+		const other = app.vault.getAbstractFileByPath("Recruiting/Datadog.md") as TFile;
+		expect(index.isInterfaceNoteFile(note)).toBe(true);
+		expect(index.isInterfaceNoteFile(other)).toBe(false);
+	});
+
+	it("isInterfaceNoteFile accepts index.md/README.md only when interfaceNoteAcceptAltNames is on", () => {
+		const { app, index } = makeIndex(["Recruiting/index.md"], ["Recruiting"], {}, {}, [], { interfaceNoteAcceptAltNames: true });
+		const { app: app2, index: index2 } = makeIndex(["Recruiting/index.md"], ["Recruiting"], {}, {}, [], { interfaceNoteAcceptAltNames: false });
+		expect(index.isInterfaceNoteFile(app.vault.getAbstractFileByPath("Recruiting/index.md") as TFile)).toBe(true);
+		expect(index2.isInterfaceNoteFile(app2.vault.getAbstractFileByPath("Recruiting/index.md") as TFile)).toBe(false);
+	});
+});
