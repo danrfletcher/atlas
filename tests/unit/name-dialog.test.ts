@@ -195,3 +195,48 @@ describe("name dialog", () => {
 		expect(messageEl().textContent).toBe("'_to_delete' is a reserved name");
 	});
 });
+
+// PR-3.F2 (G2): the confirm button's label is now parameterisable — leaving `confirmLabel` out
+// keeps today's "Create" behaviour (every existing Create caller does this), and Add under's own
+// callers (File now, Module later) pass "Add" instead. The title was already a plain `options.title`
+// field with no built-in default, so nothing changes there; this only covers the new button option.
+describe("name dialog — wording options (PR-3.F2 G2)", () => {
+	it("default: no confirmLabel given, the button still reads \"Create\"", () => {
+		open("Fine");
+		expect(button("Create")).toBeTruthy();
+		expect(button("Add")).toBeFalsy();
+	});
+
+	it("custom title and confirmLabel: the title and button both read the custom wording", () => {
+		open("", { title: "Add file under quarry-drones", confirmLabel: "Add" });
+		expect(document.querySelector(".modal-title")!.textContent).toBe("Add file under quarry-drones");
+		expect(button("Add")).toBeTruthy();
+		expect(button("Create")).toBeFalsy();
+		expect(button("Cancel")).toBeTruthy();
+	});
+
+	it("the custom button's enabled/disabled state still tracks validation exactly like \"Create\" does", () => {
+		open("Reading list", { confirmLabel: "Add" });
+		expect(button("Add").disabled).toBe(true);
+		type("Fine");
+		expect(button("Add").disabled).toBe(false);
+		type("Reading list");
+		expect(button("Add").disabled).toBe(true);
+	});
+
+	it("mode, the clash rule and red/green classes are unaffected by custom wording", () => {
+		open("Reading list", { confirmLabel: "Add" });
+		expect(inputEl().classList.contains("atlas-name-invalid")).toBe(true);
+		expect(messageEl().textContent).toBe("A note or folder called 'Reading list' already exists at the vault root");
+		type("Fine");
+		expect(inputEl().classList.contains("atlas-name-valid")).toBe(true);
+		expect(messageEl().textContent).toBe("");
+	});
+
+	it("Enter still confirms through the custom button and resolves the typed value", async () => {
+		const { results } = open("Quarry Notes", { confirmLabel: "Add" });
+		key("Enter");
+		await flush();
+		expect(results).toEqual(["Quarry Notes"]);
+	});
+});

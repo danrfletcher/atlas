@@ -23,6 +23,7 @@ import { CreateKind, addCreateItem, startCreateFromMeta } from "./create-from-me
 import { AddUnderKind, addAddUnderItem, canAddUnder, startAddUnder } from "./add-under";
 import { AddUnderFolderDeps, startAddUnderFolder } from "./add-under-folder";
 import { AddUnderBlockDeps, startAddUnderBlock } from "./add-under-block";
+import { AddUnderFileDeps, startAddUnderFile } from "./add-under-file";
 import { AddUnderHiddenNoticeSignals, noticeIfAddedRowHidden } from "./add-under-hidden-notice";
 import { SwapCandidate, SwapPickerModal, SwapSourceBlock, buildSwapCandidates, canSwapForAtlasFolder, canSwapNode } from "./swap";
 import { noticeIfLinksNotUpdated } from "./links-notice";
@@ -3139,8 +3140,8 @@ export class AtlasExplorerView extends ItemView {
 	}
 
 	/** PR-2.F1: the seam every "Add under" choice calls. PR-2.F2: Folder gets its real create-and-nest
-	 * flow here. PR-3.F1: Block does too. File and Module still forward to the no-op in
-	 * `add-under.ts` until PR-3.F2/F3. */
+	 * flow here. PR-3.F1: Block does too. PR-3.F2: File does too. Module still forwards to the no-op in
+	 * `add-under.ts` until PR-3.F3. */
 	private startAddUnder(kind: AddUnderKind, view: View, node: ViewNode): void {
 		if (kind === "folder") {
 			void this.runAddUnderFolder(view, node);
@@ -3148,6 +3149,10 @@ export class AtlasExplorerView extends ItemView {
 		}
 		if (kind === "block") {
 			void this.runAddUnderBlock(view, node);
+			return;
+		}
+		if (kind === "file") {
+			void this.runAddUnderFile(view, node);
 			return;
 		}
 		startAddUnder(kind, view, node);
@@ -3191,14 +3196,66 @@ export class AtlasExplorerView extends ItemView {
 	private async runAddUnderBlock(view: View, node: ViewNode): Promise<void> {
 		const created = await startAddUnderBlock(this.addUnderBlockDeps(), view.id, node.id);
 		if (!created) return;
-		const signals = this.addUnderHiddenSignals(view, node, created);
-		void this.render();
 		const label = getFreeBlockDisplayTextFromContent("", this.plugin.settings.blockDisplayLength);
+		const signals = this.addUnderHiddenSignals(view, node, created, label);
+		void this.render();
 		await noticeIfAddedRowHidden(created.id, label, node.label ?? unitBasename(node), {
 			render: () => this.awaitRenderSettled(),
 			getBucketListEl: () => this.bucketListEl,
 			...signals,
 		});
+	}
+
+	/** PR-3.F2 (G2) / PR-2.F3 (G10): runs the File add-under flow against the real `ViewsManager`
+	 * and this view's own selection state — `startAddUnderFile` creates the note, nests it, expands
+	 * the parent and selects the new row (never opens it) — then hands off to the shared
+	 * `noticeIfAddedRowHidden` helper the same way `runAddUnderBlock`/`runAddUnderFolder` do. The new
+	 * file's display text (its basename, same as a plain note's row) is what the filter-as-cause
+	 * check in `addUnderHiddenSignals` matches against — never Block's "(empty block)" fallback. */
+	private async runAddUnderFile(view: View, node: ViewNode): Promise<void> {
+		const created = await startAddUnderFile(this.addUnderFileDeps(), view.id, node.id);
+		if (!created) return;
+		const label = unitBasename(created).replace(/\.md$/, "");
+		const signals = this.addUnderHiddenSignals(view, node, created, label);
+		void this.render();
+		await noticeIfAddedRowHidden(created.id, label, node.label ?? unitBasename(node), {
+			render: () => this.awaitRenderSettled(),
+			getBucketListEl: () => this.bucketListEl,
+			...signals,
+		});
+	}
+
+	private addUnderFileDeps(): AddUnderFileDeps {
+		const { plugin } = this;
+		return {
+			app: plugin.app,
+			getPoolFolder: () => plugin.settings.poolFolder,
+			getExcludedFolders: () => plugin.settings.excludedFolders,
+			holdUnit: (path) => plugin.unitIndex.holdUnit(path),
+			getNode: (viewId, nodeId) => plugin.viewsManager.getNode(viewId, nodeId),
+			// The same label a live row currently shows: a Folder's own label, or the resolved text
+			// `resolveRef`/`resolveOutsideManagedRowInfo` already compute for a unit row (basename, or
+			// a free block's title/first line) — never a stale value captured at the row's last render.
+			getParentLabel: async (viewId, parentId) => {
+				const parentNode = plugin.viewsManager.getNode(viewId, parentId);
+				if (!parentNode) return "";
+				if (parentNode.type === "meta") return parentNode.label ?? "";
+				const view = plugin.viewsManager.getViews().find((v) => v.id === viewId);
+				if (!view) return parentNode.ref ? unitBasename(parentNode) : "";
+				const info = this.isOutsideManagedUnit(view, parentNode) ? this.resolveOutsideManagedRowInfo(parentNode.ref!) : await this.resolveRef(parentNode.ref!);
+				return info.text;
+			},
+			placeUnit: (viewId, ref, parentId) => plugin.viewsManager.placeUnit(viewId, ref, parentId),
+			expandParent: (viewId, parentId) => plugin.viewsManager.setNodeCollapsed(viewId, parentId, false),
+			// Same selection/anchor handling as Block and Folder (E5).
+			selectOnly: (nodeId) => {
+				this.selectedInboxRefKeys.clear();
+				this.selectedBucketNodeIds.clear();
+				this.selectedBucketNodeIds.add(nodeId);
+				this.selectionAnchor = nodeId;
+				this.selectionAnchorScope = "bucket";
+			},
+		};
 	}
 
 	private addUnderBlockDeps(): AddUnderBlockDeps {
@@ -3234,15 +3291,16 @@ export class AtlasExplorerView extends ItemView {
 	 * Folder's own row fails to render; naming it anyway broke G10's "whichever applies" whenever a
 	 * filter happened to be active while adding a Folder (the row always shows regardless).
 	 *
-	 * PR-3.F1: a unit-kind row (so far only Block, via `runAddUnderBlock`) is different — the filter
-	 * *can* be the cause, but only when that new row's own display text itself fails `matchesFilter`,
-	 * since a matching row bypasses hide and truncate the same way it does today (never a blanket
-	 * "any filter active" check). A fresh Add-under Block is always created with empty content, so
-	 * its display text is always exactly `getFreeBlockDisplayTextFromContent`'s own fallback for that,
-	 * `"(empty block)"`, checked here without reading the file back off disk. File/Module (PR-3.F2/F3)
-	 * will need their own real display text (basename) once they're wired to this same helper. */
-	private addUnderHiddenSignals(view: View, parentNode: ViewNode, newNode: ViewNode): AddUnderHiddenNoticeSignals {
-		const filterActive = newNode.type === "unit" && !this.matchesFilter(getFreeBlockDisplayTextFromContent("", this.plugin.settings.blockDisplayLength));
+	 * PR-3.F1: a unit-kind row (so far Block and File, via `runAddUnderBlock`/`runAddUnderFile`) is
+	 * different — the filter *can* be the cause, but only when that new row's own display text
+	 * itself fails `matchesFilter`, since a matching row bypasses hide and truncate the same way it
+	 * does today (never a blanket "any filter active" check). The caller computes that display text
+	 * itself (Block: always `getFreeBlockDisplayTextFromContent`'s empty-content fallback,
+	 * `"(empty block)"`; File: the new note's own basename) and passes it in as `displayText` —
+	 * Module (PR-3.F3) will do the same once it's wired to this same helper. Folder's own call site
+	 * never needs a real value here, since its `newNode.type` is always `"meta"`. */
+	private addUnderHiddenSignals(view: View, parentNode: ViewNode, newNode: ViewNode, displayText = ""): AddUnderHiddenNoticeSignals {
+		const filterActive = newNode.type === "unit" && !this.matchesFilter(displayText);
 		const liveParent = this.plugin.viewsManager.getNode(view.id, parentNode.id);
 		if (!liveParent) return { filterActive };
 		const liveNode = liveParent.children.find((c) => c.id === newNode.id) ?? newNode;

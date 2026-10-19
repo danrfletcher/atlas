@@ -10,6 +10,11 @@ export interface NameDialogOptions {
 	ignoreRootPaths?: string[];
 	poolFolder?: string;
 	excludedFolders?: string[];
+	/** PR-3.F2 (G2): the confirm button's label. Every Create caller leaves this out and keeps
+	 * "Create"; Add under > File/Module pass "Add" so the dialog reads "Add file under <parent>" /
+	 * "Add" rather than "Create File" / "Create". Validation, the clash rule and the red/green
+	 * classes are all unaffected by this — only the button's own text changes. */
+	confirmLabel?: string;
 }
 
 /** Only one name dialog may be open at a time. */
@@ -59,7 +64,7 @@ class NameDialog extends Modal {
 		// A disabled button swallows the click and lets focus fall to the page, so the wrapper
 		// (which receives the pointer events while the button is disabled) keeps focus in the box.
 		const createWrap = buttons.createSpan({ cls: "atlas-name-create-wrap" });
-		this.createBtn = createWrap.createEl("button", { text: "Create", cls: "mod-cta" });
+		this.createBtn = createWrap.createEl("button", { text: this.options.confirmLabel ?? "Create", cls: "mod-cta" });
 		this.createBtn.addEventListener("click", () => this.submit());
 		createWrap.addEventListener("mousedown", (evt) => {
 			if (!this.createBtn.disabled) return;

@@ -51,7 +51,7 @@ describe("fence regression", () => {
 		expect(read("src/settings.ts").match(/new Setting\(/g)).toHaveLength(19); // 17 + "Never auto-promote from these folders" + PR-1.F2's "Highlight the open note"
 		for (const f of NEW_FILES) expect(read(f), f).not.toMatch(/addCommand\(|addItem\(|new Setting\(|addSettingTab|registerEditorSuggest/);
 		const wired = [...readdirSync(join(root, "src"))].filter((f) => f.endsWith(".ts")).filter((f) => /openNameDialog/.test(read(`src/${f}`)));
-		expect(wired.sort()).toEqual(["create-from-meta.ts", "create-module.ts", "main.ts", "name-dialog.ts", "test-harness.ts"]); // main.ts: graduation's clash dialog (PR-2); create-module.ts: PR-3; create-from-meta.ts: PR-4
+		expect(wired.sort()).toEqual(["add-under-file.ts", "create-from-meta.ts", "create-module.ts", "main.ts", "name-dialog.ts", "test-harness.ts"]); // main.ts: graduation's clash dialog (PR-2); create-module.ts: PR-3; create-from-meta.ts: PR-4; add-under-file.ts: PR-3.F2
 	});
 
 	it("RG-6 UI strings in the new files never say 'promote'", () => {
@@ -62,7 +62,7 @@ describe("fence regression", () => {
 			}
 		}
 		expect(read("src/links-notice.ts")).not.toMatch(/"[^"\n]*promot/i);
-		expect(read("src/name-dialog.ts")).toContain('text: "Create"');
+		expect(read("src/name-dialog.ts")).toMatch(/confirmLabel \?\? "Create"/); // PR-3.F2 (G2): parameterised, default unchanged
 	});
 
 	it("RG-5 the helpers expose no reverse conversion and add no undo handler", () => {
