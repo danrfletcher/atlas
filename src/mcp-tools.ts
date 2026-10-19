@@ -24,6 +24,8 @@ export interface AtlasStatusResult {
 export function createAtlasStatusTool(ctx: AtlasStatusContext): McpTool {
 	return {
 		name: "atlas_status",
+		description: "Returns this vault's display name, absolute path, the Atlas plugin's version and the list of currently-enabled MCP tool names. Takes no arguments.",
+		inputSchema: { type: "object", properties: {}, additionalProperties: false },
 		handler: (): AtlasStatusResult => ({
 			vaultName: ctx.getVaultName(),
 			vaultPath: ctx.getVaultPath(),

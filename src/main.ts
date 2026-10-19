@@ -202,15 +202,22 @@ export default class AtlasPlugin extends Plugin {
 
 		// PR-1.S1 (F5): the MCP server (its listener, port and token work) is constructed only on
 		// desktop — `mcpServer` stays `null` on mobile, so nothing in this block ever runs there.
-		this.mcpTokenStore = new McpTokenStore(this.app);
-		if (!Platform.isMobile) {
-			this.mcpServer = this.createMcpServer();
-			if (shouldAutoStartMcpServer(this.settings.mcpServerEnabled, Platform.isMobile)) {
-				void this.mcpServer.start();
-			}
-		}
+		void this.initMcpServer();
 
 		if (__ATLAS_TEST__) this.register(registerTestHarness(this));
+	}
+
+	/** PR-1.S1 (F5/G1/R4): constructs the device-local token store and, on desktop only, the MCP
+	 * server itself, then auto-starts it when `mcpServerEnabled` is on — the single place this
+	 * gating runs, so a test can drive exactly this method instead of re-implementing the
+	 * `if (!Platform.isMobile) {...}` check inline (and so it actually proves what `onload` does). */
+	private async initMcpServer(): Promise<void> {
+		this.mcpTokenStore = new McpTokenStore(this.app);
+		if (Platform.isMobile) return; // F5: no listener, port or token work at all on mobile
+		this.mcpServer = this.createMcpServer();
+		if (shouldAutoStartMcpServer(this.settings.mcpServerEnabled, Platform.isMobile)) {
+			await this.mcpServer.start();
+		}
 	}
 
 	/** PR-1.S1 (G8): builds the server with the one tool this PR ships — `atlas_status`. Later PRs
@@ -230,6 +237,7 @@ export default class AtlasPlugin extends Plugin {
 			getToken: () => this.mcpTokenStore.get().token,
 			getPort: () => this.mcpTokenStore.get().port,
 			tools,
+			getServerInfo: () => ({ name: this.manifest.id, version: this.manifest.version }),
 			notify: (message) => void new Notice(message),
 			logError: (message, err) => console.error(message, err),
 		});
