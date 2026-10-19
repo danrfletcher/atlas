@@ -110,11 +110,25 @@ export class McpServer {
 	/** Appends `op` after whatever is currently queued and tracks it as `pending` until it settles.
 	 * Because `this.tail` is reassigned to the new promise *before* `op` runs, each queued
 	 * operation only ever sees the real, settled `running`/`server` state the operation before it
-	 * left behind — never a stale snapshot taken back when it was queued. */
+	 * left behind — never a stale snapshot taken back when it was queued.
+	 *
+	 * R20: `op()` rejecting must never leave `this.tail` permanently rejected — every `.then()`
+	 * chained onto a rejected promise with no rejection handler just re-rejects without ever
+	 * running its callback, so a single failed op would otherwise silently drop every later
+	 * `start()`/`stop()` call forever. The `try`/`catch` below is a second, defensive layer behind
+	 * `attemptStart()`'s own handling (which already turns every failure it knows about into a
+	 * `Notice` + console error and resolves normally): it only catches something `attemptStart()`
+	 * didn't anticipate, still resets `running`/`server` to a safe stopped state, and — critically
+	 * — still resolves rather than rejects, so neither `this.tail` nor the promise handed back to
+	 * the caller (`start()`/`stop()` are both documented to never reject) is ever poisoned. */
 	private enqueue(kind: "start" | "stop", op: () => Promise<void>): Promise<void> {
 		const promise: Promise<void> = this.tail.then(async () => {
 			try {
 				await op();
+			} catch (err) {
+				this.running = false;
+				this.server = null;
+				this.options.logError("[Atlas MCP] server operation failed unexpectedly", err);
 			} finally {
 				if (this.pending?.promise === promise) this.pending = null;
 			}
@@ -127,35 +141,58 @@ export class McpServer {
 	/** Makes exactly one `listen()` attempt — never retried. A failed bind is reported and left
 	 * alone; whatever `start()`/`stop()` call is queued behind this one (if any) runs next and
 	 * acts on the outcome, rather than this attempt trying to out-guess a call that hasn't
-	 * happened yet. */
+	 * happened yet.
+	 *
+	 * R20: every way this can fail — the dynamic `import("node:http")` rejecting, `getPort()`
+	 * throwing, `createServer()` throwing, or `server.listen()` throwing *synchronously* (Node
+	 * throws a `RangeError` straight out of `listen()`, not via the `error` event, for a port
+	 * outside 0–65535) — goes through the same `notify`/`logError` path as the existing
+	 * `EADDRINUSE` case and resolves with `running = false`, never rejects. Without this, a bad
+	 * port latched the server (and, before the `enqueue` fix above, every later `start()`/
+	 * `stop()` call too) in a permanently failed state instead of leaving it free to retry once
+	 * the port is fixed. */
 	private async attemptStart(): Promise<void> {
-		const { createServer } = await import("node:http"); // R8: lazy — never required on mobile
-		const port = this.options.getPort();
-		await new Promise<void>((resolve) => {
-			let settled = false;
-			const finish = () => {
-				if (settled) return;
-				settled = true;
-				resolve();
-			};
-			const server = createServer((req, res) => void this.handleRequest(req, res));
-			server.on("error", (err: NodeJS.ErrnoException) => {
-				this.running = false;
-				this.server = null;
-				const message =
-					err.code === "EADDRINUSE"
-						? `Atlas: the MCP server's port (${port}) is already in use — the server was not started.`
-						: `Atlas: the MCP server failed to start (${err.message}).`;
-				this.options.notify(message);
-				this.options.logError("[Atlas MCP] server error", err);
-				finish();
+		try {
+			const { createServer } = await import("node:http"); // R8: lazy — never required on mobile
+			const port = this.options.getPort();
+			await new Promise<void>((resolve) => {
+				let settled = false;
+				const finish = () => {
+					if (settled) return;
+					settled = true;
+					resolve();
+				};
+				const fail = (err: unknown) => {
+					this.running = false;
+					this.server = null;
+					this.options.notify(describeStartFailure(port, err));
+					this.options.logError("[Atlas MCP] server error", err);
+					finish();
+				};
+				let server: Server;
+				try {
+					server = createServer((req, res) => void this.handleRequest(req, res));
+				} catch (err) {
+					fail(err);
+					return;
+				}
+				server.on("error", (err: NodeJS.ErrnoException) => fail(err));
+				try {
+					server.listen(port, "127.0.0.1", () => {
+						this.server = server;
+						this.running = true;
+						finish();
+					});
+				} catch (err) {
+					fail(err);
+				}
 			});
-			server.listen(port, "127.0.0.1", () => {
-				this.server = server;
-				this.running = true;
-				finish();
-			});
-		});
+		} catch (err) {
+			this.running = false;
+			this.server = null;
+			this.options.notify(describeStartFailure(this.options.getPort(), err));
+			this.options.logError("[Atlas MCP] server error", err);
+		}
 	}
 
 	private async attemptStop(): Promise<void> {
@@ -214,6 +251,19 @@ export class McpServer {
 			}
 		}
 	}
+}
+
+/** The user/console-facing message for a failed start — shared between the `error` event (always
+ * async, e.g. `EADDRINUSE`) and a synchronous throw out of `createServer()`/`listen()`/the
+ * dynamic import (R20, e.g. an out-of-range port). Never includes the bearer token (F6; nothing
+ * passed in here ever could). */
+function describeStartFailure(port: number, err: unknown): string {
+	const code = (err as NodeJS.ErrnoException)?.code;
+	if (code === "EADDRINUSE") {
+		return `Atlas: the MCP server's port (${port}) is already in use — the server was not started.`;
+	}
+	const message = err instanceof Error ? err.message : String(err);
+	return `Atlas: the MCP server failed to start (${message}).`;
 }
 
 /** Reads the whole request body, bounded by `maxBytes`. On overflow, keeps draining the stream to

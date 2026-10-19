@@ -355,6 +355,58 @@ describe("McpServer — R1: start()/stop() race safety", () => {
 	});
 });
 
+describe("McpServer — R20: a failed start never poisons the start/stop queue", () => {
+	it("a start() that throws synchronously (bad port) resolves rather than rejects, and a later start() on a valid port still binds", async () => {
+		// Node throws ERR_SOCKET_BAD_PORT straight out of `listen()` for a port outside 0–65535 —
+		// synchronously, never via the `error` event — which is exactly the shape of failure R20
+		// found the FIFO queue couldn't survive.
+		let port = 70000;
+		const notifications: string[] = [];
+		const errors: unknown[] = [];
+		const server = track(
+			new McpServer({
+				getToken: () => "tok",
+				getPort: () => port,
+				tools: new Map(),
+				notify: (message) => notifications.push(message),
+				logError: (message, err) => errors.push({ message, err }),
+			})
+		);
+
+		await expect(server.start()).resolves.toBeUndefined();
+		expect(server.isRunning()).toBe(false);
+		expect(notifications).toHaveLength(1);
+		expect(errors).toHaveLength(1);
+
+		// The queue must not be stuck rejecting forever behind that failure: once the port is
+		// fixed, the very next start() attempts a fresh bind rather than staying latched.
+		port = await getFreePort();
+		await expect(server.start()).resolves.toBeUndefined();
+		expect(server.isRunning()).toBe(true);
+		expect(server.getBoundAddress()).toEqual({ address: "127.0.0.1", port });
+
+		await expect(server.stop()).resolves.toBeUndefined();
+		expect(server.isRunning()).toBe(false);
+
+		// Proves the socket was actually released, not just this instance's own bookkeeping.
+		const probe = createNetServer();
+		await new Promise<void>((resolve, reject) => {
+			probe.once("error", reject);
+			probe.listen(port, "127.0.0.1", () => resolve());
+		});
+		await new Promise<void>((resolve) => probe.close(() => resolve()));
+	});
+
+	it("stop() right after a failed start still resolves rather than rejecting with the stale error", async () => {
+		const server = track(
+			new McpServer({ getToken: () => "tok", getPort: () => 70000, tools: new Map(), notify: () => {}, logError: () => {} })
+		);
+		await server.start();
+		expect(server.isRunning()).toBe(false);
+		await expect(server.stop()).resolves.toBeUndefined();
+	});
+});
+
 describe("McpServer — a toggle-off mid-request lets that response complete", () => {
 	it("stop() called while a request is in flight still lets that request's response arrive", async () => {
 		const port = await getFreePort();
