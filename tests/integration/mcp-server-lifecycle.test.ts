@@ -198,6 +198,36 @@ describe("McpServer — R1: start()/stop() race safety", () => {
 		expect(server.getBoundAddress()).toEqual({ address: "127.0.0.1", port });
 	});
 
+	it("R15: start()/stop()/start()/start() chains only one fresh attempt — a single listener, no Notice, port free after a final stop()", async () => {
+		const port = await getFreePort();
+		const notifications: string[] = [];
+		const server = track(
+			new McpServer({ getToken: () => "tok", getPort: () => port, tools: new Map(), notify: (m) => notifications.push(m), logError: () => {} })
+		);
+
+		const a = server.start();
+		const b = server.stop();
+		const c = server.start();
+		const d = server.start();
+		await Promise.all([a, b, c, d]);
+
+		expect(server.isRunning()).toBe(true);
+		expect(server.getBoundAddress()).toEqual({ address: "127.0.0.1", port });
+		expect(notifications).toHaveLength(0); // no false "port already in use" from a second, redundant bind
+
+		await server.stop();
+		expect(server.isRunning()).toBe(false);
+
+		// Proves the socket was actually released, not just this instance's own bookkeeping: a
+		// fresh listener can bind the same port immediately afterward.
+		const probe = createNetServer();
+		await new Promise<void>((resolve, reject) => {
+			probe.once("error", reject);
+			probe.listen(port, "127.0.0.1", () => resolve());
+		});
+		await new Promise<void>((resolve) => probe.close(() => resolve()));
+	});
+
 	it("an onload auto-start racing a settings toggle never produces a false 'port already in use' Notice", async () => {
 		const port = await getFreePort();
 		const notifications: string[] = [];

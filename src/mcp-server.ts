@@ -49,6 +49,11 @@ export class McpServer {
 	 * once the bind actually completes and closes the fresh socket immediately instead of leaving
 	 * it running with nothing able to reach it through `stop()` again. */
 	private stopRequested = false;
+	/** R15: at most one fresh attempt chained behind the pending one `stop()` is cancelling. Every
+	 * `start()` call that arrives while that chain is still waiting returns this same promise
+	 * instead of each chaining its own extra `startFresh()` onto an already-chained attempt —
+	 * which would otherwise call `listen()` twice on the same port once the first attempt settles. */
+	private queuedStart: Promise<void> | null = null;
 
 	constructor(private options: McpServerOptions) {}
 
@@ -83,14 +88,27 @@ export class McpServer {
 	 * `stop()` is about to make moot. Instead it chains a fresh attempt to run right after the
 	 * pending one settles, so the last caller's intent (start) wins rather than the `stop()` that
 	 * merely arrived in between.
+	 *
+	 * R15: that chained fresh attempt is created at most once per pending-attempt-being-cancelled.
+	 * `stopRequested` only gets cleared once the chained `startFresh()` actually runs, which is
+	 * still in the future the moment it's chained — so a *second* `start()` arriving before then
+	 * must not see `stopRequested` still true and chain a redundant second `startFresh()` onto the
+	 * first (which would call `listen()` on the same port twice once the pending attempt settles,
+	 * and the loser would clobber `this.server`/`running` with its own EADDRINUSE failure).
+	 * `queuedStart` tracks that one chained attempt so every `start()` call in the same window
+	 * shares it, the same way `startPromise` is shared while no stop is in play.
 	 */
 	start(): Promise<void> {
 		if (this.running) return Promise.resolve();
 		if (this.startPromise) {
 			if (!this.stopRequested) return this.startPromise;
-			const chained: Promise<void> = this.startPromise.then(() => this.startFresh());
-			this.startPromise = chained;
-			return chained;
+			if (this.queuedStart) return this.queuedStart;
+			const pending = this.startPromise;
+			const queued: Promise<void> = pending.then(() => this.startFresh()).finally(() => {
+				if (this.queuedStart === queued) this.queuedStart = null;
+			});
+			this.queuedStart = queued;
+			return queued;
 		}
 		return this.startFresh();
 	}
