@@ -235,3 +235,32 @@ describe("PR-1 G11c — a unit with CSV or markdown-table rows renders them via 
 		expect(container.children).toHaveLength(0);
 	});
 });
+
+// PR-4 (T1/T5/C30 fix): G20 — API rows have no edge zone at all; the new sorted-drop gating
+// (`resolveDropDecision`/`assessDrop`) lives entirely inside `makeDropZone`'s own
+// dragover/drop closures (explorer-view.ts), which `renderApiItemRow` never calls, sorted
+// folder or not. Drives the real (unstubbed) `renderApiItemRow` and confirms a dragover at the
+// row produces today's result: nothing at all (no line, no outline, not draggable).
+describe("PR-4 G20 — an API item row takes no edge drops, whether or not its owning folder is sorted", () => {
+	it("a real API row rendered under a sorted (A-Z) folder is never draggable and ignores a dragover at its own top/bottom edge", () => {
+		const sm = makeStatusesManager();
+		const folder = folderGovernor({ sortMode: "alphabetical" });
+		const item: ApiItemState = { id: "api-1", label: "My Item" };
+
+		const fake = makeFakeExplorer(sm);
+		const container = document.createElement("div");
+		callRenderApiItemRow(fake, item, container, view, folder, 1, [folder]);
+
+		const row = container.querySelector(".atlas-row-api-item") as HTMLElement;
+		expect(row).toBeTruthy();
+		expect(row.getAttribute("draggable")).toBeNull(); // never made draggable, unaffected by sort
+
+		for (const clientY of [5, 50, 95]) {
+			row.dispatchEvent(new MouseEvent("dragover", { bubbles: true, cancelable: true, clientY }));
+		}
+		row.dispatchEvent(new Event("drop", { bubbles: true }));
+		expect(container.querySelectorAll(".atlas-drop-indicator")).toHaveLength(0);
+		expect(container.classList.contains("atlas-sorted-drop-outline")).toBe(false);
+		expect(row.classList.contains("atlas-drop-target")).toBe(false);
+	});
+});
