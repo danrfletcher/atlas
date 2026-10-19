@@ -120,6 +120,9 @@ export class Vault {
 	}
 
 	getAbstractFileByPath(path: string): TAbstractFile | null {
+		// PR-3.F1 (R4 review): real Obsidian resolves "" and "/" to the vault root TFolder itself,
+		// not "not found" — `add_node` must see (and reject) the real root, not a false E9.
+		if (path === "" || path === "/") return this.root;
 		return this.entries.get(path) ?? null;
 	}
 
