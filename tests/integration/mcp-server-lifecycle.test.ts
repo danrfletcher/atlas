@@ -228,6 +228,49 @@ describe("McpServer — R1: start()/stop() race safety", () => {
 		await new Promise<void>((resolve) => probe.close(() => resolve()));
 	});
 
+	it("R17: start/stop/start/stop — the final stop() always wins, even though a start was queued behind an earlier stop", async () => {
+		const port = await getFreePort();
+		const server = makeServer(() => port);
+
+		const a = server.start();
+		const b = server.stop();
+		const c = server.start();
+		const e = server.stop();
+		await Promise.all([a, b, c, e]);
+
+		expect(server.isRunning()).toBe(false);
+		expect(server.getBoundAddress()).toBeNull();
+		// Proves the socket was actually released, not just this instance's own bookkeeping.
+		const probe = createNetServer();
+		await new Promise<void>((resolve, reject) => {
+			probe.once("error", reject);
+			probe.listen(port, "127.0.0.1", () => resolve());
+		});
+		await new Promise<void>((resolve) => probe.close(() => resolve()));
+	});
+
+	it("R17: an awaited stop() while a start is queued behind an earlier stop still ends up stopped once that queued start settles", async () => {
+		const port = await getFreePort();
+		const server = makeServer(() => port);
+
+		server.start();
+		server.stop();
+		const c = server.start();
+		await server.stop();
+
+		expect(server.isRunning()).toBe(false);
+		expect(server.getBoundAddress()).toBeNull();
+		await c; // the queued start must settle without ever flipping isRunning() back to true afterward
+		expect(server.isRunning()).toBe(false);
+
+		const probe = createNetServer();
+		await new Promise<void>((resolve, reject) => {
+			probe.once("error", reject);
+			probe.listen(port, "127.0.0.1", () => resolve());
+		});
+		await new Promise<void>((resolve) => probe.close(() => resolve()));
+	});
+
 	it("an onload auto-start racing a settings toggle never produces a false 'port already in use' Notice", async () => {
 		const port = await getFreePort();
 		const notifications: string[] = [];

@@ -42,18 +42,22 @@ export interface McpBoundAddress {
 export class McpServer {
 	private server: Server | null = null;
 	private running = false;
-	/** R1: a `start()` attempt still in flight — a concurrent `start()` call returns this same
-	 * promise instead of racing a second `listen()` against the same port. */
-	private startPromise: Promise<void> | null = null;
-	/** R1: set by `stop()` while a `start()` is still pending. The `listen` callback checks this
-	 * once the bind actually completes and closes the fresh socket immediately instead of leaving
-	 * it running with nothing able to reach it through `stop()` again. */
-	private stopRequested = false;
-	/** R15: at most one fresh attempt chained behind the pending one `stop()` is cancelling. Every
-	 * `start()` call that arrives while that chain is still waiting returns this same promise
-	 * instead of each chaining its own extra `startFresh()` onto an already-chained attempt —
-	 * which would otherwise call `listen()` twice on the same port once the first attempt settles. */
-	private queuedStart: Promise<void> | null = null;
+	/** The outcome every `start()`/`stop()` call is steering toward — read live, at the one instant
+	 * it actually matters (inside the `listen` callback below), rather than cached per-attempt.
+	 * That's what lets the *last* call always win regardless of how many start()/stop() calls
+	 * landed while an attempt was in flight (R1, R11, R15, R17 were all variations on an earlier,
+	 * flag-stacking version of this losing track of which call was most recent). */
+	private desiredRunning = false;
+	/** Bumped by every `start()`/`stop()` call. The convergence loop below snapshots it before an
+	 * attempt and compares again after: if it's unchanged, that attempt's outcome (success,
+	 * failure, or a no-op close) fully answers the most recent call and the loop stops; if it
+	 * changed mid-attempt, a newer call arrived and the loop runs another iteration to address it. */
+	private generation = 0;
+	/** The convergence loop currently driving `running` toward `desiredRunning`, if one is active.
+	 * A `start()`/`stop()` call that arrives while this is set joins it instead of starting a
+	 * second, independently-racing attempt — this is also what makes two concurrent `start()`
+	 * calls (no `stop()` between them) return the exact same promise (R1). */
+	private activeLoop: Promise<void> | null = null;
 
 	constructor(private options: McpServerOptions) {}
 
@@ -78,48 +82,62 @@ export class McpServer {
 	 * after a prior failed start) since every call creates a fresh `http.Server` rather than
 	 * reusing one that might be latched in a failed state.
 	 *
-	 * R1: calling `start()` again while a previous call is still pending (e.g. an `onload`
-	 * auto-start racing a settings-toggle start) returns the same in-flight promise rather than
-	 * attempting a second, redundant `listen()` on the same port.
-	 *
-	 * R11: if a `stop()` is *also* waiting on that pending attempt (it will close the socket the
-	 * moment it binds, per `stopRequested` below), this call's own intent — "start", issued after
-	 * that `stop()` — must not be silently dropped by just handing back the same promise the
-	 * `stop()` is about to make moot. Instead it chains a fresh attempt to run right after the
-	 * pending one settles, so the last caller's intent (start) wins rather than the `stop()` that
-	 * merely arrived in between.
-	 *
-	 * R15: that chained fresh attempt is created at most once per pending-attempt-being-cancelled.
-	 * `stopRequested` only gets cleared once the chained `startFresh()` actually runs, which is
-	 * still in the future the moment it's chained — so a *second* `start()` arriving before then
-	 * must not see `stopRequested` still true and chain a redundant second `startFresh()` onto the
-	 * first (which would call `listen()` on the same port twice once the pending attempt settles,
-	 * and the loser would clobber `this.server`/`running` with its own EADDRINUSE failure).
-	 * `queuedStart` tracks that one chained attempt so every `start()` call in the same window
-	 * shares it, the same way `startPromise` is shared while no stop is in play.
+	 * R1/R11/R15/R17: calling `start()` (or `stop()`) again while a previous call is still pending
+	 * joins the same convergence loop (see `ensureConverged`) rather than racing an independent
+	 * second `listen()`, and the loop always re-reads the *latest* desired state before deciding
+	 * it's done — so whichever of `start()`/`stop()` was called last always wins, no matter how
+	 * many of the other arrived in between while an attempt was in flight.
 	 */
 	start(): Promise<void> {
-		if (this.running) return Promise.resolve();
-		if (this.startPromise) {
-			if (!this.stopRequested) return this.startPromise;
-			if (this.queuedStart) return this.queuedStart;
-			const pending = this.startPromise;
-			const queued: Promise<void> = pending.then(() => this.startFresh()).finally(() => {
-				if (this.queuedStart === queued) this.queuedStart = null;
-			});
-			this.queuedStart = queued;
-			return queued;
-		}
-		return this.startFresh();
+		this.desiredRunning = true;
+		this.generation++;
+		return this.ensureConverged();
 	}
 
-	private startFresh(): Promise<void> {
-		this.stopRequested = false;
-		const wrapped: Promise<void> = this.attemptStart().finally(() => {
-			if (this.startPromise === wrapped) this.startPromise = null;
+	/** Stops accepting new connections but lets any in-flight request finish — `http.Server.close`'s
+	 * own behaviour, so a toggle-off mid-request never tears a response down. Idempotent: calling
+	 * it twice, or before `start()`, never throws. See `start()`'s doc comment for how this
+	 * interacts with a concurrent or pending `start()`. */
+	async stop(): Promise<void> {
+		this.desiredRunning = false;
+		this.generation++;
+		await this.ensureConverged();
+	}
+
+	/** Shares a single in-flight convergence attempt across every `start()`/`stop()` call that
+	 * arrives while it's running, and starts a fresh one otherwise. */
+	private ensureConverged(): Promise<void> {
+		if (this.activeLoop) return this.activeLoop;
+		const loop = this.runUntilConverged().finally(() => {
+			if (this.activeLoop === loop) this.activeLoop = null;
 		});
-		this.startPromise = wrapped;
-		return wrapped;
+		this.activeLoop = loop;
+		return loop;
+	}
+
+	/** Drives `running` toward `desiredRunning`, re-checking after every attempt whether a newer
+	 * `start()`/`stop()` call arrived while that attempt was in flight. If one did, `generation`
+	 * will have moved past the snapshot taken at the top of this iteration, and the loop runs
+	 * again to address it; otherwise the most recent call has been fully answered (whether that
+	 * answer was "now running", "now stopped", or "attempted and failed — still stopped") and the
+	 * loop stops. This is what lets the *last* caller's intent always win: a failed or
+	 * superseded bind never gets silently retried, but a bind that's still in flight when a newer
+	 * call changes the desired outcome is always re-examined once it settles. */
+	private async runUntilConverged(): Promise<void> {
+		for (;;) {
+			const gen = this.generation;
+			const desired = this.desiredRunning;
+			if (desired === this.running) {
+				if (gen === this.generation) return;
+				continue;
+			}
+			if (desired) {
+				await this.attemptStart();
+			} else {
+				await this.attemptStop();
+			}
+			if (gen === this.generation) return;
+		}
 	}
 
 	private async attemptStart(): Promise<void> {
@@ -145,9 +163,10 @@ export class McpServer {
 				finish();
 			});
 			server.listen(port, "127.0.0.1", () => {
-				if (this.stopRequested) {
-					// R1: a stop() call arrived while this bind was still pending. Close the socket
-					// right away instead of leaving it listening with nothing able to reach it.
+				// R17: read the *live* desired state, not a value captured when this attempt was
+				// launched — a stop() (or another start()) may have landed while the bind was in
+				// flight, and the most recent call must be the one that's honoured.
+				if (!this.desiredRunning) {
 					server.close();
 					this.server = null;
 					this.running = false;
@@ -160,17 +179,7 @@ export class McpServer {
 		});
 	}
 
-	/** Stops accepting new connections but lets any in-flight request finish — `http.Server.close`'s
-	 * own behaviour, so a toggle-off mid-request never tears a response down. Idempotent: calling
-	 * it twice, or before `start()`, never throws.
-	 *
-	 * R1: if a `start()` is still pending, waits for it to settle (the pending listener's own
-	 * callback notices `stopRequested` and closes itself) before deciding there's nothing left to
-	 * close — rather than finding `server === null` and returning immediately while the pending
-	 * listener goes on to bind and run unreachable. */
-	async stop(): Promise<void> {
-		this.stopRequested = true;
-		if (this.startPromise) await this.startPromise;
+	private async attemptStop(): Promise<void> {
 		const server = this.server;
 		this.server = null;
 		this.running = false;
