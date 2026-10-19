@@ -285,6 +285,74 @@ describe("McpServer — R1: start()/stop() race safety", () => {
 		expect(server.isRunning()).toBe(true);
 		expect(notifications).toHaveLength(0);
 	});
+
+	it("R18: a start() that's already settled and converged does not get joined by a later start()+stop() pair — the stop() still wins", async () => {
+		const port = await getFreePort();
+		const server = makeServer(() => port);
+
+		await server.start();
+		expect(server.isRunning()).toBe(true);
+
+		// The first start() has fully resolved (and so has whatever cleared its bookkeeping) by
+		// the time this line runs — the earlier, counter-based implementation left a one-microtask
+		// window right here where a start()+stop() pair issued now could still join the already-
+		// finished attempt and never see the stop() at all (R18).
+		await Promise.all([server.start(), server.stop()]);
+
+		expect(server.isRunning()).toBe(false);
+		expect(server.getBoundAddress()).toBeNull();
+		// Proves the socket was actually released, not just this instance's own bookkeeping.
+		const probe = createNetServer();
+		await new Promise<void>((resolve, reject) => {
+			probe.once("error", reject);
+			probe.listen(port, "127.0.0.1", () => resolve());
+		});
+		await new Promise<void>((resolve) => probe.close(() => resolve()));
+	});
+
+	it("R18: the same window, inverted — a stop()+start() pair issued against an already-converged stopped server still ends up running", async () => {
+		const port = await getFreePort();
+		const server = makeServer(() => port);
+
+		expect(server.isRunning()).toBe(false);
+
+		await Promise.all([server.stop(), server.start()]);
+
+		expect(server.isRunning()).toBe(true);
+		expect(server.getBoundAddress()).toEqual({ address: "127.0.0.1", port });
+	});
+
+	it("R19: two concurrent start() calls against an already-bound port produce exactly one failed-bind Notice and one logged error, not two", async () => {
+		const port = await getFreePort();
+		const squatter = createNetServer();
+		await new Promise<void>((resolve, reject) => {
+			squatter.once("error", reject);
+			squatter.listen(port, "127.0.0.1", () => resolve());
+		});
+
+		try {
+			const notifications: string[] = [];
+			const errors: unknown[] = [];
+			const server = track(
+				new McpServer({
+					getToken: () => "tok",
+					getPort: () => port,
+					tools: new Map(),
+					notify: (message) => notifications.push(message),
+					logError: (message, err) => errors.push({ message, err }),
+				})
+			);
+
+			await Promise.all([server.start(), server.start()]);
+
+			expect(server.isRunning()).toBe(false);
+			expect(notifications).toHaveLength(1);
+			expect(notifications[0]).toMatch(/already in use/i);
+			expect(errors).toHaveLength(1);
+		} finally {
+			await new Promise<void>((resolve) => squatter.close(() => resolve()));
+		}
+	});
 });
 
 describe("McpServer — a toggle-off mid-request lets that response complete", () => {

@@ -42,22 +42,25 @@ export interface McpBoundAddress {
 export class McpServer {
 	private server: Server | null = null;
 	private running = false;
-	/** The outcome every `start()`/`stop()` call is steering toward — read live, at the one instant
-	 * it actually matters (inside the `listen` callback below), rather than cached per-attempt.
-	 * That's what lets the *last* call always win regardless of how many start()/stop() calls
-	 * landed while an attempt was in flight (R1, R11, R15, R17 were all variations on an earlier,
-	 * flag-stacking version of this losing track of which call was most recent). */
-	private desiredRunning = false;
-	/** Bumped by every `start()`/`stop()` call. The convergence loop below snapshots it before an
-	 * attempt and compares again after: if it's unchanged, that attempt's outcome (success,
-	 * failure, or a no-op close) fully answers the most recent call and the loop stops; if it
-	 * changed mid-attempt, a newer call arrived and the loop runs another iteration to address it. */
-	private generation = 0;
-	/** The convergence loop currently driving `running` toward `desiredRunning`, if one is active.
-	 * A `start()`/`stop()` call that arrives while this is set joins it instead of starting a
-	 * second, independently-racing attempt — this is also what makes two concurrent `start()`
-	 * calls (no `stop()` between them) return the exact same promise (R1). */
-	private activeLoop: Promise<void> | null = null;
+
+	/** Serialises every `start()`/`stop()` call into one FIFO queue: each call appends exactly one
+	 * operation after whatever is already queued, and operations always run in call order. That
+	 * alone is enough for the most recent call to always be the last (and therefore final) word on
+	 * the desired state — no counter, flag or convergence loop is needed. R1/R11/R15/R17/R18/R19
+	 * were all variations on an earlier, counter-based version of this losing track of which call
+	 * was most recent, or retrying a failed bind it should have left alone; a plain queue can't
+	 * have either problem because there is nothing to race — each op only ever runs after the one
+	 * before it has fully settled. */
+	private tail: Promise<void> = Promise.resolve();
+	/** The most recently queued operation, for as long as it hasn't finished running. Lets a
+	 * second call of the *same* kind that arrives before that operation starts (or while it's
+	 * still in flight) join it rather than queue an independent, identical operation behind it —
+	 * R19: two concurrent `start()` calls against an already-bound port must produce exactly one
+	 * failed bind attempt (one `Notice`, one logged error), not two. Cleared synchronously from
+	 * inside the operation's own completion, strictly before the next queued operation runs, so a
+	 * settled operation is never handed out to a later caller (that was R18's bug in the previous,
+	 * counter-based design: a finished attempt stayed joinable for one extra microtask). */
+	private pending: { kind: "start" | "stop"; promise: Promise<void> } | null = null;
 
 	constructor(private options: McpServerOptions) {}
 
@@ -79,67 +82,52 @@ export class McpServer {
 	 * leaves the server stopped — no fallback port is ever attempted. Resolves once the outcome
 	 * (success or failure) is known, never rejects: a failed start is reported through `notify`/
 	 * `logError`, not an exception. Safe to call again later (e.g. once the port frees up, or
-	 * after a prior failed start) since every call creates a fresh `http.Server` rather than
+	 * after a prior failed start) since every attempt creates a fresh `http.Server` rather than
 	 * reusing one that might be latched in a failed state.
 	 *
-	 * R1/R11/R15/R17: calling `start()` (or `stop()`) again while a previous call is still pending
-	 * joins the same convergence loop (see `ensureConverged`) rather than racing an independent
-	 * second `listen()`, and the loop always re-reads the *latest* desired state before deciding
-	 * it's done — so whichever of `start()`/`stop()` was called last always wins, no matter how
-	 * many of the other arrived in between while an attempt was in flight.
+	 * Calling `start()` again while an identical call is still queued or in flight returns that
+	 * same promise rather than queuing a second, independent attempt — so two concurrent `start()`
+	 * calls (e.g. the onload auto-start racing a settings toggle) against an already-bound port
+	 * produce exactly one failed-bind `Notice`, not two (R19). A `start()` that arrives behind a
+	 * queued `stop()` (or vice versa) is queued strictly after it, so whichever of `start()`/
+	 * `stop()` was called last always ends up as the last operation to run, and therefore always
+	 * wins (R1/R11/R15/R17/R18).
 	 */
 	start(): Promise<void> {
-		this.desiredRunning = true;
-		this.generation++;
-		return this.ensureConverged();
+		if (this.pending?.kind === "start") return this.pending.promise;
+		return this.enqueue("start", () => (this.running ? Promise.resolve() : this.attemptStart()));
 	}
 
 	/** Stops accepting new connections but lets any in-flight request finish — `http.Server.close`'s
 	 * own behaviour, so a toggle-off mid-request never tears a response down. Idempotent: calling
 	 * it twice, or before `start()`, never throws. See `start()`'s doc comment for how this
-	 * interacts with a concurrent or pending `start()`. */
+	 * interacts with a concurrent or queued `start()`. */
 	async stop(): Promise<void> {
-		this.desiredRunning = false;
-		this.generation++;
-		await this.ensureConverged();
+		if (this.pending?.kind === "stop") return this.pending.promise;
+		await this.enqueue("stop", () => (this.server ? this.attemptStop() : Promise.resolve()));
 	}
 
-	/** Shares a single in-flight convergence attempt across every `start()`/`stop()` call that
-	 * arrives while it's running, and starts a fresh one otherwise. */
-	private ensureConverged(): Promise<void> {
-		if (this.activeLoop) return this.activeLoop;
-		const loop = this.runUntilConverged().finally(() => {
-			if (this.activeLoop === loop) this.activeLoop = null;
+	/** Appends `op` after whatever is currently queued and tracks it as `pending` until it settles.
+	 * Because `this.tail` is reassigned to the new promise *before* `op` runs, each queued
+	 * operation only ever sees the real, settled `running`/`server` state the operation before it
+	 * left behind — never a stale snapshot taken back when it was queued. */
+	private enqueue(kind: "start" | "stop", op: () => Promise<void>): Promise<void> {
+		const promise: Promise<void> = this.tail.then(async () => {
+			try {
+				await op();
+			} finally {
+				if (this.pending?.promise === promise) this.pending = null;
+			}
 		});
-		this.activeLoop = loop;
-		return loop;
+		this.tail = promise;
+		this.pending = { kind, promise };
+		return promise;
 	}
 
-	/** Drives `running` toward `desiredRunning`, re-checking after every attempt whether a newer
-	 * `start()`/`stop()` call arrived while that attempt was in flight. If one did, `generation`
-	 * will have moved past the snapshot taken at the top of this iteration, and the loop runs
-	 * again to address it; otherwise the most recent call has been fully answered (whether that
-	 * answer was "now running", "now stopped", or "attempted and failed — still stopped") and the
-	 * loop stops. This is what lets the *last* caller's intent always win: a failed or
-	 * superseded bind never gets silently retried, but a bind that's still in flight when a newer
-	 * call changes the desired outcome is always re-examined once it settles. */
-	private async runUntilConverged(): Promise<void> {
-		for (;;) {
-			const gen = this.generation;
-			const desired = this.desiredRunning;
-			if (desired === this.running) {
-				if (gen === this.generation) return;
-				continue;
-			}
-			if (desired) {
-				await this.attemptStart();
-			} else {
-				await this.attemptStop();
-			}
-			if (gen === this.generation) return;
-		}
-	}
-
+	/** Makes exactly one `listen()` attempt — never retried. A failed bind is reported and left
+	 * alone; whatever `start()`/`stop()` call is queued behind this one (if any) runs next and
+	 * acts on the outcome, rather than this attempt trying to out-guess a call that hasn't
+	 * happened yet. */
 	private async attemptStart(): Promise<void> {
 		const { createServer } = await import("node:http"); // R8: lazy — never required on mobile
 		const port = this.options.getPort();
@@ -163,17 +151,8 @@ export class McpServer {
 				finish();
 			});
 			server.listen(port, "127.0.0.1", () => {
-				// R17: read the *live* desired state, not a value captured when this attempt was
-				// launched — a stop() (or another start()) may have landed while the bind was in
-				// flight, and the most recent call must be the one that's honoured.
-				if (!this.desiredRunning) {
-					server.close();
-					this.server = null;
-					this.running = false;
-				} else {
-					this.server = server;
-					this.running = true;
-				}
+				this.server = server;
+				this.running = true;
 				finish();
 			});
 		});
