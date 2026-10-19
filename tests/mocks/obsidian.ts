@@ -98,11 +98,21 @@ export class Vault {
 	private entries = new Map<string, TAbstractFile>();
 	private listeners = new Map<VaultEvent, Set<(...args: any[]) => void>>();
 	calls: string[] = [];
+	/** Test-settable display name — real Obsidian derives this from the vault's folder name;
+	 * this mock just exposes a plain field so a test can set it directly (PR-1.S1/R5). */
+	name = "";
+	/** Left unset by this mock (real Obsidian assigns a `DataAdapter`) — a test that needs
+	 * `instanceof FileSystemAdapter` to pass assigns a real instance here directly (PR-1.S1/R5). */
+	adapter: unknown = undefined;
 
 	constructor() {
 		this.root.path = "/";
 		this.root.name = "";
 		this.root.vault = this;
+	}
+
+	getName(): string {
+		return this.name;
 	}
 
 	getRoot(): TFolder {
@@ -268,6 +278,18 @@ export class App {
 	metadataCache = new MetadataCache();
 	fileManager = new FileManager(this.vault);
 	workspace = { onLayoutReady: (cb: () => void) => cb(), getLeavesOfType: () => [] as unknown[] };
+
+	/** Real Obsidian's own per-device `localStorage` helpers (`App.loadLocalStorage`/
+	 * `saveLocalStorage`, added 1.8.7) — an in-memory stand-in so `McpTokenStore` (PR-1.S1/R5),
+	 * constructed directly against `app`, works the same in a test as in the real plugin. */
+	private localStorage = new Map<string, unknown>();
+	loadLocalStorage(key: string): unknown {
+		return this.localStorage.get(key) ?? null;
+	}
+	saveLocalStorage(key: string, data: unknown): void {
+		if (data === null) this.localStorage.delete(key);
+		else this.localStorage.set(key, data);
+	}
 }
 
 // --- UI -----------------------------------------------------------------------------------------
