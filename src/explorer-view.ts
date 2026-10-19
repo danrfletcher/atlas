@@ -22,6 +22,7 @@ import { addCreateModuleItem, startCreateModule, unitForRef } from "./create-mod
 import { CreateKind, addCreateItem, startCreateFromMeta } from "./create-from-meta";
 import { AddUnderKind, addAddUnderItem, canAddUnder, startAddUnder } from "./add-under";
 import { AddUnderFolderDeps, startAddUnderFolder } from "./add-under-folder";
+import { AddUnderHiddenNoticeSignals, noticeIfAddedRowHidden } from "./add-under-hidden-notice";
 import { SwapCandidate, SwapPickerModal, SwapSourceBlock, buildSwapCandidates, canSwapForAtlasFolder, canSwapNode } from "./swap";
 import { noticeIfLinksNotUpdated } from "./links-notice";
 import { generateBlockId } from "./display-text";
@@ -3146,15 +3147,16 @@ export class AtlasExplorerView extends ItemView {
 		startAddUnder(kind, view, node);
 	}
 
-	/** PR-2.F2 (G4/G10): runs the Folder add-under flow against the real `ViewsManager` and this
-	 * view's own selection state, then — once the view has re-rendered with the new row selected and
-	 * its parent expanded — checks whether the new row actually has a rendered element. If the
-	 * bucket's active sort, grouping, truncation or filter kept it from showing, says so with a
-	 * Notice rather than leaving the user wondering where it went (G10); the node, selection and
-	 * expansion are unaffected either way. */
+	/** PR-2.F2 (G4) / PR-2.F3 (G10): runs the Folder add-under flow against the real `ViewsManager`
+	 * and this view's own selection state, then — once the view has re-rendered with the new row
+	 * selected and its parent expanded — hands off to the shared `noticeIfAddedRowHidden` helper
+	 * (`add-under-hidden-notice.ts`), which checks whether the new row actually has a rendered
+	 * element and, if not, names the reason (G10); the node, selection and expansion are unaffected
+	 * either way. PR-3.F1-F3 (Block/File/Module) call the same helper unchanged. */
 	private async runAddUnderFolder(view: View, node: ViewNode): Promise<void> {
 		const created = await startAddUnderFolder(this.addUnderFolderDeps(), view.id, node.id);
 		if (!created) return;
+		const signals = this.addUnderHiddenSignals(view, node, created);
 		// R2 fix: `addMetaFolder`/`setNodeCollapsed` above each already went through `save()` and so
 		// `ViewsManager.onChange` → `queueRender()` before we ever get here, which can leave a render
 		// queued via `setTimeout(0)`. A plain `await this.render()` only guarantees *this* call's own
@@ -3162,13 +3164,57 @@ export class AtlasExplorerView extends ItemView {
 		// promoted block's disk read in `resolveUnit`) and supersedes it, `render()`'s own
 		// `isCurrent()` guard makes the superseded call return early while the superseding one may
 		// still be mid-build, so `this.bucketListEl` could be the newer render's list with the new
-		// row not appended yet. `awaitRenderSettled()` follows `latestRenderPromise` until it stops
-		// changing, so the DOM check below always runs against a render that has actually finished.
+		// row not appended yet. `noticeIfAddedRowHidden`'s own `render` step is `awaitRenderSettled()`
+		// — it follows `latestRenderPromise` until it stops changing, so the DOM check inside it
+		// always runs against a render that has actually finished.
 		void this.render();
-		await this.awaitRenderSettled();
-		if (this.bucketListEl && !this.bucketListEl.querySelector(`[data-select-key="${CSS.escape(created.id)}"]`)) {
-			new Notice(`Atlas: added "${created.label ?? "New folder"}" under ${node.label ?? unitBasename(node)} — hidden by the current filter, sort or grouping`);
-		}
+		await noticeIfAddedRowHidden(created.id, created.label ?? "New folder", node.label ?? unitBasename(node), {
+			render: () => this.awaitRenderSettled(),
+			getBucketListEl: () => this.bucketListEl,
+			...signals,
+		});
+	}
+
+	/** PR-2.F3 (G10): the real-governance signals `noticeIfAddedRowHidden` classifies into a reason,
+	 * computed fresh against the live tree right after the add — `parentNode` is whatever the caller
+	 * captured at menu-build time, possibly stale by now, so this re-reads the live parent and child
+	 * by id before resolving status. Filter/truncation/hidden-status are read-only lookups; nothing
+	 * here writes `filterText`, `truncatedStatuses` or `expandedTruncationGroups` (fence). */
+	private addUnderHiddenSignals(view: View, parentNode: ViewNode, newNode: ViewNode): AddUnderHiddenNoticeSignals {
+		const filterActive = this.filterText.trim() !== "";
+		const liveParent = this.plugin.viewsManager.getNode(view.id, parentNode.id);
+		if (!liveParent) return { filterActive };
+		const liveNode = liveParent.children.find((c) => c.id === newNode.id) ?? newNode;
+		const ancestors: StatusGovernance[] = [liveParent, ...this.ancestorsForNode(view, liveParent.id)];
+		const sm = this.plugin.statusesManager;
+		const governor = sm.findGoverningAncestor(ancestors, liveNode);
+		const status = governor ? sm.resolveNodeStatus(ancestors, liveNode) : null;
+		if (!status || !governor) return { filterActive };
+		const hiddenBySortOrGrouping = (!!status.isCompleted && !!governor.hideCompleted) || (!!status.isCancelled && !!governor.hideCancelled);
+		if (hiddenBySortOrGrouping) return { filterActive, hiddenBySortOrGrouping };
+		const config = governor.truncatedStatuses?.[status.id];
+		if (!config?.enabled) return { filterActive };
+		const sameStatusSiblings = liveParent.children.filter((sibling) => sm.resolveNodeStatus(ancestors, sibling)?.id === status.id).length;
+		if (sameStatusSiblings < 2) return { filterActive };
+		const key = (governor === view ? `view:${view.id}` : `node:${(governor as ViewNode).id}`) + `:${status.id}`;
+		if (this.expandedTruncationGroups.has(key)) return { filterActive };
+		return { filterActive, truncatedGroupLabel: config.label?.trim() || status.label };
+	}
+
+	/** The ancestors chain (nearest first, ending with `view`) for `targetId`'s own parent — the
+	 * same shape `renderNodeList` would pass as `ancestors` for `targetId` itself, not including
+	 * `targetId`. There's no stored parent pointer on `ViewNode`, so this walks the live tree fresh;
+	 * cheap enough for the one-off post-add check above, not meant for the render hot path. */
+	private ancestorsForNode(view: View, targetId: string): StatusGovernance[] {
+		const walk = (nodes: ViewNode[], chain: StatusGovernance[]): StatusGovernance[] | null => {
+			for (const candidate of nodes) {
+				if (candidate.id === targetId) return chain;
+				const found = walk(candidate.children, [candidate, ...chain]);
+				if (found) return found;
+			}
+			return null;
+		};
+		return walk(view.root, [view]) ?? [view];
 	}
 
 	private addUnderFolderDeps(): AddUnderFolderDeps {
