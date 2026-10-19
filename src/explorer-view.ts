@@ -3298,11 +3298,23 @@ export class AtlasExplorerView extends ItemView {
 			// An existing tree node (meta or unit) is being reparented/reordered — `moveNode` operates
 			// on it directly by id, in place, so its own children/collapsed state travels with it.
 			// PR-3 (G3): for an edge drop, `index` starts at the computed sibling position instead of
-			// always the end; either way each move appends after the previous one, so the whole
-			// selection lands together at the destination in the same relative order it was dragged in.
+			// always the end, so the whole selection lands together at the destination in the same
+			// relative order it was dragged in.
+			//
+			// R1 fix: the next slot is derived from where the *previous* row actually landed, not
+			// from a flat `index++`. `moveNode`'s `index` param is read against the pre-removal array
+			// (see its own doc comment) and adjusted for a same-parent downward move — so once any
+			// moved row came from above the drop point in the same parent, a naive running counter
+			// drifts one slot too high for every row after it (and mis-handles E1 no-ops the same
+			// way). Re-reading each node's real post-move position with `findNodeParent` and chaining
+			// the next index off *that* keeps the batch landing correctly regardless of which parent
+			// each row started in, or whether a given move turned out to be a no-op.
 			let index = position ?? (parentId ? (this.findNodeAnywhere(view.root, parentId)?.node.children.length ?? 0) : view.root.length);
 			for (const nodeId of toMove) {
-				if (this.plugin.viewsManager.moveNode(viewId, nodeId, parentId, index)) index++;
+				if (this.plugin.viewsManager.moveNode(viewId, nodeId, parentId, index)) {
+					const landed = this.findNodeParent(view.root, nodeId, null);
+					index = landed ? landed.index + 1 : index + 1;
+				}
 			}
 			this.selectedBucketNodeIds.clear();
 			this.queueRender();

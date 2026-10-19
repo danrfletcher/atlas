@@ -330,6 +330,81 @@ describe("PR-3 — edge-drop row wiring (dragover/drop/dragleave against the rea
 		expect(root.find((n) => n.id === "a")!.children.map((n) => n.id)).toEqual(["b"]);
 	});
 
+	it("R1/G3: a same-parent batch where a selected row sits above the drop point lands in drag order, not shifted by moveNode's own pre-removal index adjustment", () => {
+		// [A,B,C,D,E], select A,B, drop before D -- naively incrementing `index` after each move
+		// ignores that moving "a" out from above "d" closes a gap moveNode already compensated for,
+		// so the stale running counter puts "b" one slot too far right (C,A,D,B,E instead of C,A,B,D,E).
+		const vm = makeVm([node("a", "A.md"), node("b", "B.md"), node("c", "C.md"), node("d", "D.md"), node("e", "E.md")]);
+		const fake = makeDropFake(vm);
+		fake.dragPayload = { kind: "node", nodeIds: ["a", "b"], viewId: "v1" };
+
+		const row = makeRow();
+		document.body.appendChild(row);
+		fake.makeDropZone(row, { kind: "node", nodeId: "d", viewId: "v1" }, true);
+
+		dragOverAt(row, 10); // top edge of "d" -> before "d"
+		row.dispatchEvent(new Event("drop", { bubbles: true }));
+
+		expect(vm.getViews()[0].root.map((n) => n.id)).toEqual(["c", "a", "b", "d", "e"]);
+	});
+
+	it("R1/G3: a same-parent batch mixing a row from above and a row from below the drop point lands in drag order", () => {
+		// [A,B,C,D,E], select A,E, drop before C -- "a" moves up (index decrements), "e" moves down
+		// (no decrement); the naive counter also gets this pairing wrong (B,A,C,E,D instead of B,A,E,C,D).
+		const vm = makeVm([node("a", "A.md"), node("b", "B.md"), node("c", "C.md"), node("d", "D.md"), node("e", "E.md")]);
+		const fake = makeDropFake(vm);
+		fake.dragPayload = { kind: "node", nodeIds: ["a", "e"], viewId: "v1" };
+
+		const row = makeRow();
+		document.body.appendChild(row);
+		fake.makeDropZone(row, { kind: "node", nodeId: "c", viewId: "v1" }, true);
+
+		dragOverAt(row, 10); // top edge of "c" -> before "c"
+		row.dispatchEvent(new Event("drop", { bubbles: true }));
+
+		expect(vm.getViews()[0].root.map((n) => n.id)).toEqual(["b", "a", "e", "c", "d"]);
+	});
+
+	it("R1/G3/E1: a same-parent batch already sitting immediately before the drop point nets out unchanged", () => {
+		// [A,B,C,D], select B,C, drop before D (B,C are already exactly there, in order) -- the
+		// naive counter instead produced A,B,D,C.
+		const vm = makeVm([node("a", "A.md"), node("b", "B.md"), node("c", "C.md"), node("d", "D.md")]);
+		const fake = makeDropFake(vm);
+		fake.dragPayload = { kind: "node", nodeIds: ["b", "c"], viewId: "v1" };
+
+		const row = makeRow();
+		document.body.appendChild(row);
+		fake.makeDropZone(row, { kind: "node", nodeId: "d", viewId: "v1" }, true);
+
+		dragOverAt(row, 10); // top edge of "d" -> before "d"
+		row.dispatchEvent(new Event("drop", { bubbles: true }));
+
+		expect(vm.getViews()[0].root.map((n) => n.id)).toEqual(["a", "b", "c", "d"]);
+	});
+
+	it("R1/G3: a mixed-parent batch (one row already a root sibling, one row from inside another folder) lands together in drag order", () => {
+		// root [A,B,C,F(children=[X])], select A (root) and X (inside F), drop before C. "a" is a
+		// same-parent move (index decrements); "x" is a cross-parent move (no decrement) -- the naive
+		// counter, chained off "a"'s pre-adjustment index instead of where "a" actually landed, put
+		// "x" after "c" instead of before it.
+		const x = node("x", "X.md");
+		const f: ViewNode = { id: "f", type: "meta", label: "F", children: [x] };
+		const vm = makeVm([node("a", "A.md"), node("b", "B.md"), node("c", "C.md"), f]);
+		const fake = makeDropFake(vm);
+		fake.dragPayload = { kind: "node", nodeIds: ["a", "x"], viewId: "v1" };
+
+		const row = makeRow();
+		document.body.appendChild(row);
+		fake.makeDropZone(row, { kind: "node", nodeId: "c", viewId: "v1" }, true);
+
+		dragOverAt(row, 10); // top edge of "c" -> before "c"
+		row.dispatchEvent(new Event("drop", { bubbles: true }));
+
+		const root = vm.getViews()[0].root;
+		expect(root.map((n) => n.id)).toEqual(["b", "a", "x", "c", "f"]);
+		expect(root.find((n) => n.id === "f")!.children).toEqual([]);
+	});
+
 	it("E2: dropping on an edge inside the dragged node's own descendants is refused, with no indicator line", () => {
 		const b = node("b", "B.md");
 		const a = node("a", "A.md", [b]);
