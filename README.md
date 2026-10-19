@@ -79,6 +79,10 @@ The settings panel has two tabs: **Basic** and **Status**.
 | Confirm before adding a unit to a module | on | Ask before a drag onto a module's icon physically files something into it. Off skips the confirmation, not the move. |
 | Default view on launch | — | Which view Atlas opens to when the vault loads. |
 
+### MCP server
+
+Off by default. When turned on, Atlas runs a small MCP (Model Context Protocol) server on `127.0.0.1` so a local agent (e.g. Titan) can call it over HTTP with JSON-RPC 2.0. The toggle itself is a synced setting; the port (default `27202`) and the bearer token every request must present are both device-local — they never sync to another device, the same way Folder/API source credentials don't. The settings panel shows the current token (copyable) and a **Regenerate** button; regenerating writes a new token immediately and the old one stops working at once. This PR ships one tool, `atlas_status`, which returns the vault's name, absolute path, the plugin's version and the list of enabled tools — enough for an agent to confirm it reached the right vault before anything else. The server only ever binds the loopback address, never creates/renames/moves/deletes a file, and never runs on mobile.
+
 ### Status
 
 - **Status sets** — create any number of named sets, each holding an ordered list of statuses (label, color, optionally flagged "Completed" and/or "Cancelled"). Each status row's "more actions" menu handles making it the set's default, marking it completed/cancelled, reordering, and removing it.

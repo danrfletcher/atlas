@@ -2,6 +2,18 @@
 
 Judgement calls made during the build, the alternative considered, and why. Newest first.
 
+## PR-1.S1: MCP server — transport shape, mobile gating, and JSON-RPC error semantics
+
+**Decision:** the JSON-RPC method the server recognises is `tools/call` with `params: { name, arguments }` (the MCP convention), not a bespoke per-tool method name. A later PR's tool just adds an entry to the same `tools` map passed into `McpServer`; the transport and dispatch (`src/mcp-protocol.ts`) never change. No `@modelcontextprotocol/sdk` (or any new runtime dependency) was added — the ticket-plan's constraint is "Node's own http and crypto modules; no new runtime dependencies," and a one-tool, one-method server is a small enough surface to implement directly.
+
+**Decision:** `McpTokenStore` is not keyed by node id the way `ApiHeadersStore`/`FolderSourcePathStore` are — there's exactly one MCP server per vault per device, so it holds a single `{ port, token }` pair under its own storage key (`atlas-mcp-server`), confirmed distinct from the other two stores' keys in `tests/unit/mcp-token-store.test.ts`.
+
+**Decision:** on mobile, the whole MCP settings section (not just the toggle) renders a one-line "desktop only" note instead of the real controls. `McpTokenStore` itself is still constructed unconditionally in `onload()` (it's inert — just a `localStorage` wrapper, same risk profile as `ApiHeadersStore`), but `McpServer` (the listener) is only ever constructed, and only ever started, inside `if (!Platform.isMobile)`. This reading of F5 ("no listener, port or token work happens on mobile at all") treats "token work" as reading/writing the token for an actual request or UI display, not the mere existence of the lightweight store object — and hiding the settings section on mobile means the UI path that would do that reading never runs there either.
+
+**Decision:** a request body over 1MB doesn't `req.destroy()` the socket — it keeps draining the stream to completion (discarding the bytes) so the handler can still send back a structured JSON-RPC error, per the fence item "never an uncaught exception or a dropped connection." Destroying the socket mid-stream would have violated that for the one edge case (oversized body) where it would have been the simplest implementation.
+
+**Decision:** `McpServer.start()`/`stop()` both return a `Promise<void>` that always resolves, never rejects — a failed start (e.g. `EADDRINUSE`) is reported through the injected `notify`/`logError` callbacks, not an exception, so a caller (the settings tab's toggle, or `onload()`) never needs a `try/catch` around either call.
+
 ## PR-3 T9/E7: "Folder converted by promotion" cannot be built or tested in this ticket
 
 **Decision:** E7 ("Folder converted by promotion: source, cache and mode carry over") stays unimplemented and unverified in PR-3, same call PR-2 already made for the identical finding (PR-2 T5, commit `b773e87`). Closing this out as a documented, permanent deviation rather than leaving it to be re-raised every review/test round.
