@@ -490,20 +490,28 @@ function addSortMenuItem(
 			.setIcon("arrow-down-a-z")
 			.onClick(() => {
 				const chooser = new Menu();
-				const mode = currentSortMode(governance);
+				// PR-2 (R1/G19/E5): the ticks and the Reverse-disabled state are derived from
+				// `activeSortFor` — the *effective* sort this list actually renders by — never from
+				// the literal `currentSortMode(governance)`. An absent own setting under an
+				// inheriting status governor is effectively sorted by status, not Manual: ticking
+				// Manual there as well as Status (inherited) would claim two contradictory sorts are
+				// both active, and leaving Reverse disabled would block reversing a sort that *is*
+				// running. `active === null` means effectively Manual (either an explicit own
+				// "manual", or no own setting and no inherited status sort).
+				const active = activeSortFor(governance, statusGovernor);
 				for (const { mode: choice, label } of SORT_MODE_CHOICES) {
-					chooser.addItem((entry) => entry.setTitle(label).setChecked(mode === choice).onClick(() => onChange({ sortMode: choice, sortReverse: false })));
+					const checked = choice === "manual" ? active === null : active?.mode === choice;
+					chooser.addItem((entry) => entry.setTitle(label).setChecked(checked).onClick(() => onChange({ sortMode: choice, sortReverse: false })));
 				}
 				// PR-2 (G12/G19/F4): Status is offered only when this row or a reaching ancestor
 				// governs a status set (`statusGovernor`, the same `findSortGovernor` lookup the
 				// render pass's own status sort uses) — never unconditionally, unlike the four modes
 				// above. Labeled "(inherited)" whenever the governing status set belongs to an
-				// ancestor rather than this row itself (E5). The tick uses `activeSortFor` (not the
-				// literal `mode` above) so an absent own setting that's currently following an
-				// inherited status sort shows ticked here too.
+				// ancestor rather than this row itself (E5). The tick uses `activeSortFor` so an
+				// absent own setting that's currently following an inherited status sort shows ticked
+				// here too.
 				if (statusGovernor) {
 					const isOwnGovernor = !!governance.statusEnabled && !!governance.statusSetId;
-					const active = activeSortFor(governance, statusGovernor);
 					chooser.addItem((entry) =>
 						entry
 							.setTitle(isOwnGovernor ? "Status" : "Status (inherited)")
@@ -515,8 +523,8 @@ function addSortMenuItem(
 				chooser.addItem((entry) =>
 					entry
 						.setTitle("Reverse order")
-						.setChecked(mode !== "manual" && !!governance.sortReverse)
-						.setDisabled(mode === "manual")
+						.setChecked(active !== null && !!active.reverse)
+						.setDisabled(active === null)
 						.onClick(() => onChange({ sortReverse: !governance.sortReverse }))
 				);
 				chooser.showAtPosition({ x: evt.clientX, y: evt.clientY });

@@ -456,6 +456,9 @@ describe("PR-1 G6/G7 — Sort children… menu", () => {
 			const governor: StatusGovernance = { statusEnabled: true, statusSetId: "S", sortMode: "status" };
 			const chooser = openChooser(build("showMetaFolderMenu", node, undefined, governor).menu);
 			expect(chooser.items.find((i) => i.title === "Status (inherited)")!.checked).toBe(true);
+			// R1: the effective sort here is Status (inherited), not Manual — Manual must not also
+			// be ticked, which would claim two contradictory sorts are both active.
+			expect(chooser.items.find((i) => i.title === "Manual")!.checked).toBe(false);
 		});
 
 		it("does not tick Status (inherited) when this row's own setting explicitly overrides the inherited status sort with another mode", () => {
