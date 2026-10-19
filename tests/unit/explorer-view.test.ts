@@ -816,4 +816,62 @@ describe("PR-3 — edge-drop row wiring (dragover/drop/dragleave against the rea
 		expect(fake.selectedBucketNodeIds.has("quarry")).toBe(true);
 		expect(Notice.instances).toHaveLength(1);
 	});
+
+	// PR-4 (T4/T8/C33 fix): the data-safety snapshot above covers only a refused drop. This
+	// covers the accepted half: a sorted-insert drop (G5) touches only the dragged unit's own
+	// new slot -- every *other* node's own `children`, `sortMode`, `sortReverse` and `placedAt`
+	// stay byte-for-byte unchanged (full-tree snapshot compare, same style as the refused-drop
+	// test above).
+	it("an accepted sorted-insert drop leaves every unrelated node's children, sortMode, sortReverse and placedAt completely unchanged (data safety)", () => {
+		const annual = node("annual", "Annual Review.md");
+		const quarry = node("quarry", "quarry-drones.md");
+		const projects = folderNode("projects", "Projects", [annual, quarry], { sortMode: "alphabetical", sortReverse: true });
+		const x = node("x", "X.md", [{ id: "x-child", type: "unit", ref: { kind: "file", path: "XChild.md" }, children: [], placedAt: 42 }]);
+		const other = folderNode("other", "Other", [x], { sortMode: "modified" });
+		const vm = makeVm([projects, other]);
+		const sm = makeStatusesManager();
+		const fake = makeDropFake(vm, sm);
+		// "x" (from "other", a different parent) dropped onto the edge of "annual" inside the
+		// sorted "projects" list -- a sorted-insert (G5), not a refusal.
+		fake.dragPayload = { kind: "node", nodeIds: ["x"], viewId: "v1" };
+		Notice.reset();
+
+		// Snapshot every node this drag does NOT touch, before the drop. ("other" itself is the
+		// source parent "x" is dragged out of, so its own `children` list is expected to change --
+		// that's covered separately below -- but its own sort settings must not.)
+		const otherSettingsBefore = { sortMode: other.sortMode, sortReverse: other.sortReverse, placedAt: other.placedAt };
+		const annualBefore = JSON.parse(JSON.stringify(vm.getViews()[0].root.find((n) => n.id === "projects")!.children.find((n) => n.id === "annual")));
+		const quarryBefore = JSON.parse(JSON.stringify(vm.getViews()[0].root.find((n) => n.id === "projects")!.children.find((n) => n.id === "quarry")));
+		const projectsSettingsBefore = {
+			sortMode: projects.sortMode,
+			sortReverse: projects.sortReverse,
+			placedAt: projects.placedAt,
+		};
+
+		const row = makeRow();
+		document.body.appendChild(row);
+		fake.makeDropZone(row, { kind: "node", nodeId: "annual", viewId: "v1" }, true);
+
+		dragOverAt(row, 90); // bottom edge of "annual" -- sorted-insert, allowed (different parent)
+		row.dispatchEvent(new Event("drop", { bubbles: true }));
+
+		expect(Notice.instances).toHaveLength(0); // not refused
+		// "x" actually moved -- confirms this was a real accepted drop, not a silent no-op.
+		expect(vm.getViews()[0].root.find((n) => n.id === "other")!.children).toEqual([]);
+		expect(vm.getViews()[0].root.find((n) => n.id === "projects")!.children.map((n) => n.id)).toEqual(["annual", "x", "quarry"]);
+
+		// Everything this drag didn't touch is byte-for-byte unchanged.
+		const otherAfter = vm.getViews()[0].root.find((n) => n.id === "other")!;
+		expect({ sortMode: otherAfter.sortMode, sortReverse: otherAfter.sortReverse, placedAt: otherAfter.placedAt }).toEqual(otherSettingsBefore);
+		expect(vm.getViews()[0].root.find((n) => n.id === "projects")!.children.find((n) => n.id === "annual")).toEqual(annualBefore);
+		expect(vm.getViews()[0].root.find((n) => n.id === "projects")!.children.find((n) => n.id === "quarry")).toEqual(quarryBefore);
+		const projectsAfter = vm.getViews()[0].root.find((n) => n.id === "projects")!;
+		expect({ sortMode: projectsAfter.sortMode, sortReverse: projectsAfter.sortReverse, placedAt: projectsAfter.placedAt }).toEqual(
+			projectsSettingsBefore
+		);
+		// The moved node's own sort settings (it has none) and the one grandchild it carried along
+		// (its own `placedAt`, untouched by the move) are preserved too.
+		const movedX = vm.getViews()[0].root.find((n) => n.id === "projects")!.children.find((n) => n.id === "x")!;
+		expect(movedX.children).toEqual([{ id: "x-child", type: "unit", ref: { kind: "file", path: "XChild.md" }, children: [], placedAt: 42 }]);
+	});
 });
