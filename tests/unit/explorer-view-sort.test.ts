@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { ApiItemState, StatusGovernance, View, ViewNode } from "../../src/types";
 import { activeSortFor } from "../../src/sort";
 import { callRenderNodeList, folderGovernor, makeFakeExplorer, makeStatusesManager, proto, realNode, rowOrder, view } from "./explorer-view-sort-truncate-helpers";
+import { dragOverAt, makeDropFake, makeRow, makeVm } from "./explorer-view-drop-helpers";
 
 function apiItem(id: string, explicitStatusId?: string): ApiItemState {
 	return { id, label: id, explicitStatusId };
@@ -535,5 +536,62 @@ describe("PR-2 G19/E5 — activeSortFor: absent vs. explicit Manual vs. explicit
 
 	it("explicit Status on this row with no governor reachable at all still resolves to status (G19's own setting wins, independent of governance)", () => {
 		expect(activeSortFor({ sortMode: "status" }, null)).toEqual({ mode: "status", reverse: false });
+	});
+});
+
+// PR-4 (T2/C31 fix) — G5: a sorted-insert drop's stored slot is exactly the raw drop index, not
+// the item's comparator-correct slot; the render pass is what makes the *displayed* order follow
+// the comparator regardless. Drives a real drop through `handleDrop`/`assessDrop` (same harness
+// `explorer-view.test.ts`'s own G4/G5 tests use), then renders the real resulting children through
+// the real (unstubbed) `renderNodeList` sort pass to prove the two orders can legitimately differ.
+describe("PR-4 G5 — sorted-place landing: display always follows the sort, the stored order is the raw drop slot", () => {
+	it("a sorted-insert drop lands at the dropped slot in storage, but renders in comparator order; switching to Manual afterward shows that stored (drop-slot) order", async () => {
+		const annual: ViewNode = { id: "annual", type: "unit", ref: { kind: "file", path: "Annual.md" }, children: [] };
+		const quarry: ViewNode = { id: "quarry", type: "unit", ref: { kind: "file", path: "Quarry.md" }, children: [] };
+		const zebra: ViewNode = { id: "zebra", type: "unit", ref: { kind: "file", path: "Zebra.md" }, children: [] };
+		const projects: ViewNode = { id: "projects", type: "meta", label: "Projects", children: [annual, quarry, zebra], sortMode: "alphabetical" };
+
+		const vm = makeVm([projects]);
+		const sm = makeStatusesManager();
+		const fake = makeDropFake(vm, sm);
+		fake.dragPayload = { kind: "inbox", refs: [{ kind: "file", path: "Oslo.md" }] };
+
+		const row = makeRow();
+		document.body.appendChild(row);
+		fake.makeDropZone(row, { kind: "node", nodeId: "annual", viewId: "v1" }, true);
+
+		// Drop "Oslo.md" on the TOP edge of "Annual.md" -- i.e. at raw index 0, deliberately NOT
+		// its alpha-sorted slot (which would be between "Quarry.md" and "Zebra.md").
+		dragOverAt(row, 5);
+		row.dispatchEvent(new Event("drop", { bubbles: true }));
+
+		const folderNode = vm.getViews()[0].root[0];
+		// Stored (manual) order: exactly the dropped slot, not the comparator's slot.
+		expect(folderNode.children.map((n) => n.ref?.path)).toEqual(["Oslo.md", "Annual.md", "Quarry.md", "Zebra.md"]);
+
+		// Rendered order still follows the folder's own A-Z comparator, regardless of where the
+		// item actually sits in storage.
+		const renderFake = makeFakeExplorer(sm, {
+			renderNode: vi.fn(async (n: ViewNode, container: HTMLElement) => {
+				container.createDiv({ cls: "marker-node", attr: { "data-id": n.ref?.path ?? n.id } });
+			}),
+			resolveRef: vi.fn(async (ref: { path: string }) => ({
+				text: ref.path.replace(".md", ""),
+				icon: "file",
+				promoted: false,
+				added: false,
+				missing: false,
+			})),
+		});
+		const sortedContainer = document.createElement("div");
+		await callRenderNodeList(renderFake, folderNode.children, sortedContainer, view, 1, [folderNode]);
+		expect(rowOrder(sortedContainer)).toEqual(["Annual.md", "Oslo.md", "Quarry.md", "Zebra.md"]);
+
+		// Switching the same folder to Manual: the render pass stops re-sorting, so the stored
+		// drop-slot order is exactly what shows.
+		folderNode.sortMode = "manual";
+		const manualContainer = document.createElement("div");
+		await callRenderNodeList(renderFake, folderNode.children, manualContainer, view, 1, [folderNode]);
+		expect(rowOrder(manualContainer)).toEqual(["Oslo.md", "Annual.md", "Quarry.md", "Zebra.md"]);
 	});
 });
