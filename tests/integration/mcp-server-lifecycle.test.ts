@@ -322,6 +322,50 @@ describe("McpServer — R1: start()/stop() race safety", () => {
 		expect(server.getBoundAddress()).toEqual({ address: "127.0.0.1", port });
 	});
 
+	it("R21: a server 'error' event after a successful bind is logged but never orphans the listener — stop() still frees the port", async () => {
+		const port = await getFreePort();
+		const notifications: string[] = [];
+		const errors: unknown[] = [];
+		const server = track(
+			new McpServer({
+				getToken: () => "tok",
+				getPort: () => port,
+				tools: new Map(),
+				notify: (message) => notifications.push(message),
+				logError: (message, err) => errors.push({ message, err }),
+			})
+		);
+		await server.start();
+		expect(server.isRunning()).toBe(true);
+
+		// Reach the real `http.Server` TS keeps private — mirrors what Node itself does when
+		// `accept()` fails well after a successful bind (e.g. EMFILE/ENFILE): the listening socket
+		// stays bound regardless, this is exactly the shape of error the old unconditional `fail()`
+		// handler mistook for a failed start.
+		const internal = (server as unknown as { server: { emit: (event: string, err: unknown) => void } }).server;
+		internal.emit("error", Object.assign(new Error("accept EMFILE"), { code: "EMFILE" }));
+
+		// Not treated as a start failure: no misleading "failed to start" Notice, and the listener
+		// (bookkeeping included) is left exactly as it was.
+		expect(server.isRunning()).toBe(true);
+		expect(server.getBoundAddress()).toEqual({ address: "127.0.0.1", port });
+		expect(notifications).toHaveLength(0);
+		expect(errors).toHaveLength(1); // still logged, just not surfaced as a failed start
+
+		await server.stop();
+		expect(server.isRunning()).toBe(false);
+		expect(server.getBoundAddress()).toBeNull();
+
+		// Proves the socket was actually released, not just this instance's own bookkeeping: a
+		// fresh listener can bind the same port immediately afterward.
+		const probe = createNetServer();
+		await new Promise<void>((resolve, reject) => {
+			probe.once("error", reject);
+			probe.listen(port, "127.0.0.1", () => resolve());
+		});
+		await new Promise<void>((resolve) => probe.close(() => resolve()));
+	});
+
 	it("R19: two concurrent start() calls against an already-bound port produce exactly one failed-bind Notice and one logged error, not two", async () => {
 		const port = await getFreePort();
 		const squatter = createNetServer();

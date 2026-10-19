@@ -120,14 +120,21 @@ export class McpServer {
 	 * `Notice` + console error and resolves normally): it only catches something `attemptStart()`
 	 * didn't anticipate, still resets `running`/`server` to a safe stopped state, and — critically
 	 * — still resolves rather than rejects, so neither `this.tail` nor the promise handed back to
-	 * the caller (`start()`/`stop()` are both documented to never reject) is ever poisoned. */
+	 * the caller (`start()`/`stop()` are both documented to never reject) is ever poisoned.
+	 *
+	 * R21: if a live `this.server` is still set when that unexpected failure happens, close it
+	 * before nulling the field out — the same reasoning as `attemptStart()`'s own outer catch
+	 * below: never drop a real, possibly still-listening socket on the floor just because
+	 * something around it failed unexpectedly. */
 	private enqueue(kind: "start" | "stop", op: () => Promise<void>): Promise<void> {
 		const promise: Promise<void> = this.tail.then(async () => {
 			try {
 				await op();
 			} catch (err) {
+				const existing = this.server;
 				this.running = false;
 				this.server = null;
+				if (existing) existing.close();
 				this.options.logError("[Atlas MCP] server operation failed unexpectedly", err);
 			} finally {
 				if (this.pending?.promise === promise) this.pending = null;
@@ -152,9 +159,15 @@ export class McpServer {
 	 * `stop()` call too) in a permanently failed state instead of leaving it free to retry once
 	 * the port is fixed. */
 	private async attemptStart(): Promise<void> {
+		// R21: captured once, up front, so the outer `catch` below (and `describeStartFailure`)
+		// never has to call `getPort()` a second time — if `getPort()` itself is what threw, a
+		// second call would throw again, leaving the user with no Notice at all. `null` here
+		// means the port was never successfully read.
+		let port: number | null = null;
 		try {
 			const { createServer } = await import("node:http"); // R8: lazy — never required on mobile
-			const port = this.options.getPort();
+			port = this.options.getPort();
+			const boundPort = port;
 			await new Promise<void>((resolve) => {
 				let settled = false;
 				const finish = () => {
@@ -165,7 +178,7 @@ export class McpServer {
 				const fail = (err: unknown) => {
 					this.running = false;
 					this.server = null;
-					this.options.notify(describeStartFailure(port, err));
+					this.options.notify(describeStartFailure(boundPort, err));
 					this.options.logError("[Atlas MCP] server error", err);
 					finish();
 				};
@@ -176,9 +189,26 @@ export class McpServer {
 					fail(err);
 					return;
 				}
-				server.on("error", (err: NodeJS.ErrnoException) => fail(err));
+				server.on("error", (err: NodeJS.ErrnoException) => {
+					// R21: once `finish()` has run (a successful bind, or an earlier failure), this
+					// attempt is already settled. `net.Server` keeps emitting `error` for problems
+					// that happen well after the bind succeeded — e.g. EMFILE/ENFILE while accepting
+					// a new connection — and the listening socket itself is untouched by those; Node
+					// does not close it. Treating a post-bind `error` as a start failure (as the old
+					// code did unconditionally) nulled out `this.server`/`running` while the real
+					// socket stayed bound, orphaning it: `stop()` then saw `server === null` and did
+					// nothing, so the listener outlived every later toggle-off and plugin unload.
+					// Only an error that arrives *before* the bind settles is a start failure; one
+					// that arrives after is just logged, with `server`/`running` left alone so `stop()`
+					// can still find and close the real, still-listening socket.
+					if (settled) {
+						this.options.logError("[Atlas MCP] server error after start", err);
+						return;
+					}
+					fail(err);
+				});
 				try {
-					server.listen(port, "127.0.0.1", () => {
+					server.listen(boundPort, "127.0.0.1", () => {
 						this.server = server;
 						this.running = true;
 						finish();
@@ -189,8 +219,12 @@ export class McpServer {
 			});
 		} catch (err) {
 			this.running = false;
+			// R21: close the real socket, if one happens to be set, before nulling it out — never
+			// drop a live listener on the floor just because something unexpected happened around it.
+			const existing = this.server;
 			this.server = null;
-			this.options.notify(describeStartFailure(this.options.getPort(), err));
+			if (existing) existing.close();
+			this.options.notify(describeStartFailure(port, err));
 			this.options.logError("[Atlas MCP] server error", err);
 		}
 	}
@@ -255,11 +289,13 @@ export class McpServer {
 
 /** The user/console-facing message for a failed start — shared between the `error` event (always
  * async, e.g. `EADDRINUSE`) and a synchronous throw out of `createServer()`/`listen()`/the
- * dynamic import (R20, e.g. an out-of-range port). Never includes the bearer token (F6; nothing
- * passed in here ever could). */
-function describeStartFailure(port: number, err: unknown): string {
+ * dynamic import (R20, e.g. an out-of-range port). `port` is `null` when the failure happened
+ * before the port could even be read (R21: `getPort()` itself threw) — that case can never be
+ * `EADDRINUSE` (there's no port to report), so it always falls through to the generic message.
+ * Never includes the bearer token (F6; nothing passed in here ever could). */
+function describeStartFailure(port: number | null, err: unknown): string {
 	const code = (err as NodeJS.ErrnoException)?.code;
-	if (code === "EADDRINUSE") {
+	if (code === "EADDRINUSE" && port !== null) {
 		return `Atlas: the MCP server's port (${port}) is already in use — the server was not started.`;
 	}
 	const message = err instanceof Error ? err.message : String(err);
