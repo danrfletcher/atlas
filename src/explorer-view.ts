@@ -863,6 +863,12 @@ export class AtlasExplorerView extends ItemView {
 					if (this.viewLoadTrigger.activate()) {
 						this.refreshApiSourcesOnViewLoad();
 						this.sortRefreshGate.markDirty(); // PR-2 (G9): "pane regains focus".
+						// PR-2 (R2/G9): marking the gate dirty alone does nothing until some other
+						// trigger renders next — in a view with no data sources nothing else was
+						// going to, so the Modified re-sort was deferred to whatever render happened
+						// to come along later (typically the next autosave), which is exactly the
+						// timing G9/E4 forbid. Queue the refresh this trigger itself promised.
+						this.queueRender();
 					}
 				} else {
 					this.viewLoadTrigger.deactivate();
