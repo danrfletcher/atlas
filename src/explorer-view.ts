@@ -20,6 +20,7 @@ import { createInterfaceNote, findInterfaceNote } from "./interface-notes";
 import { addBlock } from "./commands";
 import { addCreateModuleItem, startCreateModule, unitForRef } from "./create-module";
 import { CreateKind, addCreateItem, startCreateFromMeta } from "./create-from-meta";
+import { AddUnderKind, addAddUnderItem, canAddUnder, startAddUnder } from "./add-under";
 import { SwapCandidate, SwapPickerModal, SwapSourceBlock, buildSwapCandidates, canSwapForAtlasFolder, canSwapNode } from "./swap";
 import { noticeIfLinksNotUpdated } from "./links-notice";
 import { generateBlockId } from "./display-text";
@@ -3055,6 +3056,17 @@ export class AtlasExplorerView extends ItemView {
 		// The separator above is already in place, so tell the helper not to double it up.
 		addSourceAndStatusItems(menu, this.plugin, this, view, node, true);
 		menu.addSeparator();
+		// PR-2.F1 (G6/G7): "Add under…" sits directly above "Duplicate (Meta)". Eligibility is judged
+		// fresh here from the live node, never from render-time state — `missing`/`filteredOut` may
+		// have changed since the row was last drawn (e.g. a data source was just added).
+		if (
+			canAddUnder({ getNode: (viewId, nodeId) => this.plugin.viewsManager?.getNode(viewId, nodeId) ?? null }, view.id, node, {
+				missing: !unitForRef(this.plugin.unitIndex.getUnits(), ref),
+				filteredOut: this.plugin.viewsManager?.managedRowFilterState?.(view.id, node) === "filteredOut",
+			})
+		) {
+			addAddUnderItem(menu, evt, (kind) => this.startAddUnder(kind, view, node));
+		}
 		// PR 13: clones this row (and its whole meta-nested subtree, if it has one) as a new sibling
 		// right after it — same underlying unit, no disk duplicate, no naming scheme (two rows with
 		// the same label is expected — see duplicateNode's own doc comment for why).
@@ -3089,6 +3101,12 @@ export class AtlasExplorerView extends ItemView {
 			},
 			file
 		);
+	}
+
+	/** PR-2.F1: the seam every "Add under" choice calls. A thin forward to the no-op in `add-under.ts`
+	 * — same wrapping pattern as `startCreateModule`/`startCreateFromMeta` just above/below. */
+	private startAddUnder(kind: AddUnderKind, view: View, node: ViewNode): void {
+		startAddUnder(kind, view, node);
 	}
 
 	private startCreateFromMeta(kind: CreateKind, view: View, node: ViewNode): void {
@@ -3346,6 +3364,10 @@ export class AtlasExplorerView extends ItemView {
 					}).open();
 				})
 		);
+		// PR-2.F1 (G6): "Add under…" sits directly above "Replace with…", i.e. after "Rename folder".
+		if (canAddUnder({ getNode: (viewId, nodeId) => this.plugin.viewsManager?.getNode(viewId, nodeId) ?? null }, view.id, node)) {
+			addAddUnderItem(menu, evt, (kind) => this.startAddUnder(kind, view, node));
+		}
 		// Replace with… (PR-1.F1: renamed from "Create" to sit beside "Swap with…"): turns this meta
 		// folder into a real block, file or module (one item on disk, the row keeps its place, settings
 		// and children). Offered on every meta folder, whatever its children, depth or fold state;
