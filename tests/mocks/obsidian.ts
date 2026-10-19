@@ -252,6 +252,17 @@ export class FileManager {
 	}
 }
 
+/** Stand-in for Obsidian's desktop-only adapter — just enough for an `instanceof` check plus
+ * `getBasePath()`. Real `Vault.adapter` is left untyped/unset by this mock (`App` below never
+ * assigns one), so a plain `instanceof FileSystemAdapter` check against it is false unless a test
+ * explicitly swaps in an instance of this class. */
+export class FileSystemAdapter {
+	constructor(private basePath = "") {}
+	getBasePath(): string {
+		return this.basePath;
+	}
+}
+
 export class App {
 	vault = new Vault();
 	metadataCache = new MetadataCache();

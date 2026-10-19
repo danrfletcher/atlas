@@ -1,4 +1,4 @@
-import { App, Menu, PluginSettingTab, Setting } from "obsidian";
+import { App, Menu, Notice, Platform, PluginSettingTab, Setting } from "obsidian";
 import type AtlasPlugin from "./main";
 import { rewritePathString } from "./types";
 import { normalizeHexColor } from "./statuses";
@@ -35,6 +35,11 @@ export interface AtlasSettings {
 	 * off truly adds no class and turning it back on re-applies at once. Absent in an old
 	 * `data.json` (pre-PR-1.F1/F2) resolves to on, via `Object.assign` against `DEFAULT_SETTINGS`. */
 	highlightOpenNote: boolean;
+	/** PR-1.S1 (G1): toggles the embedded MCP server on/off. Synced across devices like every other
+	 * setting here — the port and bearer token it needs to actually run are device-local, in
+	 * `McpTokenStore`, never in this object. Off by default: the server never starts for a vault
+	 * no one has opted into exposing. */
+	mcpServerEnabled: boolean;
 }
 
 export const DEFAULT_TO_DELETE_FOLDER = "_to_delete";
@@ -53,6 +58,7 @@ export const DEFAULT_SETTINGS: AtlasSettings = {
 	retainIcons: false,
 	retainIconMatchBackground: false,
 	highlightOpenNote: true,
+	mcpServerEnabled: false,
 };
 
 /** PR-1.F2: a hand-edited `data.json` can hold any JSON value for `highlightOpenNote` (a string,
@@ -270,6 +276,83 @@ export class AtlasSettingTab extends PluginSettingTab {
 						this.plugin.settings.defaultViewId = value;
 						await this.plugin.saveSettings();
 					})
+			);
+
+		this.renderMcpServerSection(containerEl);
+	}
+
+	// ---------- MCP server (PR-1.S1) ----------
+
+	/** G1/F5: the toggle, port and token live here. On mobile, the section renders a short note
+	 * and nothing else — `AtlasPlugin` never even constructs the server or does token work there,
+	 * so there is genuinely nothing to show (F5: "no listener, port or token work happens on
+	 * mobile at all"). */
+	private renderMcpServerSection(containerEl: HTMLElement): void {
+		new Setting(containerEl).setName("MCP server").setHeading();
+
+		if (Platform.isMobile) {
+			containerEl.createEl("p", {
+				text: "The MCP server (which lets an agent read Atlas over a local endpoint) runs on desktop only.",
+				cls: "setting-item-description",
+			});
+			return;
+		}
+
+		containerEl.createEl("p", {
+			text: "Lets an agent (running on this same machine) read Atlas's vault identity over a local endpoint. The port and token below are specific to this device and never leave it.",
+			cls: "setting-item-description",
+		});
+
+		new Setting(containerEl)
+			.setName("Enable MCP server")
+			.setDesc("Starts a localhost-only MCP endpoint other agents on this machine can call.")
+			.addToggle((toggle) =>
+				toggle.setValue(this.plugin.settings.mcpServerEnabled).onChange(async (value) => {
+					this.plugin.settings.mcpServerEnabled = value;
+					await this.plugin.saveSettings();
+					if (value) await this.plugin.mcpServer?.start();
+					else await this.plugin.mcpServer?.stop();
+					this.display();
+				})
+			);
+
+		// G1: the port/token row only ever shows once the server is actually meant to be running —
+		// matching "never starts until enabled", rather than inviting a copy/use of a token for a
+		// server that isn't listening.
+		if (!this.plugin.settings.mcpServerEnabled) return;
+
+		const credentials = this.plugin.mcpTokenStore.get();
+
+		new Setting(containerEl)
+			.setName("Port")
+			.setDesc("127.0.0.1 only — never reachable from another device.")
+			.addText((text) => {
+				text.setValue(String(credentials.port));
+				text.setDisabled(true);
+			});
+
+		new Setting(containerEl)
+			.setName("Token")
+			.setDesc("Device-local bearer token every request must present. Regenerating it rejects the old value at once.")
+			.addText((text) => {
+				text.setValue(credentials.token);
+				text.setDisabled(true);
+			})
+			.addExtraButton((btn) =>
+				btn
+					.setIcon("copy")
+					.setTooltip("Copy token")
+					.onClick(() => {
+						void navigator.clipboard.writeText(this.plugin.mcpTokenStore.get().token);
+						new Notice("Atlas: MCP token copied to the clipboard.");
+					})
+			)
+			.addButton((btn) =>
+				btn.setButtonText("Regenerate").onClick(() => {
+					this.plugin.mcpTokenStore.regenerate();
+					new Notice("Atlas: MCP token regenerated — the old token no longer works.");
+					this.display();
+				})
 			);
 	}
 

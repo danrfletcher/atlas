@@ -1,4 +1,4 @@
-import { Debouncer, Notice, Platform, Plugin, TAbstractFile, TFile, TFolder, WorkspaceLeaf, debounce } from "obsidian";
+import { Debouncer, FileSystemAdapter, Notice, Platform, Plugin, TAbstractFile, TFile, TFolder, WorkspaceLeaf, debounce } from "obsidian";
 import {
 	AtlasSettingTab,
 	AtlasSettings,
@@ -32,6 +32,10 @@ import { ApiSourceController } from "./api-source-controller";
 import { CsvSourceController } from "./csv-source-controller";
 import { MarkdownTableSourceController } from "./markdown-table-source-controller";
 import { ExternalMoveDetector } from "./external-move";
+import { McpTokenStore } from "./mcp-token-store";
+import { McpServer, shouldAutoStartMcpServer } from "./mcp-server";
+import { createAtlasStatusTool } from "./mcp-tools";
+import { McpTool } from "./mcp-protocol";
 
 interface AtlasData {
 	settings: AtlasSettings;
@@ -95,6 +99,12 @@ export default class AtlasPlugin extends Plugin {
 	/** PR-1.S1 (T1): pairs a `delete` with a later `create` of the same name/kind as an external move
 	 * (e.g. a shell `mv`), which Obsidian reports as delete+create rather than `rename`. */
 	private externalMoveDetector = new ExternalMoveDetector();
+	/** PR-1.S1 (Q1/G1/F6): device-local storage for the embedded MCP server's port and bearer
+	 * token — never synced, same pattern as `apiHeadersStore`/`folderSourcePathStore`. */
+	mcpTokenStore: McpTokenStore;
+	/** PR-1.S1 (F5): only ever constructed on desktop — `null` on mobile, where there is no
+	 * listener, port or token work at all. */
+	mcpServer: McpServer | null = null;
 
 	async onload() {
 		const data = (await this.loadData()) as AtlasData | null;
@@ -190,7 +200,46 @@ export default class AtlasPlugin extends Plugin {
 		registerAddBlockCommand(this);
 		registerF10Commands(this);
 
+		// PR-1.S1 (F5): the MCP server (its listener, port and token work) is constructed only on
+		// desktop — `mcpServer` stays `null` on mobile, so nothing in this block ever runs there.
+		this.mcpTokenStore = new McpTokenStore(this.app);
+		if (!Platform.isMobile) {
+			this.mcpServer = this.createMcpServer();
+			if (shouldAutoStartMcpServer(this.settings.mcpServerEnabled, Platform.isMobile)) {
+				void this.mcpServer.start();
+			}
+		}
+
 		if (__ATLAS_TEST__) this.register(registerTestHarness(this));
+	}
+
+	/** PR-1.S1 (G8): builds the server with the one tool this PR ships — `atlas_status`. Later PRs
+	 * (PR-2.F1/PR-3.F1) register their own tools on this same map, not a new server instance. */
+	private createMcpServer(): McpServer {
+		const tools = new Map<string, McpTool>();
+		tools.set(
+			"atlas_status",
+			createAtlasStatusTool({
+				getVaultName: () => this.app.vault.getName(),
+				getVaultPath: () => this.getVaultBasePath(),
+				getPluginVersion: () => this.manifest.version,
+				getToolNames: () => Array.from(tools.keys()),
+			})
+		);
+		return new McpServer({
+			getToken: () => this.mcpTokenStore.get().token,
+			getPort: () => this.mcpTokenStore.get().port,
+			tools,
+			notify: (message) => void new Notice(message),
+			logError: (message, err) => console.error(message, err),
+		});
+	}
+
+	/** The vault's absolute filesystem path (desktop only — mobile's adapter isn't a
+	 * `FileSystemAdapter`, and the MCP server never runs there anyway). */
+	private getVaultBasePath(): string {
+		const adapter = this.app.vault.adapter;
+		return adapter instanceof FileSystemAdapter ? adapter.getBasePath() : "";
 	}
 
 	/** A vault `modify` event. PR-1 (G5): deliberately never queues a folder refresh — a child's content
@@ -283,6 +332,7 @@ export default class AtlasPlugin extends Plugin {
 	onunload() {
 		this.folderLiveRefresh.cancelAll(); // PR-1 (G5): nothing fires after the plugin is gone
 		this.externalMoveDetector?.cancelAll(); // PR-1.S1 (T1): same — no stray pairing after unload
+		void this.mcpServer?.stop(); // PR-1.S1 (G1): stops the listener; any in-flight response still completes
 		this.outsideFolderWatchers?.closeAll(); // PR-2 (G9): every watcher closes with the plugin
 		this.graduation?.dispose(); // before closing the dialog, so a dismissed one doesn't revert or move anything
 		closeNameDialog();
