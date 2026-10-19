@@ -702,14 +702,27 @@ export class ViewsManager {
 		return !!view && this.findUnitNode(view.root, ref) !== null;
 	}
 
-	/** PR-3.F1 (G4/GP3): the node id `ref` is currently placed under in `viewId`, or `null` if it
+	/** PR-3.F1 (R2 review): the node id `ref` is currently placed under in `viewId`, or `null` if it
 	 * isn't placed there at all — a thin public accessor over the same `findUnitNode` walk
-	 * `isPlaced`/`placeUnit` already use, so the `add_node` MCP tool can report back the id of the
-	 * node `placeUnit` just created or moved without this file growing a second, divergent walk. */
+	 * `isPlaced`/`placeUnit` already use. No longer used to recover the id `placeUnit` itself just
+	 * created or moved (R2: a duplicated ref makes that a divergent, possibly-wrong walk) — `placeUnit`
+	 * now returns that node directly. Kept as a general "is this ref already here, and where" query. */
 	getNodeIdForRef(viewId: string, ref: UnitRef): string | null {
 		const view = this.getView(viewId);
 		if (!view) return null;
 		return this.findUnitNode(view.root, ref)?.node.id ?? null;
+	}
+
+	/** PR-3.F1 (R5 review): the same Outside-Vault-managed-row check the explorer's own drag-and-drop
+	 * guard applies (never drag one of these rows, never accept a drop onto one) — exposed here so a
+	 * non-UI caller (the MCP arranging tools) can refuse the same cases without duplicating the
+	 * owner-lookup `isOutsideOwned` already implements. `false` for an unknown view or node, same as
+	 * every other node-shaped query on this class. */
+	isOutsideManagedNode(viewId: string, nodeId: string): boolean {
+		const view = this.getView(viewId);
+		if (!view) return false;
+		const node = this.findNode(view.root, nodeId)?.node;
+		return !!node && this.isOutsideOwned(view.root, node);
 	}
 
 	/** PR-1.F1 R3: built on `placedRefKeys`'s walk rather than its own `findUnitNode` pass, so the
@@ -777,21 +790,35 @@ export class ViewsManager {
 	 * placement per ref per view was ever possible), now reachable: "Place in view…" onto a ref that
 	 * has meta-nested children silently dropped the subtree. Fixed the same way `handleDrop`'s
 	 * reparent path and `unplaceUnit` already were — move the real node in place instead of
-	 * discarding and recreating it, so its id/children travel with it. */
-	placeUnit(viewId: string, ref: UnitRef, parentId: string | null): void {
+	 * discarding and recreating it, so its id/children travel with it.
+	 *
+	 * PR-3.F1 (R1 review): refuses when `ref` is already placed as some node X and `parentId` is X
+	 * itself or one of X's descendants — the same cycle `moveNode` already refuses via
+	 * `isSameOrDescendant`. Before this, placing X under its own descendant spliced X out of the tree
+	 * and pushed it into its own subtree, which silently dropped X (and everything under it) out of
+	 * `view.root` entirely. Returns `null` on that refusal, same as `moveNode` returning `false`.
+	 *
+	 * PR-3.F1 (R2 review): returns the node that was actually moved or created, rather than leaving
+	 * the caller to re-find it via `getNodeIdForRef` — a second `findUnitNode` walk after a duplicated
+	 * ref (PR 13) has more than one placement can resolve to the *other* copy, not the one this call
+	 * just moved. */
+	placeUnit(viewId: string, ref: UnitRef, parentId: string | null): ViewNode | null {
 		const view = this.getView(viewId);
-		if (!view) return;
+		if (!view) return null;
 		const existing = this.findUnitNode(view.root, ref);
+		if (existing && parentId && this.isSameOrDescendant(existing.node, parentId)) return null;
 		const parent = parentId ? this.findNode(view.root, parentId) : null;
 		const targetChildren = parent ? parent.node.children : view.root;
+		let node: ViewNode;
 		if (existing) {
-			const [node] = existing.siblings.splice(existing.index, 1);
+			[node] = existing.siblings.splice(existing.index, 1);
 			targetChildren.push(node);
 		} else {
-			const node: ViewNode = { id: generateNodeId(), type: "unit", ref, children: [] };
+			node = { id: generateNodeId(), type: "unit", ref, children: [] };
 			targetChildren.push(node);
 		}
 		this.save();
+		return node;
 	}
 
 	/** Removes *every* placement of `ref` in this view — used when the ref itself has stopped being
