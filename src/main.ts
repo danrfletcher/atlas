@@ -37,6 +37,7 @@ import { McpServer, shouldAutoStartMcpServer } from "./mcp-server";
 import { createAtlasStatusTool } from "./mcp-tools";
 import { McpTool } from "./mcp-protocol";
 import { createGetNodeStatusTool, createListNodesTool, createListStatusSetsTool, createListViewsTool, createSetNodeStatusTool } from "./mcp-status-tools";
+import { createAddNodeTool, createCreateFolderTool, createMoveNodeTool, createRemoveNodeTool, createRenameFolderTool } from "./mcp-arrange-tools";
 
 interface AtlasData {
 	settings: AtlasSettings;
@@ -249,6 +250,19 @@ export default class AtlasPlugin extends Plugin {
 		tools.set("list_status_sets", createListStatusSetsTool(statusToolsContext));
 		tools.set("get_node_status", createGetNodeStatusTool(statusToolsContext));
 		tools.set("set_node_status", createSetNodeStatusTool(statusToolsContext));
+		// PR-3.F1 (G4/G5/G6): the five arranging tools, registered on this same map — they share
+		// the status tools' own vault identity and never touch the filesystem (F2/F3).
+		const arrangeToolsContext = {
+			getViewsManager: () => this.viewsManager,
+			getVaultName: () => this.app.vault.getName(),
+			getVaultPath: () => this.getVaultBasePath(),
+			getVault: () => this.app.vault,
+		};
+		tools.set("add_node", createAddNodeTool(arrangeToolsContext));
+		tools.set("move_node", createMoveNodeTool(arrangeToolsContext));
+		tools.set("remove_node", createRemoveNodeTool(arrangeToolsContext));
+		tools.set("create_folder", createCreateFolderTool(arrangeToolsContext));
+		tools.set("rename_folder", createRenameFolderTool(arrangeToolsContext));
 		return new McpServer({
 			getToken: () => this.mcpTokenStore.get().token,
 			getPort: () => this.mcpTokenStore.get().port,
