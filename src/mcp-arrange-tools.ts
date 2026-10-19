@@ -195,31 +195,35 @@ function blockSubpathExists(metadataCache: Pick<MetadataCache, "getFileCache">, 
  * R4 review: decides whether a path `add_node` just resolved to `ref` (via `resolveVaultPathToRef`)
  * is actually placeable — "exists on disk" is not the same thing as "is an Atlas unit", and placing
  * the latter renders a permanently-greyed "(missing)" row (`ExplorerView.resolveRef` finds no unit
- * for it) rather than failing up front. Three outcomes:
- *   - `ref` is already a recognised Atlas unit (`UnitIndex.getUnits()`) — placed as is, same as
- *     before this review fix.
+ * for it) rather than failing up front. Returns whether `ref` still needs promoting (the caller
+ * promotes it itself, see the R10 note below) — it never promotes anything by itself. Three
+ * outcomes:
+ *   - `ref` is already a recognised Atlas unit (`UnitIndex.getUnits()`) — returns `false`, nothing
+ *     more to do.
  *   - `ref` names a module-internal file/folder that merely hasn't been promoted yet, or a block
- *     reference whose subpath genuinely resolves to a heading/block in its file — promoted first
- *     (`ctx.promoteUnit`, the same manual promotion "Promote and place in view…" performs:
- *     `UnitIndex.addManualPromotion` + persist, never touching disk) and then placed.
+ *     reference whose subpath genuinely resolves to a heading/block in its file — returns `true`;
+ *     eligible for the same manual promotion "Promote and place in view…" performs
+ *     (`UnitIndex.addManualPromotion` + persist, never touching disk), but not yet applied.
  *   - `ref` is one of the cases the UI's own "Promote and place" can never reach in the first
  *     place — the vault root, a folder's own interface note (AGENTS.md: not a unit ref), a path
  *     inside an excluded folder, or a block reference whose subpath doesn't exist — refused
- *     outright.
+ *     outright (throws).
+ *
+ * R9 review: the vault-root/interface-note/excluded-folder refusals used to run only on the
+ * non-block path, below an early `return` for `ref.kind === "block"` — a block reference inside an
+ * excluded folder (or whose base file is an interface note) skipped all three checks entirely and
+ * fell straight through to promotion. Excluded folders never promote (AGENTS.md), for any unit
+ * kind, so these checks now run first, before the kind split, and apply to a block ref's base path
+ * exactly as they do to a file or folder path.
+ *
+ * R10 review: this function itself must never call `ctx.promoteUnit` — a promotion
+ * (`addManualPromotion` + persist) is permanent, but `placeUnit` can still refuse afterward (the R1
+ * cycle guard), and an agent whose add_node call errors out must never see data.json changed anyway.
+ * The caller only calls `ctx.promoteUnit` once `placeUnit` has actually returned a node.
  */
-function ensurePlaceableUnit(ctx: McpArrangeToolsContext, file: TAbstractFile, ref: UnitRef): void {
+function ensurePlaceableUnit(ctx: McpArrangeToolsContext, file: TAbstractFile, ref: UnitRef): boolean {
 	const unitIndex = ctx.getUnitIndex();
-	if (isKnownUnit(unitIndex, ref)) return;
-
-	if (ref.kind === "block") {
-		if (!(file instanceof TFile) || !blockSubpathExists(ctx.getMetadataCache(), file, ref.subpath)) {
-			throw new McpUnitNotFoundError(
-				`add_node: "${ref.path}#${ref.subpath}" does not resolve to an existing heading or block in that file.`
-			);
-		}
-		ctx.promoteUnit(ref);
-		return;
-	}
+	if (isKnownUnit(unitIndex, ref)) return false;
 
 	if (file instanceof TFolder && file.isRoot()) {
 		throw new McpWrongUnitKindError(`add_node: the vault root is not a vault unit.`);
@@ -233,9 +237,18 @@ function ensurePlaceableUnit(ctx: McpArrangeToolsContext, file: TAbstractFile, r
 		throw new McpWrongUnitKindError(`add_node: "${ref.path}" is inside an excluded folder and is never a vault unit.`);
 	}
 
+	if (ref.kind === "block") {
+		if (!(file instanceof TFile) || !blockSubpathExists(ctx.getMetadataCache(), file, ref.subpath)) {
+			throw new McpUnitNotFoundError(
+				`add_node: "${ref.path}#${ref.subpath}" does not resolve to an existing heading or block in that file.`
+			);
+		}
+	}
+
 	// Not yet a recognised unit, but eligible: the same manual promotion the UI's own "Promote and
 	// place in view…" (Module Contents modal) performs for exactly this case — never touches disk.
-	ctx.promoteUnit(ref);
+	// Left to the caller to actually apply, once placement itself is confirmed to succeed (R10).
+	return true;
 }
 
 /** The live children array a node currently sits in — `view.root` for the view root, or the live
@@ -256,7 +269,13 @@ const PARENT_NODE_ID_SCHEMA = { type: ["string", "null"] } as const;
  * already placed as some node X and `parentNodeId` names X itself or one of X's descendants, which
  * would otherwise splice X out of the tree and lose it. R2 review: the returned `nodeId` is the
  * node `placeUnit` itself just moved or created, never a second, possibly-wrong `findUnitNode`
- * walk over a view that may hold more than one placement of the same ref (PR 13). */
+ * walk over a view that may hold more than one placement of the same ref (PR 13).
+ *
+ * R10 review: `ensurePlaceableUnit` only decides and validates whether `ref` is eligible for manual
+ * promotion — it no longer calls `ctx.promoteUnit` itself. The actual promotion only happens below,
+ * after `placeUnit` has returned an actual node, so a call refused by the R1 cycle guard (or any
+ * other `placeUnit` refusal) never leaves behind a permanent manual promotion the agent was never
+ * told about. */
 export function createAddNodeTool(ctx: McpArrangeToolsContext): McpTool {
 	return {
 		name: "add_node",
@@ -289,7 +308,7 @@ export function createAddNodeTool(ctx: McpArrangeToolsContext): McpTool {
 				// Unreachable in practice — resolveVaultPathToRef above just resolved this same path.
 				throw new McpUnitNotFoundError(`add_node: "${ref.path}" could not be re-resolved — please report this.`);
 			}
-			ensurePlaceableUnit(ctx, file, ref);
+			const needsPromotion = ensurePlaceableUnit(ctx, file, ref);
 
 			const node = viewsManager.placeUnit(view.id, ref, parentNodeId);
 			if (!node) {
@@ -297,6 +316,9 @@ export function createAddNodeTool(ctx: McpArrangeToolsContext): McpTool {
 					`add_node: "${path}" is already placed in view "${view.name}" at or above "${parentNodeId}" — placing it there would nest it inside itself.`
 				);
 			}
+			// R10 review: promote only now that placement is confirmed to have actually happened —
+			// never before, so a refusal above never leaves a stray permanent manual promotion behind.
+			if (needsPromotion) ctx.promoteUnit(ref);
 
 			return { vault: vaultIdentity(ctx), view: viewIdentity(view), nodeId: node.id, ref, parentNodeId };
 		},

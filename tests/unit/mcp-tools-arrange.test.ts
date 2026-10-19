@@ -298,6 +298,27 @@ describe("add_node — R1 review: refuses a cycle instead of losing the subtree"
 	});
 });
 
+// --- R10 review: a refused add_node (e.g. the R1 cycle guard) must never leave a stray promotion --
+
+describe("add_node — R10 review: a refused call never leaves a stray manual promotion", () => {
+	it("a cycle refusal after ensurePlaceableUnit would have promoted the ref records no promotion at all", () => {
+		const c = metaNode("c", "C");
+		// "a"'s own ref (Mod/x.md) is not a recognised unit yet — ensurePlaceableUnit would normally
+		// promote it — but "a" is already placed, and the requested parentNodeId ("c") is a's own
+		// child, so placeUnit's R1 cycle guard must refuse the whole call before any promotion lands.
+		const a = unitNode("a", { kind: "file", path: "Mod/x.md" }, { children: [c] });
+		const { ctx, view, promotedRefs } = setup([a]);
+		(ctx.getVault() as Vault).seedFolder("Mod");
+		(ctx.getVault() as Vault).seedFile("Mod/x.md");
+		const tool = createAddNodeTool(ctx);
+
+		expect(() => tool.handler({ view: "Job Hunt", path: "Mod/x.md", parentNodeId: "c" })).toThrow(/already placed/);
+		expect(promotedRefs).toEqual([]); // the pending promotion must never have been applied
+		expect(view.root).toEqual([a]);
+		expect(a.children.map((child) => child.id)).toEqual(["c"]);
+	});
+});
+
 // --- R2 review: add_node must report the node it actually moved/created, never a re-walk ----------
 
 describe("add_node — R2 review: reports the moved/created node id directly, never re-derived", () => {
@@ -423,6 +444,37 @@ describe("add_node — R4 review: validates against the plugin's own unit classi
 		const tool = createAddNodeTool(ctx);
 
 		expect(() => tool.handler({ view: "Job Hunt", path: "/" })).toThrow(/vault root/);
+		expect(promotedRefs).toEqual([]);
+		expect(view.root).toHaveLength(0);
+	});
+});
+
+// --- R9 review: the excluded-folder (and interface-note/root) refusals must apply to block refs too -
+
+describe("add_node — R9 review: excluded-folder refusal applies to a block reference's base path too", () => {
+	it("a block reference whose base file is inside an excluded folder is refused, not promoted", () => {
+		const { ctx, excludedPaths, promotedRefs, view } = setup([]);
+		(ctx.getVault() as Vault).seedFolder("Archive");
+		(ctx.getVault() as Vault).seedFile("Archive/x.md");
+		excludedPaths.add("Archive/x.md");
+		const tool = createAddNodeTool(ctx);
+
+		// Before the fix, the block branch's own early return skipped isExcludedPath entirely and
+		// fell straight through to ctx.promoteUnit — excluded folders must never promote, for any
+		// unit kind, including a block reference.
+		expect(() => tool.handler({ view: "Job Hunt", path: "Archive/x.md#^abc" })).toThrow(/excluded folder/);
+		expect(promotedRefs).toEqual([]);
+		expect(view.root).toHaveLength(0);
+	});
+
+	it("a block reference whose base file is a folder's interface note is refused, not promoted", () => {
+		const { ctx, interfaceNotePaths, promotedRefs, view } = setup([]);
+		(ctx.getVault() as Vault).seedFolder("Recruiting");
+		(ctx.getVault() as Vault).seedFile("Recruiting/Recruiting.md");
+		interfaceNotePaths.add("Recruiting/Recruiting.md");
+		const tool = createAddNodeTool(ctx);
+
+		expect(() => tool.handler({ view: "Job Hunt", path: "Recruiting/Recruiting.md#^abc" })).toThrow(/interface note/);
 		expect(promotedRefs).toEqual([]);
 		expect(view.root).toHaveLength(0);
 	});
