@@ -22,10 +22,11 @@ import { addCreateModuleItem, startCreateModule, unitForRef } from "./create-mod
 import { CreateKind, addCreateItem, startCreateFromMeta } from "./create-from-meta";
 import { AddUnderKind, addAddUnderItem, canAddUnder, startAddUnder } from "./add-under";
 import { AddUnderFolderDeps, startAddUnderFolder } from "./add-under-folder";
+import { AddUnderBlockDeps, startAddUnderBlock } from "./add-under-block";
 import { AddUnderHiddenNoticeSignals, noticeIfAddedRowHidden } from "./add-under-hidden-notice";
 import { SwapCandidate, SwapPickerModal, SwapSourceBlock, buildSwapCandidates, canSwapForAtlasFolder, canSwapNode } from "./swap";
 import { noticeIfLinksNotUpdated } from "./links-notice";
-import { generateBlockId } from "./display-text";
+import { generateBlockId, getFreeBlockDisplayTextFromContent } from "./display-text";
 import { ApiSourceModal } from "./api-source-modal";
 import { ViewLoadTrigger, dotStateFor, dotTooltip } from "./api-source-controller";
 import { obsidianRequestImpl } from "./api-request-obsidian";
@@ -3138,10 +3139,15 @@ export class AtlasExplorerView extends ItemView {
 	}
 
 	/** PR-2.F1: the seam every "Add under" choice calls. PR-2.F2: Folder gets its real create-and-nest
-	 * flow here; Block, File and Module still forward to the no-op in `add-under.ts` until PR-3.F1-F3. */
+	 * flow here. PR-3.F1: Block does too. File and Module still forward to the no-op in
+	 * `add-under.ts` until PR-3.F2/F3. */
 	private startAddUnder(kind: AddUnderKind, view: View, node: ViewNode): void {
 		if (kind === "folder") {
 			void this.runAddUnderFolder(view, node);
+			return;
+		}
+		if (kind === "block") {
+			void this.runAddUnderBlock(view, node);
 			return;
 		}
 		startAddUnder(kind, view, node);
@@ -3175,6 +3181,48 @@ export class AtlasExplorerView extends ItemView {
 		});
 	}
 
+	/** PR-3.F1 (G1) / PR-2.F3 (G10): runs the Block add-under flow against the real `ViewsManager`,
+	 * unit index and workspace — `startAddUnderBlock` itself creates the file, nests it, expands the
+	 * parent, selects the new row and opens it in the editor (G1) — then, once the view has
+	 * re-rendered with the new row selected and expanded, hands off to the shared
+	 * `noticeIfAddedRowHidden` helper the same way `runAddUnderFolder` does. The new block is opened
+	 * regardless of whether its row ends up visible in the bucket; the hidden-row check only ever
+	 * affects the Notice, never the editor. */
+	private async runAddUnderBlock(view: View, node: ViewNode): Promise<void> {
+		const created = await startAddUnderBlock(this.addUnderBlockDeps(), view.id, node.id);
+		if (!created) return;
+		const signals = this.addUnderHiddenSignals(view, node, created);
+		void this.render();
+		const label = getFreeBlockDisplayTextFromContent("", this.plugin.settings.blockDisplayLength);
+		await noticeIfAddedRowHidden(created.id, label, node.label ?? unitBasename(node), {
+			render: () => this.awaitRenderSettled(),
+			getBucketListEl: () => this.bucketListEl,
+			...signals,
+		});
+	}
+
+	private addUnderBlockDeps(): AddUnderBlockDeps {
+		const { plugin } = this;
+		return {
+			app: plugin.app,
+			getPoolFolder: () => plugin.settings.poolFolder,
+			holdUnit: (path) => plugin.unitIndex.holdUnit(path),
+			getNode: (viewId, nodeId) => plugin.viewsManager.getNode(viewId, nodeId),
+			placeUnit: (viewId, ref, parentId) => plugin.viewsManager.placeUnit(viewId, ref, parentId),
+			expandParent: (viewId, parentId) => plugin.viewsManager.setNodeCollapsed(viewId, parentId, false),
+			// R1 fix (same as Folder): clears a prior inbox selection too (E5 — bucket and inbox
+			// selections are mutually exclusive) and sets the anchor to the new row, so a later
+			// shift-click extends from it rather than a stale pre-add anchor.
+			selectOnly: (nodeId) => {
+				this.selectedInboxRefKeys.clear();
+				this.selectedBucketNodeIds.clear();
+				this.selectedBucketNodeIds.add(nodeId);
+				this.selectionAnchor = nodeId;
+				this.selectionAnchorScope = "bucket";
+			},
+		};
+	}
+
 	/** PR-2.F3 (G10): the real-governance signals `noticeIfAddedRowHidden` classifies into a reason,
 	 * computed fresh against the live tree right after the add — `parentNode` is whatever the caller
 	 * captured at menu-build time, possibly stale by now, so this re-reads the live parent and child
@@ -3184,13 +3232,17 @@ export class AtlasExplorerView extends ItemView {
 	 * R1 fix: `renderNode`'s meta branch (src/explorer-view.ts) renders a Folder row unconditionally
 	 * — only a unit row returns early on `!matchesFilter`. So an active filter can never be why a new
 	 * Folder's own row fails to render; naming it anyway broke G10's "whichever applies" whenever a
-	 * filter happened to be active while adding a Folder (the row always shows regardless). PR-3
-	 * (Block/File/Module) adds a unit-kind row here instead, where the filter *can* be the cause — but
-	 * only when that new row's own display text itself fails `matchesFilter`, since a matching row
-	 * bypasses hide and truncate the same way it does today; PR-3 should compute that per-node-kind
-	 * check here rather than reusing this fallback. */
+	 * filter happened to be active while adding a Folder (the row always shows regardless).
+	 *
+	 * PR-3.F1: a unit-kind row (so far only Block, via `runAddUnderBlock`) is different — the filter
+	 * *can* be the cause, but only when that new row's own display text itself fails `matchesFilter`,
+	 * since a matching row bypasses hide and truncate the same way it does today (never a blanket
+	 * "any filter active" check). A fresh Add-under Block is always created with empty content, so
+	 * its display text is always exactly `getFreeBlockDisplayTextFromContent`'s own fallback for that,
+	 * `"(empty block)"`, checked here without reading the file back off disk. File/Module (PR-3.F2/F3)
+	 * will need their own real display text (basename) once they're wired to this same helper. */
 	private addUnderHiddenSignals(view: View, parentNode: ViewNode, newNode: ViewNode): AddUnderHiddenNoticeSignals {
-		const filterActive = newNode.type !== "meta" && this.filterText.trim() !== "";
+		const filterActive = newNode.type === "unit" && !this.matchesFilter(getFreeBlockDisplayTextFromContent("", this.plugin.settings.blockDisplayLength));
 		const liveParent = this.plugin.viewsManager.getNode(view.id, parentNode.id);
 		if (!liveParent) return { filterActive };
 		const liveNode = liveParent.children.find((c) => c.id === newNode.id) ?? newNode;
