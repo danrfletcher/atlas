@@ -94,3 +94,36 @@ describe("F5 behavioral check — driving the real Folder-source paths never rec
 		expect(app.vault.calls).toEqual([]);
 	});
 });
+
+// PR-2.F2: Folder is the first real "Add under…" choice (G4) — these grep-style checks mirror
+// PR-2.F1's own add-under-fence.test.ts for the one new module this PR adds, plus a static
+// check for the fence's F4 ("always the last child, no position choice").
+describe("PR-2.F2 fence — F2 (no command/toolbar change) and F4 (no sibling-insert/position choice)", () => {
+	it("src/add-under-folder.ts adds no new command, hotkey or toolbar button", () => {
+		const body = read("src/add-under-folder.ts");
+		expect(body).not.toMatch(/addCommand\(/);
+		expect(body).not.toMatch(/hotkeys\s*:/);
+		expect(body).not.toMatch(/toolbarButton\(/);
+	});
+
+	it("the toolbar's create section (Add block/file/module/folder) still has exactly four buttons", () => {
+		const body = read("src/explorer-view.ts");
+		const start = body.indexOf("// --- section 2: create");
+		const end = body.indexOf("// --- section 3: view controls");
+		expect(start).toBeGreaterThan(-1);
+		expect(end).toBeGreaterThan(start);
+		const section = body.slice(start, end);
+		expect((section.match(/this\.toolbarButton\(/g) ?? []).length).toBe(4);
+	});
+
+	it("src/add-under-folder.ts never splices or unshifts into a children array, and offers no position choice", () => {
+		const body = read("src/add-under-folder.ts");
+		expect(body).not.toMatch(/\.splice\(/);
+		expect(body).not.toMatch(/\.unshift\(/);
+		expect(body).not.toMatch(/position/i);
+	});
+
+	it("src/add-under-folder.ts contains no disk-write call (Folder is data-only)", () => {
+		expect(read("src/add-under-folder.ts")).not.toMatch(DISK_WRITE_CALL);
+	});
+});
