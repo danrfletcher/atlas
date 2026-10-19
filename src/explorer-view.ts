@@ -728,6 +728,13 @@ export class AtlasExplorerView extends ItemView {
 	 * dismissed by ... view close counts as unanswered on an automatic refresh"). */
 	private openConfirmDeleteModals: ConfirmDeleteRowsModal[] = [];
 	private renderQueued = false;
+	/** PR-2.F2 R2: every call to `render()` (direct or via `queueRender`'s timeout) overwrites this
+	 * with its own promise before any `await` inside it can yield, so this always names the most
+	 * recently *started* render even if a later call supersedes an earlier one still in flight
+	 * (`renderSeq`'s `isCurrent()` check only tells a superseded render to bail early — it says
+	 * nothing about whether the one that superseded it has itself finished building the DOM yet).
+	 * `awaitRenderSettled()` polls this to know when the dust has actually settled. */
+	private latestRenderPromise: Promise<void> | null = null;
 	/** F11: rebuilt once per render from the flat unit list, so resolving a ref is O(1) instead of
 	 * an O(n) `find` per row — at thousands of units the naive scan-per-row was O(n^2) per render. */
 	private unitsByRefKey = new Map<string, Unit>();
@@ -1392,7 +1399,32 @@ export class AtlasExplorerView extends ItemView {
 
 	// --- top-level render --------------------------------------------------------------------------
 
-	private async render(): Promise<void> {
+	/** PR-2.F2 R2: thin wrapper around `renderNow()` so every call site (direct `await`/`void`, and
+	 * `queueRender`'s own deferred call) records its promise in `latestRenderPromise` before
+	 * returning — synchronously, so no macrotask or microtask can slip in between a call starting
+	 * and this being set. See `awaitRenderSettled()`. */
+	private render(): Promise<void> {
+		const promise = this.renderNow();
+		this.latestRenderPromise = promise;
+		return promise;
+	}
+
+	/** PR-2.F2 R2: waits not just for "a" render to finish, but for whichever render turns out to be
+	 * the most recently *started* one by the time the dust settles — including one that starts only
+	 * after this call begins waiting (the overlapping-render race `render()`'s own `isCurrent()` guard
+	 * describes: a render superseded mid-flight returns early without the newer render necessarily
+	 * having finished building the DOM yet). Any caller that needs to inspect the rendered DOM right
+	 * after triggering a mutation that may itself queue a render (e.g. via `ViewsManager.onChange`)
+	 * should call this instead of trusting a single `await this.render()`. */
+	private async awaitRenderSettled(): Promise<void> {
+		let prev: Promise<void> | null = null;
+		while (this.latestRenderPromise !== prev) {
+			prev = this.latestRenderPromise;
+			await prev;
+		}
+	}
+
+	private async renderNow(): Promise<void> {
 		const container = this.containerEl.children[1] as HTMLElement;
 		const renderId = ++this.renderSeq;
 		const isCurrent = () => renderId === this.renderSeq;
@@ -3123,7 +3155,17 @@ export class AtlasExplorerView extends ItemView {
 	private async runAddUnderFolder(view: View, node: ViewNode): Promise<void> {
 		const created = await startAddUnderFolder(this.addUnderFolderDeps(), view.id, node.id);
 		if (!created) return;
-		await this.render();
+		// R2 fix: `addMetaFolder`/`setNodeCollapsed` above each already went through `save()` and so
+		// `ViewsManager.onChange` → `queueRender()` before we ever get here, which can leave a render
+		// queued via `setTimeout(0)`. A plain `await this.render()` only guarantees *this* call's own
+		// render finished — if the queued one fires mid-flight (crossing a real macrotask, e.g. a
+		// promoted block's disk read in `resolveUnit`) and supersedes it, `render()`'s own
+		// `isCurrent()` guard makes the superseded call return early while the superseding one may
+		// still be mid-build, so `this.bucketListEl` could be the newer render's list with the new
+		// row not appended yet. `awaitRenderSettled()` follows `latestRenderPromise` until it stops
+		// changing, so the DOM check below always runs against a render that has actually finished.
+		void this.render();
+		await this.awaitRenderSettled();
 		if (this.bucketListEl && !this.bucketListEl.querySelector(`[data-select-key="${CSS.escape(created.id)}"]`)) {
 			new Notice(`Atlas: added "${created.label ?? "New folder"}" under ${node.label ?? unitBasename(node)} — hidden by the current filter, sort or grouping`);
 		}
