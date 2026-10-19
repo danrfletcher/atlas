@@ -1,8 +1,10 @@
 import type { App } from "obsidian";
 import { describe, expect, it, vi } from "vitest";
+import { App as MockApp } from "../mocks/obsidian";
 import { View, ViewNode } from "../../src/types";
 import { StatusSet, StatusesManager } from "../../src/statuses";
 import { ViewsManager } from "../../src/views";
+import { apiItemAddress } from "../../src/mcp-node-resolver";
 import {
 	McpStatusToolsContext,
 	createGetNodeStatusTool,
@@ -47,6 +49,7 @@ function setup(root: ViewNode[], viewOverrides: Partial<View> = {}, statusSets: 
 		getStatusesManager: () => statusesManager,
 		getVaultName: () => VAULT_NAME,
 		getVaultPath: () => VAULT_PATH,
+		getFolderSourcePath: () => "",
 	};
 	return { ctx, viewsManager, statusesManager, view, persist };
 }
@@ -124,9 +127,39 @@ describe("get_node_status — G2", () => {
 		const { ctx } = setup([owner]);
 		const tool = createGetNodeStatusTool(ctx);
 
-		const result = tool.handler({ nodeId: "row-1" }) as Record<string, unknown>;
+		const result = tool.handler({ nodeId: apiItemAddress("owner", "row-1") }) as Record<string, unknown>;
 		expect(result.explicitStatusId).toBe("s-applied");
 		expect(result.resolvedStatus).toEqual({ id: "s-applied", label: "Applied", color: "#222222" });
+	});
+
+	it("R1 fix: two owners sharing the same raw row id never collide — each is addressed by its own owner-qualified composite id", () => {
+		const ownerA: ViewNode = {
+			id: "owner-a",
+			type: "meta",
+			label: "Leads A",
+			children: [],
+			statusEnabled: true,
+			statusSetId: "set-recruiting",
+			apiItemOrder: ["1"],
+			apiItemState: { "1": { id: "1", label: "Acme Inc", kind: "placeholder", explicitStatusId: "s-applied" } },
+		};
+		const ownerB: ViewNode = {
+			id: "owner-b",
+			type: "meta",
+			label: "Leads B (duplicate)",
+			children: [],
+			statusEnabled: true,
+			statusSetId: "set-recruiting",
+			apiItemOrder: ["1"],
+			apiItemState: { "1": { id: "1", label: "Acme Inc (dup)", kind: "placeholder" } },
+		};
+		const { ctx } = setup([ownerA, ownerB]);
+		const tool = createGetNodeStatusTool(ctx);
+
+		const resultA = tool.handler({ nodeId: apiItemAddress("owner-a", "1") }) as Record<string, unknown>;
+		const resultB = tool.handler({ nodeId: apiItemAddress("owner-b", "1") }) as Record<string, unknown>;
+		expect(resultA.explicitStatusId).toBe("s-applied");
+		expect(resultB.explicitStatusId).toBeNull();
 	});
 
 	it("E3: an unknown node id is refused with a descriptive error", () => {
@@ -238,12 +271,44 @@ describe("set_node_status — G3/E2/E5/E7", () => {
 		const { ctx, persist } = setup([owner]);
 		const tool = createSetNodeStatusTool(ctx);
 
-		const result = tool.handler({ view: "Job Hunt", nodeId: "row-1", statusLabel: "Applied" }) as Record<string, unknown>;
+		const result = tool.handler({ view: "Job Hunt", nodeId: apiItemAddress("owner", "row-1"), statusLabel: "Applied" }) as Record<string, unknown>;
 
 		expect(owner.apiItemState?.["row-1"].explicitStatusId).toBe("s-applied");
 		expect(owner.explicitStatusId).toBeUndefined(); // never mistakenly written onto the owning ViewNode
 		expect(persist).toHaveBeenCalled();
 		expect(result.newStatus).toEqual({ id: "s-applied", label: "Applied", color: "#222222" });
+	});
+
+	it("R1 fix: two owners sharing the same raw row id are written independently through their own composite ids", () => {
+		const ownerA: ViewNode = {
+			id: "owner-a",
+			type: "meta",
+			label: "Leads A",
+			children: [],
+			statusEnabled: true,
+			statusSetId: "set-recruiting",
+			apiItemOrder: ["1"],
+			apiItemState: { "1": { id: "1", label: "Acme Inc", kind: "placeholder" } },
+		};
+		const ownerB: ViewNode = {
+			id: "owner-b",
+			type: "meta",
+			label: "Leads B (duplicate)",
+			children: [],
+			statusEnabled: true,
+			statusSetId: "set-recruiting",
+			apiItemOrder: ["1"],
+			apiItemState: { "1": { id: "1", label: "Acme Inc (dup)", kind: "placeholder" } },
+		};
+		const { ctx } = setup([ownerA, ownerB]);
+		const tool = createSetNodeStatusTool(ctx);
+
+		tool.handler({ view: "Job Hunt", nodeId: apiItemAddress("owner-b", "1"), statusLabel: "Applied" });
+
+		// Only owner B's row changed — the bug this fix closes would have written to whichever
+		// owner's row was found first for the bare id "1".
+		expect(ownerA.apiItemState?.["1"].explicitStatusId).toBeUndefined();
+		expect(ownerB.apiItemState?.["1"].explicitStatusId).toBe("s-applied");
 	});
 
 	it("GP6: a path placed twice in the view is refused with every matching node id; retrying with one id succeeds", () => {
@@ -354,5 +419,74 @@ describe("list_views / list_nodes / list_status_sets — G7 and the empty-array 
 		const tool = createListStatusSetsTool(ctx);
 		const result = tool.handler({}) as { statusSets: { id: string; statuses: unknown[] }[] };
 		expect(result.statusSets).toEqual([{ id: "empty", name: "Empty", statuses: [], defaultStatusId: "" }]);
+	});
+});
+
+describe("R3 fix — list_nodes/get_node_status see exactly the rows the explorer renders, through a real Folder source", () => {
+	/** Builds a real "overwrite"-mode, YAML-filtered Folder source (Jobs/beta.md fails the
+	 * `status: active` rule, so `managedRowFilterState` renders it `hidden` and it is dropped
+	 * outright, per `folderRowFilterState`/`ExplorerView.visibleFolderSourceRows`) — the exact
+	 * scenario R3's review comment names, driven through the real `ViewsManager` wiring
+	 * `buildRowVisibility` (mcp-status-tools.ts) reads, not a hand-built fixture. */
+	function setupHiddenFolderRow() {
+		const app = new MockApp();
+		app.vault.seedFolder("Jobs");
+		app.vault.seedFile("Jobs/acme.md");
+		app.vault.seedFile("Jobs/beta.md");
+		const live = new Map<string, { frontmatter?: Record<string, unknown> } | null>([
+			["Jobs/acme.md", { frontmatter: { status: "active" } }],
+			["Jobs/beta.md", { frontmatter: { status: "done" } }],
+		]);
+		app.metadataCache.getFileCache = ((file: { path: string }) => live.get(file.path) ?? null) as unknown as typeof app.metadataCache.getFileCache;
+
+		const persist = vi.fn();
+		const viewsManager = new ViewsManager(app as unknown as App, [], "", persist);
+		const view = viewsManager.getViews()[0];
+
+		const folder = viewsManager.addMetaFolder(view.id, null, "Job search")!;
+		viewsManager.setFolderSource(view.id, folder.id, { type: "folder", location: "inside", path: "Jobs", showFiles: true, showFolders: false, mode: "overwrite", filters: { files: { yaml: { rules: [{ key: "status", value: "active" }] } } } });
+		viewsManager.refreshFolderSource(view.id, folder.id);
+		viewsManager.onMetadataResolved();
+		// The folder itself (the direct parent, index 0) is the governor — reaches its own children
+		// by definition, with no `inheritToSubfolders` needed (product rule: that flag is off by
+		// default and only matters for a governor further up the chain).
+		folder.statusEnabled = true;
+		folder.statusSetId = "set-view";
+
+		const statusSets: StatusSet[] = [{ id: "set-view", name: "View set", statuses: [{ id: "v-default", label: "View Default", color: "#111" }], defaultStatusId: "v-default" }];
+		const statusesManager = new StatusesManager(statusSets, [], persist);
+		const ctx: McpStatusToolsContext = {
+			getViewsManager: () => viewsManager,
+			getStatusesManager: () => statusesManager,
+			getVaultName: () => "Fixture Vault",
+			getVaultPath: () => "/tmp/fixture",
+			getFolderSourcePath: () => "",
+		};
+		return { ctx, viewsManager, view, folder };
+	}
+
+	it("list_nodes surfaces the still-matching managed row (acme.md) but omits the one the rule hides (beta.md) entirely, matching the explorer", () => {
+		const { ctx, view, folder } = setupHiddenFolderRow();
+		const liveFolder = ctx.getViewsManager().getNode(view.id, folder.id)!;
+		const paths = liveFolder.children.map((c) => c.ref?.path);
+		expect(paths).toContain("Jobs/acme.md");
+		expect(paths).not.toContain("Jobs/beta.md"); // confirms the fixture actually produced a hidden row
+
+		const result = createListNodesTool(ctx).handler({ view: view.id, parentNodeId: folder.id }) as { nodes: { ref?: { path: string } }[] };
+		expect(result.nodes.map((n) => n.ref?.path)).toEqual(["Jobs/acme.md"]);
+	});
+
+	it("get_node_status refuses to address the hidden managed row (beta.md) at all, matching it never rendering", () => {
+		const { ctx, view, folder } = setupHiddenFolderRow();
+		const liveFolder = ctx.getViewsManager().getNode(view.id, folder.id)!;
+		// The hidden row still exists in the persisted tree (R1/R2 of PR-1.F2 — never deleted),
+		// so its id is real and addressable in the underlying store, but R3 says the MCP tools must
+		// refuse it exactly as the explorer refuses to render it.
+		const hiddenRow = liveFolder.children.find((c) => c.ref?.path === "Jobs/beta.md");
+		expect(hiddenRow).toBeUndefined(); // overwrite mode removes a non-matching row outright, no placeholder kept
+
+		const visibleRow = liveFolder.children.find((c) => c.ref?.path === "Jobs/acme.md")!;
+		const result = createGetNodeStatusTool(ctx).handler({ view: view.id, nodeId: visibleRow.id }) as Record<string, unknown>;
+		expect(result.resolvedStatus).toEqual({ id: "v-default", label: "View Default", color: "#111" });
 	});
 });

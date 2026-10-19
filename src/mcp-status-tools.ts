@@ -1,5 +1,15 @@
 import { McpTool } from "./mcp-protocol";
-import { McpAncestorChain, extractMcpAddress, pseudoNodeForApiItem, pseudoNodeForTarget, resolveMcpAddress } from "./mcp-node-resolver";
+import {
+	McpAncestorChain,
+	McpRowVisibility,
+	apiItemAddress,
+	extractMcpAddress,
+	pseudoNodeForApiItem,
+	pseudoNodeForTarget,
+	resolveMcpAddress,
+	visibleChildRows,
+} from "./mcp-node-resolver";
+import { resolveOutsidePath } from "./folder-source-outside";
 import { StatusDefinition, StatusesManager } from "./statuses";
 import { ApiItemState, UnitRef, View, ViewNode } from "./types";
 import { ViewsManager } from "./views";
@@ -22,6 +32,11 @@ export interface McpStatusToolsContext {
 	 * wrong vault's server (several vaults, one device, each its own port) notices immediately. */
 	getVaultName: () => string;
 	getVaultPath: () => string;
+	/** R3 fix: the device-local Outside-Vault Folder source path for a node id (same store the
+	 * explorer's own `isOutsideManagedAndUnresolved` reads, `plugin.folderSourcePathStore`) — needed
+	 * so these tools can skip an unresolved Outside-Vault row exactly as the explorer does. Returns
+	 * `""` for a node with no stored path, matching `FolderSourcePathStore.get`'s own default. */
+	getFolderSourcePath: (nodeId: string) => string;
 }
 
 interface VaultIdentity {
@@ -72,6 +87,24 @@ function statusSummary(status: StatusDefinition): { id: string; label: string; c
 	return { id: status.id, label: status.label, color: status.color };
 }
 
+/** R3 fix: builds the same two visibility checks the explorer applies before a row ever renders
+ * (`ViewsManager.managedRowFilterState` for a YAML-hidden Folder-source row, `resolveOutsidePath`
+ * against the device-local path for an unresolved Outside-Vault row) — bound to one `view` so every
+ * resolver/summarizer call for that view sees an identical, render-accurate node tree instead of
+ * each tool re-deriving its own notion of "which rows exist". */
+function buildRowVisibility(ctx: McpStatusToolsContext, view: View): McpRowVisibility {
+	const viewsManager = ctx.getViewsManager();
+	return {
+		isHidden: (node) => viewsManager.managedRowFilterState(view.id, node) === "hidden",
+		isUnresolvedOutside: (node) => {
+			if (!node.folderSourceManaged || !node.folderSourceOwnerId) return false;
+			const owner = viewsManager.getNode(view.id, node.folderSourceOwnerId);
+			if (owner?.folderSource?.location !== "outside") return false;
+			return !resolveOutsidePath(ctx.getFolderSourcePath(owner.id));
+		},
+	};
+}
+
 /** PR-2.F1 (G7): one view's node tree, nested — a node's own placeholder (API/CSV/markdown-table)
  * rows are folded in as `"api-item"`-typed children right behind its real children, mirroring
  * `renderNodeList`'s own ordering, so `list_nodes` is the one place an agent discovers every id
@@ -87,12 +120,12 @@ export interface McpNodeSummary {
 	children: McpNodeSummary[];
 }
 
-function summarizeApiItem(item: ApiItemState, ancestors: McpAncestorChain, sm: StatusesManager): McpNodeSummary {
+function summarizeApiItem(item: ApiItemState, ownerId: string, ancestors: McpAncestorChain, sm: StatusesManager): McpNodeSummary {
 	const pseudo = pseudoNodeForApiItem(item);
 	const governor = sm.findGoverningAncestor(ancestors, pseudo);
 	const resolved = governor ? sm.resolveNodeStatus(ancestors, pseudo) : null;
 	return {
-		id: item.id,
+		id: apiItemAddress(ownerId, item.id),
 		type: "api-item",
 		label: item.label,
 		explicitStatusId: item.explicitStatusId ?? null,
@@ -101,15 +134,23 @@ function summarizeApiItem(item: ApiItemState, ancestors: McpAncestorChain, sm: S
 	};
 }
 
-function summarizeNode(node: ViewNode, ancestors: McpAncestorChain, sm: StatusesManager): McpNodeSummary {
+/** R3 fix: a view's rows, nested — `visibleChildRows` (shared with the resolver's own walk) drops a
+ * YAML-hidden or unresolved-Outside-Vault row and lifts the first's children in its place, so
+ * `list_nodes`'s tree matches what the explorer actually renders rather than showing every row
+ * unconditionally. */
+function summarizeChildren(nodes: ViewNode[], ancestors: McpAncestorChain, visibility: McpRowVisibility, sm: StatusesManager): McpNodeSummary[] {
+	return visibleChildRows(nodes, ancestors, visibility).map(({ node, ancestors: rowAncestors }) => summarizeNode(node, rowAncestors, visibility, sm));
+}
+
+function summarizeNode(node: ViewNode, ancestors: McpAncestorChain, visibility: McpRowVisibility, sm: StatusesManager): McpNodeSummary {
 	const governor = sm.findGoverningAncestor(ancestors, node);
 	const resolved = governor ? sm.resolveNodeStatus(ancestors, node) : null;
 	const childAncestors: McpAncestorChain = [node, ...ancestors];
-	const children = node.children.map((child) => summarizeNode(child, childAncestors, sm));
+	const children = summarizeChildren(node.children, childAncestors, visibility, sm);
 	if (node.apiItemOrder) {
 		for (const itemId of node.apiItemOrder) {
 			const item = node.apiItemState?.[itemId];
-			if (item) children.push(summarizeApiItem(item, childAncestors, sm));
+			if (item) children.push(summarizeApiItem(item, node.id, childAncestors, sm));
 		}
 	}
 	return {
@@ -156,11 +197,12 @@ export function createListNodesTool(ctx: McpStatusToolsContext): McpTool {
 			const viewsManager = ctx.getViewsManager();
 			const statusesManager = ctx.getStatusesManager();
 			const view = resolveViewForRead(viewsManager, args.view);
+			const visibility = buildRowVisibility(ctx, view);
 
 			let nodes: ViewNode[];
 			let ancestors: McpAncestorChain;
 			if (typeof args.parentNodeId === "string" && args.parentNodeId.length > 0) {
-				const target = resolveMcpAddress(view, view.name, { nodeId: args.parentNodeId });
+				const target = resolveMcpAddress(view, view.name, { nodeId: args.parentNodeId }, visibility);
 				if (target.kind !== "node") {
 					throw new Error(`Node "${args.parentNodeId}" in view "${view.name}" is a placeholder row and has no children.`);
 				}
@@ -174,7 +216,7 @@ export function createListNodesTool(ctx: McpStatusToolsContext): McpTool {
 			return {
 				vault: vaultIdentity(ctx),
 				view: viewIdentity(view),
-				nodes: nodes.map((node) => summarizeNode(node, ancestors, statusesManager)),
+				nodes: summarizeChildren(nodes, ancestors, visibility, statusesManager),
 			};
 		},
 	};
@@ -222,7 +264,7 @@ export function createGetNodeStatusTool(ctx: McpStatusToolsContext): McpTool {
 			const statusesManager = ctx.getStatusesManager();
 			const view = resolveViewForRead(viewsManager, args.view);
 			const address = extractMcpAddress(args);
-			const target = resolveMcpAddress(view, view.name, address);
+			const target = resolveMcpAddress(view, view.name, address, buildRowVisibility(ctx, view));
 			const pseudo = pseudoNodeForTarget(target);
 			const governor = statusesManager.findGoverningAncestor(target.ancestors, pseudo);
 			const resolved = governor ? statusesManager.resolveNodeStatus(target.ancestors, pseudo) : null;
@@ -262,7 +304,7 @@ export function createSetNodeStatusTool(ctx: McpStatusToolsContext): McpTool {
 			const statusesManager = ctx.getStatusesManager();
 			const view = resolveViewForWrite(viewsManager, args.view);
 			const address = extractMcpAddress(args);
-			const target = resolveMcpAddress(view, view.name, address);
+			const target = resolveMcpAddress(view, view.name, address, buildRowVisibility(ctx, view));
 			const pseudo = pseudoNodeForTarget(target);
 
 			const governor = statusesManager.findGoverningAncestor(target.ancestors, pseudo);

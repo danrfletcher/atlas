@@ -242,6 +242,7 @@ export default class AtlasPlugin extends Plugin {
 			getStatusesManager: () => this.statusesManager,
 			getVaultName: () => this.app.vault.getName(),
 			getVaultPath: () => this.getVaultBasePath(),
+			getFolderSourcePath: (nodeId: string) => this.folderSourcePathStore.get(nodeId),
 		};
 		tools.set("list_views", createListViewsTool(statusToolsContext));
 		tools.set("list_nodes", createListNodesTool(statusToolsContext));
