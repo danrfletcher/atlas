@@ -1,7 +1,27 @@
 import { describe, expect, it, vi } from "vitest";
-import { App, Menu } from "obsidian";
+import { App, Menu, Notice } from "obsidian";
 import { AtlasExplorerView } from "../../src/explorer-view";
 import { ApiItemState, View, ViewNode } from "../../src/types";
+import { ViewsManager } from "../../src/views";
+import { meta } from "../integration/create-from-meta-fixtures";
+
+// PR-2.F3: the real Folder add-under flow opens a `TextPromptModal` — recorded here the same way
+// `tests/unit/add-under-folder.test.ts` does, so the test below can drive its submit callback
+// directly instead of simulating real DOM input.
+const captured = vi.hoisted(() => ({
+	prompts: [] as { onSubmit: (v: string) => void; onCancel?: () => void }[],
+}));
+
+vi.mock("../../src/modals", async (importOriginal) => {
+	const actual = await importOriginal<typeof import("../../src/modals")>();
+	class RecordingPrompt {
+		constructor(_app: unknown, _title: string, _initial: string, public onSubmit: (v: string) => void, _placeholder?: string, public onCancel?: () => void) {
+			captured.prompts.push(this);
+		}
+		open(): void {}
+	}
+	return { ...actual, TextPromptModal: RecordingPrompt };
+});
 
 const view: View = { id: "v1", name: "Default", inboxMode: "view", root: [] };
 const folderNode: ViewNode = { id: "folder", type: "meta", label: "Folder", children: [] };
@@ -314,5 +334,63 @@ describe("PR-2.F2 — Add under… > Folder calls startAddUnder(\"folder\", view
 		show.mockRestore();
 		chooseFolder(built!);
 		expect(fake.startAddUnder).toHaveBeenCalledWith("folder", view, node);
+	});
+});
+
+// PR-2.F3 (G10): the real Folder add-under flow, with an active filter — not just the dispatch
+// checked above. Proves the new child lands as the parent's own last child via the real
+// `ViewsManager`, that the filter text itself is never touched (read-only per the helper's own doc
+// comment), and that the G10 Notice names "the current filter" as the reason the row can't be
+// found (this harness's `bucketListEl` is a plain unrendered `<div>`, so the row is never there).
+describe("PR-2.F3 — Add under… > Folder with a filter active: G10 Notice names the filter, filterText itself is untouched", () => {
+	it("nests the new Folder as the parent's last child and shows the Notice", async () => {
+		Notice.reset();
+		captured.prompts.length = 0;
+		const originalCSS = (globalThis as { CSS?: unknown }).CSS;
+		(globalThis as { CSS?: { escape: (v: string) => string } }).CSS = { escape: (v: string) => v };
+		try {
+			const app = new App();
+			const vm = new ViewsManager(app as unknown as App, [{ id: "v1", name: "Default", inboxMode: "view", root: [meta("projects", "Projects", [])] }], "v1", () => {});
+			const liveView = vm.getViews()[0];
+			const parentNode = vm.getNode("v1", "projects")!;
+
+			const fakeThis = {
+				plugin: {
+					app,
+					statusesManager: { findGoverningAncestor: () => null, resolveNodeStatus: () => null },
+					viewsManager: vm,
+				},
+				filterText: "drone",
+				bucketListEl: document.createElement("div"), // never gets the new row appended: a plain fixture, not a real render
+				selectedBucketNodeIds: new Set<string>(),
+				selectedInboxRefKeys: new Set<string>(),
+				selectionAnchor: null as string | null,
+				selectionAnchorScope: null as "bucket" | "inbox" | null,
+				render: vi.fn(() => Promise.resolve()),
+				awaitRenderSettled: vi.fn(() => Promise.resolve()),
+			};
+			const proto = AtlasExplorerView.prototype as unknown as {
+				runAddUnderFolder(view: View, node: ViewNode): Promise<void>;
+				addUnderFolderDeps(this: unknown): unknown;
+				addUnderHiddenSignals(this: unknown, ...a: unknown[]): unknown;
+				ancestorsForNode(this: unknown, ...a: unknown[]): unknown;
+			};
+			(fakeThis as Record<string, unknown>).addUnderFolderDeps = proto.addUnderFolderDeps;
+			(fakeThis as Record<string, unknown>).addUnderHiddenSignals = proto.addUnderHiddenSignals;
+			(fakeThis as Record<string, unknown>).ancestorsForNode = proto.ancestorsForNode;
+
+			const promise = proto.runAddUnderFolder.call(fakeThis, liveView, parentNode);
+			expect(captured.prompts).toHaveLength(1);
+			captured.prompts[0].onSubmit("Archive");
+			await promise;
+
+			expect(parentNode.children.map((c) => c.label)).toEqual(["Archive"]);
+			expect(fakeThis.filterText).toBe("drone"); // the helper only ever reads filterText, per its own doc comment
+			expect(Notice.instances).toHaveLength(1);
+			expect(Notice.instances[0].message).toContain("Added Archive under Projects");
+			expect(Notice.instances[0].message).toContain("(hidden by the current filter)");
+		} finally {
+			(globalThis as { CSS?: unknown }).CSS = originalCSS;
+		}
 	});
 });
