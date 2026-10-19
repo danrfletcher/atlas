@@ -1,5 +1,8 @@
 import type { App } from "obsidian";
-import { describe, expect, it, vi } from "vitest";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { App as MockApp } from "../mocks/obsidian";
 import { View, ViewNode } from "../../src/types";
 import { StatusSet, StatusesManager } from "../../src/statuses";
@@ -422,13 +425,23 @@ describe("list_views / list_nodes / list_status_sets — G7 and the empty-array 
 	});
 });
 
-describe("R3 fix — list_nodes/get_node_status see exactly the rows the explorer renders, through a real Folder source", () => {
-	/** Builds a real "overwrite"-mode, YAML-filtered Folder source (Jobs/beta.md fails the
-	 * `status: active` rule, so `managedRowFilterState` renders it `hidden` and it is dropped
-	 * outright, per `folderRowFilterState`/`ExplorerView.visibleFolderSourceRows`) — the exact
-	 * scenario R3's review comment names, driven through the real `ViewsManager` wiring
-	 * `buildRowVisibility` (mcp-status-tools.ts) reads, not a hand-built fixture. */
-	function setupHiddenFolderRow() {
+describe("R3/R4 fix — list_nodes/get_node_status/set_node_status see exactly the rows the explorer renders, through real ViewsManager wiring", () => {
+	// R4: the two tests this block replaced used "overwrite" mode, which deletes a non-matching
+	// row from the tree outright (`reconcileFolderSourceChildDelete`) — `managedRowFilterState`
+	// never had a chance to return "hidden" for anything there, so both tests would still have
+	// passed if `buildRowVisibility` (mcp-status-tools.ts) always returned "always visible". This
+	// fixture instead uses "merge" mode and a rules *change* (`setFolderSource`'s own
+	// `applyRulesToHiddenAtSave`), which flags a still-present, no-longer-matching row
+	// `folderSourceHiddenAtSave` rather than deleting it — the row survives in the tree
+	// (`reconcileManagedChildren` never drops a managed child on a match failure, only on a kind
+	// toggle) and `managedRowFilterState` genuinely returns "hidden" for it. Every test below
+	// re-derives that "hidden" fact from the real `ViewsManager`, not a fake `McpRowVisibility`.
+	const outsideDirs: string[] = [];
+	afterEach(() => {
+		for (const dir of outsideDirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
+	});
+
+	function setupRowVisibilityFixture() {
 		const app = new MockApp();
 		app.vault.seedFolder("Jobs");
 		app.vault.seedFile("Jobs/acme.md");
@@ -443,50 +456,104 @@ describe("R3 fix — list_nodes/get_node_status see exactly the rows the explore
 		const viewsManager = new ViewsManager(app as unknown as App, [], "", persist);
 		const view = viewsManager.getViews()[0];
 
+		// Build the Folder source unfiltered first, so both rows are added as ordinary managed
+		// children (and so the later rules change is a genuine *change*, the only thing that makes
+		// `setFolderSource` call `applyRulesToHiddenAtSave` at all).
 		const folder = viewsManager.addMetaFolder(view.id, null, "Job search")!;
-		viewsManager.setFolderSource(view.id, folder.id, { type: "folder", location: "inside", path: "Jobs", showFiles: true, showFolders: false, mode: "overwrite", filters: { files: { yaml: { rules: [{ key: "status", value: "active" }] } } } });
+		viewsManager.setFolderSource(view.id, folder.id, { type: "folder", location: "inside", path: "Jobs", showFiles: true, showFolders: false, mode: "merge" });
 		viewsManager.refreshFolderSource(view.id, folder.id);
 		viewsManager.onMetadataResolved();
+
+		// Now turn the YAML rule on. acme.md (status: active) still matches and stays unflagged;
+		// beta.md (status: done) doesn't, and merge mode flags it `folderSourceHiddenAtSave` rather
+		// than removing it — the row stays in the tree, but renders "hidden".
+		viewsManager.setFolderSource(view.id, folder.id, {
+			type: "folder",
+			location: "inside",
+			path: "Jobs",
+			showFiles: true,
+			showFolders: false,
+			mode: "merge",
+			filters: { files: { yaml: { rules: [{ key: "status", value: "active" }] } } },
+		});
+
 		// The folder itself (the direct parent, index 0) is the governor — reaches its own children
-		// by definition, with no `inheritToSubfolders` needed (product rule: that flag is off by
-		// default and only matters for a governor further up the chain).
+		// by definition, with no `inheritToSubfolders` needed.
 		folder.statusEnabled = true;
 		folder.statusSetId = "set-view";
 
-		const statusSets: StatusSet[] = [{ id: "set-view", name: "View set", statuses: [{ id: "v-default", label: "View Default", color: "#111" }], defaultStatusId: "v-default" }];
+		const betaNode = folder.children.find((c) => c.ref?.path === "Jobs/beta.md")!;
+		// beta.md is ALSO configured as a governor, with a *different* set — the exact R3 scenario:
+		// once beta is hidden, a child nested under it must resolve against the nearer *visible*
+		// governor (the folder's set-view), never beta's own set-beta, even though beta sits closer
+		// in the real tree.
+		betaNode.statusEnabled = true;
+		betaNode.statusSetId = "set-beta";
+		const betaChild: ViewNode = { id: "beta-child", type: "unit", ref: { kind: "file", path: "Jobs/beta-child.md" }, children: [] };
+		betaNode.children.push(betaChild);
+
+		// An Outside-Vault Folder source whose managed child was added while its device-local path
+		// *did* resolve (so it's a real row in the tree, not merely never-created), but whose path
+		// `ctx.getFolderSourcePath` reports below doesn't resolve on "this device" — R3's other half,
+		// `ExplorerView.isOutsideManagedAndUnresolved`.
+		const extDir = fs.mkdtempSync(path.join(os.tmpdir(), "atlas-mcp-r3-outside-"));
+		outsideDirs.push(extDir);
+		fs.writeFileSync(path.join(extDir, "ext-child.md"), "");
+		const outsideFolder = viewsManager.addMetaFolder(view.id, null, "External")!;
+		viewsManager.setFolderSource(view.id, outsideFolder.id, { type: "folder", location: "outside", path: "", showFiles: true, showFolders: false, mode: "merge" });
+		viewsManager.refreshFolderSource(view.id, outsideFolder.id, extDir);
+
+		const statusSets: StatusSet[] = [
+			{ id: "set-view", name: "View set", statuses: [{ id: "v-default", label: "View Default", color: "#111" }], defaultStatusId: "v-default" },
+			{ id: "set-beta", name: "Beta set", statuses: [{ id: "b-default", label: "Beta Default", color: "#222" }], defaultStatusId: "b-default" },
+		];
 		const statusesManager = new StatusesManager(statusSets, [], persist);
 		const ctx: McpStatusToolsContext = {
 			getViewsManager: () => viewsManager,
 			getStatusesManager: () => statusesManager,
 			getVaultName: () => "Fixture Vault",
 			getVaultPath: () => "/tmp/fixture",
+			// R4(d): every Outside-Vault owner reports no stored device-local path, matching
+			// `FolderSourcePathStore.get`'s own default for a device that's never seen this source —
+			// so `resolveOutsidePath("")` is false and `outsideFolder`'s managed child is unresolved.
 			getFolderSourcePath: () => "",
 		};
-		return { ctx, viewsManager, view, folder };
+		return { ctx, viewsManager, view, folder, betaNode, betaChild, outsideFolder };
 	}
 
-	it("list_nodes surfaces the still-matching managed row (acme.md) but omits the one the rule hides (beta.md) entirely, matching the explorer", () => {
-		const { ctx, view, folder } = setupHiddenFolderRow();
-		const liveFolder = ctx.getViewsManager().getNode(view.id, folder.id)!;
-		const paths = liveFolder.children.map((c) => c.ref?.path);
-		expect(paths).toContain("Jobs/acme.md");
-		expect(paths).not.toContain("Jobs/beta.md"); // confirms the fixture actually produced a hidden row
-
-		const result = createListNodesTool(ctx).handler({ view: view.id, parentNodeId: folder.id }) as { nodes: { ref?: { path: string } }[] };
-		expect(result.nodes.map((n) => n.ref?.path)).toEqual(["Jobs/acme.md"]);
+	it("fixture sanity: managedRowFilterState genuinely returns \"hidden\" for beta.md, which still exists in the persisted tree", () => {
+		const { viewsManager, view, folder, betaNode } = setupRowVisibilityFixture();
+		expect(viewsManager.managedRowFilterState(view.id, betaNode)).toBe("hidden");
+		expect(folder.children.some((c) => c.id === betaNode.id)).toBe(true);
 	});
 
-	it("get_node_status refuses to address the hidden managed row (beta.md) at all, matching it never rendering", () => {
-		const { ctx, view, folder } = setupHiddenFolderRow();
-		const liveFolder = ctx.getViewsManager().getNode(view.id, folder.id)!;
-		// The hidden row still exists in the persisted tree (R1/R2 of PR-1.F2 — never deleted),
-		// so its id is real and addressable in the underlying store, but R3 says the MCP tools must
-		// refuse it exactly as the explorer refuses to render it.
-		const hiddenRow = liveFolder.children.find((c) => c.ref?.path === "Jobs/beta.md");
-		expect(hiddenRow).toBeUndefined(); // overwrite mode removes a non-matching row outright, no placeholder kept
+	it("(a) list_nodes surfaces the still-matching managed row (acme.md), omits the hidden one (beta.md) entirely, and lifts beta's own nested child into the folder's children", () => {
+		const { ctx, view, folder, betaNode, betaChild } = setupRowVisibilityFixture();
+		const result = createListNodesTool(ctx).handler({ view: view.id, parentNodeId: folder.id }) as { nodes: { id: string; ref?: { path: string } }[] };
+		const paths = result.nodes.map((n) => n.ref?.path);
+		expect(paths).toContain("Jobs/acme.md");
+		expect(paths).not.toContain("Jobs/beta.md");
+		expect(result.nodes.map((n) => n.id)).not.toContain(betaNode.id);
+		expect(result.nodes.map((n) => n.id)).toContain(betaChild.id);
+	});
 
-		const visibleRow = liveFolder.children.find((c) => c.ref?.path === "Jobs/acme.md")!;
-		const result = createGetNodeStatusTool(ctx).handler({ view: view.id, nodeId: visibleRow.id }) as Record<string, unknown>;
+	it("(b) get_node_status/set_node_status both refuse to address the hidden managed row (beta.md) by id, as not found", () => {
+		const { ctx, view, betaNode } = setupRowVisibilityFixture();
+		expect(() => createGetNodeStatusTool(ctx).handler({ view: view.id, nodeId: betaNode.id })).toThrow(/No node with id/);
+		expect(() => createSetNodeStatusTool(ctx).handler({ view: view.id, nodeId: betaNode.id, statusLabel: "View Default" })).toThrow(/No node with id/);
+	});
+
+	it("(c) get_node_status on beta's lifted child resolves the nearer, visible parent's status set (the folder's), never the hidden row's own", () => {
+		const { ctx, view, betaChild } = setupRowVisibilityFixture();
+		const result = createGetNodeStatusTool(ctx).handler({ view: view.id, nodeId: betaChild.id }) as Record<string, unknown>;
+		expect(result.governingStatusSet).toEqual({ id: "set-view", name: "View set" });
 		expect(result.resolvedStatus).toEqual({ id: "v-default", label: "View Default", color: "#111" });
+	});
+
+	it("(d) an Outside-Vault-managed row whose source doesn't resolve on this device is omitted, with its subtree, from list_nodes and from direct addressing", () => {
+		const { ctx, view, outsideFolder } = setupRowVisibilityFixture();
+		const result = createListNodesTool(ctx).handler({ view: view.id, parentNodeId: outsideFolder.id }) as { nodes: unknown[] };
+		expect(result.nodes).toEqual([]);
+		expect(() => createGetNodeStatusTool(ctx).handler({ view: view.id, path: "ext-child.md" })).toThrow(/No node at path/);
 	});
 });
