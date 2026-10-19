@@ -83,6 +83,21 @@ export class UnitIndex {
 		return () => this.changeListeners.delete(cb);
 	}
 
+	/** PR-3.F1 (R4 review): a public wrapper over the same exclusion rule `classifyBaseUnits`/
+	 * `topLevelFolderFor` already apply — so the `add_node` MCP tool can refuse a path inside an
+	 * excluded folder without re-reading `excludedFolders`/`poolFolder` itself and risking drift from
+	 * this class's own rule. */
+	isExcludedPath(path: string): boolean {
+		return this.isExcluded(path);
+	}
+
+	/** PR-3.F1 (R4 review): a public wrapper over `interfaceNoteFolderFor`'s own "is this file's
+	 * folder's interface note" check — AGENTS.md: a bare `Foo/Foo.md` is not a unit ref, so `add_node`
+	 * must refuse it the same way this class already never counts it as one. */
+	isInterfaceNoteFile(file: TFile): boolean {
+		return this.interfaceNoteFolderFor(file) !== null;
+	}
+
 	private notifyChange(): void {
 		for (const cb of this.changeListeners) cb();
 	}
