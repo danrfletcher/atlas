@@ -102,6 +102,44 @@ describe("mcp-protocol — malformed-input matrix: every row yields a structured
 		expect(server.isRunning()).toBe(true);
 	});
 
+	// R10: a body missing `id` *and* `jsonrpc`/`method` is not a well-formed JSON-RPC Request at
+	// all, so JSON-RPC 2.0 §4.1's "no `id` means Notification" rule never applies to it — it must
+	// still get a structured `-32600` error, not 202-with-no-body.
+	it("empty object: missing id, jsonrpc and method all at once", async () => {
+		const { server, port } = await startServer();
+		const response = await postRaw(port, TOKEN, JSON.stringify({}));
+		expect(response.status).toBe(200);
+		const body = response.json as ErrorBody;
+		expect(body.jsonrpc).toBe("2.0");
+		expect(body.error).toBeDefined();
+		expect(body.error.code).toBe(-32600);
+		expect(server.isRunning()).toBe(true);
+	});
+
+	it("missing id and jsonrpc, method present", async () => {
+		const { server, port } = await startServer();
+		const response = await postRaw(port, TOKEN, JSON.stringify({ method: "tools/call" }));
+		const body = response.json as ErrorBody;
+		expect(body.error.code).toBe(-32600);
+		expect(server.isRunning()).toBe(true);
+	});
+
+	it("missing id and method, jsonrpc present", async () => {
+		const { server, port } = await startServer();
+		const response = await postRaw(port, TOKEN, JSON.stringify({ jsonrpc: "2.0" }));
+		const body = response.json as ErrorBody;
+		expect(body.error.code).toBe(-32600);
+		expect(server.isRunning()).toBe(true);
+	});
+
+	it("missing id, jsonrpc and method, unrelated field present", async () => {
+		const { server, port } = await startServer();
+		const response = await postRaw(port, TOKEN, JSON.stringify({ foo: 1 }));
+		const body = response.json as ErrorBody;
+		expect(body.error.code).toBe(-32600);
+		expect(server.isRunning()).toBe(true);
+	});
+
 	it("oversized body", async () => {
 		const { server, port } = await startServer();
 		// Well past this server's 1MB cap, but still a syntactically valid JSON-RPC envelope — the

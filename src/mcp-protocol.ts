@@ -69,19 +69,24 @@ function errorResponse(id: unknown, code: number, message: string): JsonRpcRespo
  * (MCP convention: `{ method: "tools/call", params: { name, arguments } }`) — later PRs register
  * more tools in the same `tools` map, never a new top-level RPC method.
  *
- * Returns `null`, never a response body, for a JSON-RPC *notification* — any request object with
- * no `id` member at all, per JSON-RPC 2.0 §4.1 ("Notifications are not confirmable... the Client
- * would not be aware of any errors"). This is also exactly how MCP's own
- * `notifications/initialized` is sent, so it needs no special case: lacking an `id` is what makes
- * it a notification. The HTTP transport turns a `null` return into "202 Accepted, no body"
- * instead of a JSON-RPC error.
+ * Returns `null`, never a response body, for a JSON-RPC *notification* — a well-formed Request
+ * object with no `id` member at all, per JSON-RPC 2.0 §4.1 ("Notifications are not
+ * confirmable... the Client would not be aware of any errors"). This is also exactly how MCP's
+ * own `notifications/initialized` is sent, so it needs no special case: lacking an `id` is what
+ * makes a *valid* request a notification. The HTTP transport turns a `null` return into "202
+ * Accepted, no body" instead of a JSON-RPC error.
  *
- * Never throws: invalid JSON, a non-object body, a missing `jsonrpc`/`method` field (on a request
- * that does carry an `id`), an unknown method or tool name, and a tool handler that itself throws
- * all come back as a structured JSON-RPC error response — the edge case this PR's fence requires
- * ("never an uncaught exception or a dropped connection"). A parse failure or non-object body
- * always gets an `id: null` error reply regardless of notification status: the server can't yet
- * tell whether an `id` was present.
+ * R10: the §4.1 notification rule only ever applies to a *valid* Request object — the `jsonrpc`
+ * and `method` fields are validated first, before `id` is even consulted. A body missing `id`
+ * *and* `jsonrpc`/`method` (`{}`, `{"method":"tools/call"}`, `{"jsonrpc":"2.0"}`, `{"foo":1}`) is
+ * not a well-formed request at all, so it gets a normal `-32600` error with `id: null` — never
+ * silently swallowed as 202-with-no-body just because it also happens to lack an `id`.
+ *
+ * Never throws: invalid JSON, a non-object body, a missing `jsonrpc`/`method` field, an unknown
+ * method or tool name, and a tool handler that itself throws all come back as a structured
+ * JSON-RPC error response — the edge case this PR's fence requires ("never an uncaught exception
+ * or a dropped connection"). A parse failure or non-object body always gets an `id: null` error
+ * reply: the server can't yet tell whether an `id` was present.
  */
 export async function dispatchJsonRpc(
 	rawBody: string,
@@ -98,16 +103,21 @@ export async function dispatchJsonRpc(
 		return errorResponse(null, JSON_RPC_ERROR_CODES.INVALID_REQUEST, "Request body must be a JSON object");
 	}
 	const req = parsed as Record<string, unknown>;
+	const hasId = "id" in req;
+	const id = hasId ? req.id : null;
 
-	if (!("id" in req)) return null; // a well-formed Request object with no `id` is a Notification — no reply, ever.
-	const id = req.id;
-
+	// R10: validate the request's shape *before* deciding whether it's a Notification — an
+	// invalid request (bad/missing `jsonrpc` or `method`) always gets a `-32600` error, with or
+	// without an `id`, rather than being mistaken for a notification just because `id` is also
+	// missing.
 	if (req.jsonrpc !== JSON_RPC_VERSION) {
 		return errorResponse(id, JSON_RPC_ERROR_CODES.INVALID_REQUEST, 'Missing or invalid "jsonrpc" field; expected "2.0"');
 	}
 	if (typeof req.method !== "string" || req.method.length === 0) {
 		return errorResponse(id, JSON_RPC_ERROR_CODES.INVALID_REQUEST, 'Missing "method" field');
 	}
+
+	if (!hasId) return null; // a well-formed Request object with no `id` is a Notification — no reply, ever.
 
 	switch (req.method) {
 		case "initialize":
