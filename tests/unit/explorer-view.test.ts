@@ -278,8 +278,14 @@ describe("PR-2.F2 R2 — runAddUnderFolder waits for an overlapping queued rende
 				selectedInboxRefKeys: new Set<string>(),
 				selectionAnchor: null,
 				selectionAnchorScope: null,
+				filterText: "",
+				expandedTruncationGroups: new Set<string>(),
 				plugin: {
 					app: {},
+					// PR-2.F3: `addUnderHiddenSignals` reads this to resolve the new row's governance —
+					// neither node here has `statusEnabled`, so a no-op stub (always "no governor") is
+					// enough; this test is about the render-overlap race, not reason classification.
+					statusesManager: { findGoverningAncestor: () => null, resolveNodeStatus: () => null },
 					viewsManager: {
 						getNode: vi.fn(() => parentNode),
 						// Standing in for the real ViewsManager.addMetaFolder, which calls save() and so
@@ -300,6 +306,8 @@ describe("PR-2.F2 R2 — runAddUnderFolder waits for an overlapping queued rende
 			fakeThis.addUnderFolderDeps = (AtlasExplorerView.prototype as unknown as { addUnderFolderDeps: () => AddUnderFolderDeps }).addUnderFolderDeps;
 			fakeThis.queueRender = (AtlasExplorerView.prototype as unknown as { queueRender: () => void }).queueRender;
 			fakeThis.runAddUnderFolder = (AtlasExplorerView.prototype as unknown as { runAddUnderFolder: (view: View, node: ViewNode) => Promise<void> }).runAddUnderFolder;
+			fakeThis.addUnderHiddenSignals = (AtlasExplorerView.prototype as unknown as { addUnderHiddenSignals: (...a: unknown[]) => unknown }).addUnderHiddenSignals;
+			fakeThis.ancestorsForNode = (AtlasExplorerView.prototype as unknown as { ancestorsForNode: (...a: unknown[]) => unknown }).ancestorsForNode;
 			fakeThis.renderNow = vi.fn(() => {
 				callIndex += 1;
 				if (callIndex === 1) {
