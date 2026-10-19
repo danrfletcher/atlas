@@ -702,6 +702,16 @@ export class ViewsManager {
 		return !!view && this.findUnitNode(view.root, ref) !== null;
 	}
 
+	/** PR-3.F1 (G4/GP3): the node id `ref` is currently placed under in `viewId`, or `null` if it
+	 * isn't placed there at all — a thin public accessor over the same `findUnitNode` walk
+	 * `isPlaced`/`placeUnit` already use, so the `add_node` MCP tool can report back the id of the
+	 * node `placeUnit` just created or moved without this file growing a second, divergent walk. */
+	getNodeIdForRef(viewId: string, ref: UnitRef): string | null {
+		const view = this.getView(viewId);
+		if (!view) return null;
+		return this.findUnitNode(view.root, ref)?.node.id ?? null;
+	}
+
 	/** PR-1.F1 R3: built on `placedRefKeys`'s walk rather than its own `findUnitNode` pass, so the
 	 * "+" picker's placed-set and this check can never disagree about what counts as placed (the
 	 * Outside-owned skip rule lives in one place). */

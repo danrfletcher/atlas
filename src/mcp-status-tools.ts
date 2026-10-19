@@ -39,23 +39,29 @@ export interface McpStatusToolsContext {
 	getFolderSourcePath: (nodeId: string) => string;
 }
 
-interface VaultIdentity {
+export interface VaultIdentity {
 	name: string;
 	path: string;
 }
 
-function vaultIdentity(ctx: McpStatusToolsContext): VaultIdentity {
+/** Exported (PR-3.F1): the arranging tools in `mcp-arrange-tools.ts` name the same vault in every
+ * reply as these status/read tools do — this is the one place that shape is built, so the two
+ * modules can never drift on it. Typed over just the two getters it needs, so it structurally
+ * accepts an `McpArrangeToolsContext` too without either context type depending on the other. */
+export function vaultIdentity(ctx: Pick<McpStatusToolsContext, "getVaultName" | "getVaultPath">): VaultIdentity {
 	return { name: ctx.getVaultName(), path: ctx.getVaultPath() };
 }
 
-function viewIdentity(view: View): { id: string; name: string } {
+export function viewIdentity(view: View): { id: string; name: string } {
 	return { id: view.id, name: view.name };
 }
 
 /** Case/whitespace-insensitive view lookup by id first (exact), then by name — `view: "Job Hunt"`
  * in every spec example is a name, not an id, but accepting either costs nothing and matches how
- * every other address in this file (node id or path) already accepts more than one kind of key. */
-function findView(viewsManager: ViewsManager, viewArg: string): View | null {
+ * every other address in this file (node id or path) already accepts more than one kind of key.
+ * Exported (PR-3.F1) so the arranging tools resolve a view the same way, rather than growing a
+ * second, possibly-divergent lookup. */
+export function findView(viewsManager: ViewsManager, viewArg: string): View | null {
 	const byId = viewsManager.getView(viewArg);
 	if (byId) return byId;
 	const lower = viewArg.trim().toLowerCase();
@@ -73,10 +79,12 @@ function resolveViewForRead(viewsManager: ViewsManager, viewArg: unknown): View 
 }
 
 /** E7: write tools never fall back to the active view — a missing `view` argument is refused
- * outright, not silently defaulted. */
-function resolveViewForWrite(viewsManager: ViewsManager, viewArg: unknown): View {
+ * outright, not silently defaulted. Exported (PR-3.F1) so every write tool (status writes here,
+ * arranging writes in `mcp-arrange-tools.ts`) shares this one rule; `toolName` only changes the
+ * wording of the refusal message, never the rule itself. */
+export function resolveViewForWrite(viewsManager: ViewsManager, viewArg: unknown, toolName: string): View {
 	if (typeof viewArg !== "string" || viewArg.trim().length === 0) {
-		throw new Error('set_node_status requires a "view" argument naming the view to write to; unlike the read tools, it never falls back to the active view.');
+		throw new Error(`${toolName} requires a "view" argument naming the view to write to; unlike the read tools, it never falls back to the active view.`);
 	}
 	const view = findView(viewsManager, viewArg);
 	if (!view) throw new Error(`No view named or with id "${viewArg}" was found.`);
@@ -302,7 +310,7 @@ export function createSetNodeStatusTool(ctx: McpStatusToolsContext): McpTool {
 		handler: (args) => {
 			const viewsManager = ctx.getViewsManager();
 			const statusesManager = ctx.getStatusesManager();
-			const view = resolveViewForWrite(viewsManager, args.view);
+			const view = resolveViewForWrite(viewsManager, args.view, "set_node_status");
 			const address = extractMcpAddress(args);
 			const target = resolveMcpAddress(view, view.name, address, buildRowVisibility(ctx, view));
 			const pseudo = pseudoNodeForTarget(target);
