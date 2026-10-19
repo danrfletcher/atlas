@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import * as obsidianMock from "obsidian";
-import { ATLAS_SORT_AZ_ICON_ID, ATLAS_SORT_AZ_ICON_SVG, compareSortKeys, currentSortMode, displayNameFor, isDirectSortMode, registerSortIcons, SORT_MODE_CHOICES, SORT_MODE_ICONS } from "../../src/sort";
+import { ATLAS_SORT_AZ_ICON_ID, ATLAS_SORT_AZ_ICON_SVG, compareSortKeys, currentSortMode, displayNameFor, isDirectSortMode, registerSortIcons, SORT_MODE_CHOICES, SORT_MODE_ICONS, sortedFolderNoticeText } from "../../src/sort";
 import type { SortKey } from "../../src/sort";
 import type { ViewNode } from "../../src/types";
 
@@ -110,5 +110,40 @@ describe("PR-2 sort.ts — registerSortIcons", () => {
 		expect(SORT_MODE_ICONS.alphabetical).toBe(ATLAS_SORT_AZ_ICON_ID);
 		expect(SORT_MODE_ICONS.alphabetical).not.toBe("arrow-down-az");
 		expect(SORT_MODE_ICONS.alphabetical).not.toBe("lucide-arrow-down-az");
+	});
+});
+
+// PR-4 (G4/E13/E14): sortedFolderNoticeText — exact wording for every mode, both directions, the
+// Bucket root, and a folder name with punctuation (GP4 uses "Projects", a plain name; the spec's
+// own exact-string test also wants a name with punctuation covered).
+describe("PR-4 sort.ts — sortedFolderNoticeText", () => {
+	it("A-Z / Z-A", () => {
+		expect(sortedFolderNoticeText("Projects", "alphabetical", false)).toBe("Projects is sorted A-Z. Set it to Manual to reorder.");
+		expect(sortedFolderNoticeText("Projects", "alphabetical", true)).toBe("Projects is sorted Z-A. Set it to Manual to reorder.");
+	});
+
+	it("Modified, newest/oldest first", () => {
+		expect(sortedFolderNoticeText("Projects", "modified", false)).toBe("Projects is sorted Modified, newest first. Set it to Manual to reorder.");
+		expect(sortedFolderNoticeText("Projects", "modified", true)).toBe("Projects is sorted Modified, oldest first. Set it to Manual to reorder.");
+	});
+
+	it("Time added, newest/oldest first", () => {
+		expect(sortedFolderNoticeText("Projects", "time-added", false)).toBe("Projects is sorted Time added, newest first. Set it to Manual to reorder.");
+		expect(sortedFolderNoticeText("Projects", "time-added", true)).toBe("Projects is sorted Time added, oldest first. Set it to Manual to reorder.");
+	});
+
+	it("Status, and reversed (E14)", () => {
+		expect(sortedFolderNoticeText("Projects", "status", false)).toBe("Projects is sorted Status. Set it to Manual to reorder.");
+		expect(sortedFolderNoticeText("Projects", "status", true)).toBe("Projects is sorted Status, reversed. Set it to Manual to reorder.");
+	});
+
+	it("the Bucket root reads \"Bucket is sorted ...\"", () => {
+		expect(sortedFolderNoticeText("Bucket", "alphabetical", false)).toBe("Bucket is sorted A-Z. Set it to Manual to reorder.");
+	});
+
+	it("a folder name with punctuation is carried through verbatim, not escaped or altered", () => {
+		expect(sortedFolderNoticeText("Q3 Plans (draft)", "modified", false)).toBe(
+			"Q3 Plans (draft) is sorted Modified, newest first. Set it to Manual to reorder."
+		);
 	});
 });
