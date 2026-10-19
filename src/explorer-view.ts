@@ -844,12 +844,15 @@ export class AtlasExplorerView extends ItemView {
 	async onOpen(): Promise<void> {
 		this.unsubscribers.push(this.plugin.unitIndex.onChange(() => this.queueRender()));
 		this.unsubscribers.push(
-			this.plugin.viewsManager.onChange(() => {
-				// PR-2 (G9): "a sort changes" and "the tree changes" are both covered here — every
-				// sort/placement/move/rename/status change goes through the same `save()` this fires
-				// from; a plain vault `modify`/autosave never does (that only reaches `unitIndex`'s
-				// own `onChange` above, which intentionally does *not* mark this dirty).
-				this.sortRefreshGate.markDirty();
+			this.plugin.viewsManager.onChange((persisted) => {
+				// PR-2 (R3/G9): "the tree changes" means a real, persisted structural/sort change —
+				// `persisted` is true only for a call that went through `ViewsManager.save()`, never
+				// for a bare `notifyChange()` (a note edit's metadata resolve, a no-op data-source
+				// refresh, anything "render this again" that didn't actually change the tree). Marking
+				// the gate dirty on every notification re-sorted Modified rows at a plain autosave,
+				// which G9/E4 forbid; `queueRender()` below still runs for both, so a render-only
+				// notification still repaints.
+				if (persisted) this.sortRefreshGate.markDirty();
 				this.queueRender();
 			})
 		);
