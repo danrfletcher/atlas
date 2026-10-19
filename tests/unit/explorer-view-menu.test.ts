@@ -3,6 +3,7 @@ import { App, Menu, Notice } from "obsidian";
 import { AtlasExplorerView } from "../../src/explorer-view";
 import { ApiItemState, View, ViewNode } from "../../src/types";
 import { ViewsManager } from "../../src/views";
+import { flush } from "../helpers";
 import { meta } from "../integration/create-from-meta-fixtures";
 
 // PR-2.F3: the real Folder add-under flow opens a `TextPromptModal` — recorded here the same way
@@ -418,6 +419,154 @@ describe("PR-2.F3 — Add under… > Folder: an active filter is never named as 
 			expect(Notice.instances[0].message).toContain("Added Archive under Projects");
 			expect(Notice.instances[0].message).toContain("(hidden by the current sort or grouping)");
 			expect(Notice.instances[0].message).not.toContain("filter");
+		} finally {
+			(globalThis as { CSS?: unknown }).CSS = originalCSS;
+		}
+	});
+});
+
+// PR-3.F1 (G1): the real Block add-under flow, wired through the private `startAddUnder` dispatcher
+// itself (not `runAddUnderBlock` called directly) — proves the menu's "Block" choice actually reaches
+// the real create-and-nest flow, not just that the flow works in isolation (that's
+// `add-under-block.test.ts`'s job). Block is also the first PR-3 kind to make the filter-as-cause
+// branch of `addUnderHiddenSignals` live (R1/PR-3.F1: see its own doc comment) — a unit-kind row, so
+// unlike Folder, an active filter that the new (always-empty) block's own display text fails to match
+// really is why the row doesn't render, and really is named first on a tie with governance.
+describe("PR-3.F1 — Add under… > Block: real flow, wired through startAddUnder", () => {
+	function host(statusesManager: { findGoverningAncestor: () => unknown; resolveNodeStatus: () => unknown }, filterText = "") {
+		const app = new App();
+		(app as unknown as { workspace: Record<string, unknown> }).workspace.getLeaf = vi.fn(() => ({ openFile: vi.fn(async () => {}) }));
+		(app as unknown as { workspace: Record<string, unknown> }).workspace.getActiveViewOfType = vi.fn(() => null);
+		const vm = new ViewsManager(app as unknown as App, [{ id: "v1", name: "Default", inboxMode: "view", root: [meta("projects", "Projects", [])] }], "v1", () => {});
+		const liveView = vm.getViews()[0];
+		const parentNode = vm.getNode("v1", "projects")!;
+
+		const fakeThis = {
+			plugin: {
+				app,
+				statusesManager,
+				viewsManager: vm,
+				unitIndex: { holdUnit: () => () => {} },
+				settings: { poolFolder: "_pool", blockDisplayLength: 80 },
+			},
+			filterText,
+			bucketListEl: document.createElement("div"), // never gets the new row appended: a plain fixture, not a real render
+			selectedBucketNodeIds: new Set<string>(),
+			selectedInboxRefKeys: new Set<string>(),
+			selectionAnchor: null as string | null,
+			selectionAnchorScope: null as "bucket" | "inbox" | null,
+			render: vi.fn(() => Promise.resolve()),
+			awaitRenderSettled: vi.fn(() => Promise.resolve()),
+		};
+		const proto = AtlasExplorerView.prototype as unknown as {
+			startAddUnder(this: unknown, kind: string, view: View, node: ViewNode): void;
+			runAddUnderBlock(this: unknown, view: View, node: ViewNode): Promise<void>;
+			addUnderBlockDeps(this: unknown): unknown;
+			addUnderHiddenSignals(this: unknown, ...a: unknown[]): unknown;
+			ancestorsForNode(this: unknown, ...a: unknown[]): unknown;
+			matchesFilter(this: unknown, text: string): boolean;
+		};
+		for (const key of ["runAddUnderBlock", "addUnderBlockDeps", "addUnderHiddenSignals", "ancestorsForNode", "matchesFilter"] as const) {
+			(fakeThis as Record<string, unknown>)[key] = proto[key];
+		}
+
+		return { fakeThis, proto, liveView, parentNode };
+	}
+
+	it("startAddUnder(\"block\", view, node) reaches the real flow: a new block is nested, expanded, selected and opened", async () => {
+		Notice.reset();
+		const originalCSS = (globalThis as { CSS?: unknown }).CSS;
+		(globalThis as { CSS?: { escape: (v: string) => string } }).CSS = { escape: (v: string) => v };
+		try {
+			const { fakeThis, proto, liveView, parentNode } = host({ findGoverningAncestor: () => null, resolveNodeStatus: () => null });
+
+			proto.startAddUnder.call(fakeThis, "block", liveView, parentNode);
+			await flush();
+
+			const children = fakeThis.plugin.viewsManager.getNode("v1", "projects")!.children;
+			expect(children).toHaveLength(1);
+			expect(children[0].type).toBe("unit");
+			expect((children[0].ref as { path: string }).path).toMatch(/^_pool\/.*\.md$/);
+			expect([...fakeThis.selectedBucketNodeIds]).toEqual([children[0].id]);
+			expect(fakeThis.render).toHaveBeenCalled();
+		} finally {
+			(globalThis as { CSS?: unknown }).CSS = originalCSS;
+		}
+	});
+
+	it("filter active, no governance cause: the new empty block's own display text doesn't match it, so the filter IS named", async () => {
+		Notice.reset();
+		const originalCSS = (globalThis as { CSS?: unknown }).CSS;
+		(globalThis as { CSS?: { escape: (v: string) => string } }).CSS = { escape: (v: string) => v };
+		try {
+			const { fakeThis, proto, liveView, parentNode } = host({ findGoverningAncestor: () => null, resolveNodeStatus: () => null }, "drone");
+
+			await proto.runAddUnderBlock.call(fakeThis, liveView, parentNode);
+
+			expect(parentNode.children).toHaveLength(1);
+			expect(fakeThis.filterText).toBe("drone"); // the helper only ever reads filterText, per its own doc comment
+			expect(Notice.instances).toHaveLength(1);
+			expect(Notice.instances[0].message).toContain("(hidden by the current filter)");
+		} finally {
+			(globalThis as { CSS?: unknown }).CSS = originalCSS;
+		}
+	});
+
+	it("filter active but it matches the new block's own display text (\"(empty block)\"): no Notice at all", async () => {
+		Notice.reset();
+		const originalCSS = (globalThis as { CSS?: unknown }).CSS;
+		(globalThis as { CSS?: { escape: (v: string) => string } }).CSS = { escape: (v: string) => v };
+		try {
+			const { fakeThis, proto, liveView, parentNode } = host({ findGoverningAncestor: () => null, resolveNodeStatus: () => null }, "empty");
+
+			await proto.runAddUnderBlock.call(fakeThis, liveView, parentNode);
+
+			expect(parentNode.children).toHaveLength(1);
+			expect(Notice.instances).toHaveLength(0);
+		} finally {
+			(globalThis as { CSS?: unknown }).CSS = originalCSS;
+		}
+	});
+
+	it("filter active AND hideCompleted governance: Notice still names the filter first (E-G10e tie-break), not the sort/grouping", async () => {
+		Notice.reset();
+		const originalCSS = (globalThis as { CSS?: unknown }).CSS;
+		(globalThis as { CSS?: { escape: (v: string) => string } }).CSS = { escape: (v: string) => v };
+		try {
+			const { fakeThis, proto, liveView, parentNode } = host(
+				{
+					findGoverningAncestor: () => ({ hideCompleted: true, hideCancelled: false }),
+					resolveNodeStatus: () => ({ id: "done", label: "Done", isCompleted: true, isCancelled: false }),
+				},
+				"drone"
+			);
+
+			await proto.runAddUnderBlock.call(fakeThis, liveView, parentNode);
+
+			expect(parentNode.children).toHaveLength(1);
+			expect(Notice.instances).toHaveLength(1);
+			expect(Notice.instances[0].message).toContain("(hidden by the current filter)");
+			expect(Notice.instances[0].message).not.toContain("sort or grouping");
+		} finally {
+			(globalThis as { CSS?: unknown }).CSS = originalCSS;
+		}
+	});
+
+	it("no filter, hideCompleted governance: Notice names the sort/grouping, same as Folder's own case", async () => {
+		Notice.reset();
+		const originalCSS = (globalThis as { CSS?: unknown }).CSS;
+		(globalThis as { CSS?: { escape: (v: string) => string } }).CSS = { escape: (v: string) => v };
+		try {
+			const { fakeThis, proto, liveView, parentNode } = host({
+				findGoverningAncestor: () => ({ hideCompleted: true, hideCancelled: false }),
+				resolveNodeStatus: () => ({ id: "done", label: "Done", isCompleted: true, isCancelled: false }),
+			});
+
+			await proto.runAddUnderBlock.call(fakeThis, liveView, parentNode);
+
+			expect(parentNode.children).toHaveLength(1);
+			expect(Notice.instances).toHaveLength(1);
+			expect(Notice.instances[0].message).toContain("(hidden by the current sort or grouping)");
 		} finally {
 			(globalThis as { CSS?: unknown }).CSS = originalCSS;
 		}
