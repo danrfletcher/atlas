@@ -128,6 +128,29 @@ describe("PR-2.F2 fence — F2 (no command/toolbar change) and F4 (no sibling-in
 	});
 });
 
+// PR-3.F3: Module's own fence check — F8 ("no undo: after a successful add there is no undo
+// entry, command or Notice button, and nothing in the code reverses a completed add"). Mirrors
+// PR-2.F2's own grep-style checks above for the new module this PR adds.
+describe("PR-3.F3 fence — F8 no undo for Add under > Module", () => {
+	it("src/add-under-module.ts adds no undo path, command, hotkey or toolbar button", () => {
+		const body = read("src/add-under-module.ts");
+		expect(body).not.toMatch(/addCommand\(/);
+		expect(body).not.toMatch(/hotkeys\s*:/);
+		expect(body).not.toMatch(/toolbarButton\(/);
+		expect(body).not.toMatch(/undo/i);
+	});
+
+	it("the toolbar's create section (Add block/file/module/folder) still has exactly four buttons", () => {
+		const body = read("src/explorer-view.ts");
+		const start = body.indexOf("// --- section 2: create");
+		const end = body.indexOf("// --- section 3: view controls");
+		expect(start).toBeGreaterThan(-1);
+		expect(end).toBeGreaterThan(start);
+		const section = body.slice(start, end);
+		expect((section.match(/this\.toolbarButton\(/g) ?? []).length).toBe(4);
+	});
+});
+
 // PR-2.F3: the G10 hidden-row helper only ever reads `filterText`, sort settings,
 // `truncatedStatuses` and `expandedTruncationGroups` (via the signals its caller computes) — it
 // must never write any of them. Static grep plus a behavioral check that a real call leaves a

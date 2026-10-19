@@ -24,6 +24,7 @@ import { AddUnderKind, addAddUnderItem, canAddUnder, startAddUnder } from "./add
 import { AddUnderFolderDeps, startAddUnderFolder } from "./add-under-folder";
 import { AddUnderBlockDeps, startAddUnderBlock } from "./add-under-block";
 import { AddUnderFileDeps, startAddUnderFile } from "./add-under-file";
+import { AddUnderModuleDeps, startAddUnderModule } from "./add-under-module";
 import { AddUnderHiddenNoticeSignals, noticeIfAddedRowHidden } from "./add-under-hidden-notice";
 import { SwapCandidate, SwapPickerModal, SwapSourceBlock, buildSwapCandidates, canSwapForAtlasFolder, canSwapNode } from "./swap";
 import { noticeIfLinksNotUpdated } from "./links-notice";
@@ -3140,8 +3141,9 @@ export class AtlasExplorerView extends ItemView {
 	}
 
 	/** PR-2.F1: the seam every "Add under" choice calls. PR-2.F2: Folder gets its real create-and-nest
-	 * flow here. PR-3.F1: Block does too. PR-3.F2: File does too. Module still forwards to the no-op in
-	 * `add-under.ts` until PR-3.F3. */
+	 * flow here. PR-3.F1: Block does too. PR-3.F2: File does too. PR-3.F3: Module does too — every
+	 * kind now has a real flow, so the no-op in `add-under.ts` is unreachable from here (kept only
+	 * as the shared type/menu-building module). */
 	private startAddUnder(kind: AddUnderKind, view: View, node: ViewNode): void {
 		if (kind === "folder") {
 			void this.runAddUnderFolder(view, node);
@@ -3153,6 +3155,10 @@ export class AtlasExplorerView extends ItemView {
 		}
 		if (kind === "file") {
 			void this.runAddUnderFile(view, node);
+			return;
+		}
+		if (kind === "module") {
+			void this.runAddUnderModule(view, node);
 			return;
 		}
 		startAddUnder(kind, view, node);
@@ -3258,6 +3264,56 @@ export class AtlasExplorerView extends ItemView {
 		};
 	}
 
+	/** PR-3.F3 (G3) / PR-2.F3 (G10): runs the Module add-under flow against the real `ViewsManager`
+	 * and this view's own selection state — `startAddUnderModule` creates the folder-plus-note,
+	 * nests it, expands the parent and selects the new row (never opens it) — then hands off to
+	 * the shared `noticeIfAddedRowHidden` helper the same way `runAddUnderFile` does. The new
+	 * module's display text is its own basename (its ref's `path`, which for a `folder` ref is
+	 * already the plain module name with no extension to strip, unlike File's `.md`). */
+	private async runAddUnderModule(view: View, node: ViewNode): Promise<void> {
+		const created = await startAddUnderModule(this.addUnderModuleDeps(), view.id, node.id);
+		if (!created) return;
+		const label = unitBasename(created);
+		const signals = this.addUnderHiddenSignals(view, node, created, label);
+		void this.render();
+		await noticeIfAddedRowHidden(created.id, label, node.label ?? unitBasename(node), {
+			render: () => this.awaitRenderSettled(),
+			getBucketListEl: () => this.bucketListEl,
+			...signals,
+		});
+	}
+
+	private addUnderModuleDeps(): AddUnderModuleDeps {
+		const { plugin } = this;
+		return {
+			app: plugin.app,
+			getPoolFolder: () => plugin.settings.poolFolder,
+			getExcludedFolders: () => plugin.settings.excludedFolders,
+			holdUnit: (path) => plugin.unitIndex.holdUnit(path),
+			getNode: (viewId, nodeId) => plugin.viewsManager.getNode(viewId, nodeId),
+			// Same live-label resolver as File's own deps (see its doc comment above).
+			getParentLabel: async (viewId, parentId) => {
+				const parentNode = plugin.viewsManager.getNode(viewId, parentId);
+				if (!parentNode) return "";
+				if (parentNode.type === "meta") return parentNode.label ?? "";
+				const view = plugin.viewsManager.getViews().find((v) => v.id === viewId);
+				if (!view) return parentNode.ref ? unitBasename(parentNode) : "";
+				const info = this.isOutsideManagedUnit(view, parentNode) ? this.resolveOutsideManagedRowInfo(parentNode.ref!) : await this.resolveRef(parentNode.ref!);
+				return info.text;
+			},
+			placeNewUnit: (viewId, ref, parentId) => plugin.viewsManager.placeNewUnit(viewId, ref, parentId),
+			expandParent: (viewId, parentId) => plugin.viewsManager.setNodeCollapsed(viewId, parentId, false),
+			// Same selection/anchor handling as File, Block and Folder (E5).
+			selectOnly: (nodeId) => {
+				this.selectedInboxRefKeys.clear();
+				this.selectedBucketNodeIds.clear();
+				this.selectedBucketNodeIds.add(nodeId);
+				this.selectionAnchor = nodeId;
+				this.selectionAnchorScope = "bucket";
+			},
+		};
+	}
+
 	private addUnderBlockDeps(): AddUnderBlockDeps {
 		const { plugin } = this;
 		return {
@@ -3296,9 +3352,9 @@ export class AtlasExplorerView extends ItemView {
 	 * itself fails `matchesFilter`, since a matching row bypasses hide and truncate the same way it
 	 * does today (never a blanket "any filter active" check). The caller computes that display text
 	 * itself (Block: always `getFreeBlockDisplayTextFromContent`'s empty-content fallback,
-	 * `"(empty block)"`; File: the new note's own basename) and passes it in as `displayText` —
-	 * Module (PR-3.F3) will do the same once it's wired to this same helper. Folder's own call site
-	 * never needs a real value here, since its `newNode.type` is always `"meta"`. */
+	 * `"(empty block)"`; File: the new note's own basename; Module, PR-3.F3: the new module's own
+	 * basename, its ref's `path`) and passes it in as `displayText`. Folder's own call site never
+	 * needs a real value here, since its `newNode.type` is always `"meta"`. */
 	private addUnderHiddenSignals(view: View, parentNode: ViewNode, newNode: ViewNode, displayText = ""): AddUnderHiddenNoticeSignals {
 		const filterActive = newNode.type === "unit" && !this.matchesFilter(displayText);
 		const liveParent = this.plugin.viewsManager.getNode(view.id, parentNode.id);

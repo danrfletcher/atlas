@@ -80,9 +80,14 @@ export function addAddUnderItem(menu: Menu, evt: Pick<MouseEvent, "clientX" | "c
 	);
 }
 
-/** PR-2.F1: the seam every "Add under" choice calls, with the clicked row's own `view`/`node`. Left
- * a no-op here — no dialog, no Notice, no disk or tree change — until PR-2.F2 (Folder) and
- * PR-3.F1-F3 (Block/File/Module) fill it in with the real create-and-nest flow for each kind. */
+/** PR-2.F1: the seam every "Add under" choice calls, with the clicked row's own `view`/`node`.
+ * PR-2.F2 (Folder) and PR-3.F1-F3 (Block/File/Module) each gave their kind a real create-and-nest
+ * flow, but as a method on `ExplorerView` (`runAddUnderFolder`/`runAddUnderBlock`/
+ * `runAddUnderFile`/`runAddUnderModule`) that intercepts its kind before `ExplorerView`'s own
+ * `startAddUnder` wrapper ever falls through to this one — every kind is handled before it gets
+ * here, so this no-op is now unreachable in practice. Left in place only as the shared
+ * type/menu-building module's own no-op fallback, never removed since a future kind could still
+ * land here before it gets its own real flow. */
 export function startAddUnder(kind: AddUnderKind, view: View, node: ViewNode): void {
-	// Intentional no-op (PR-2.F1 scope: menu entry, eligibility and placement only).
+	// Intentional no-op — unreachable for every kind that currently exists (see above).
 }

@@ -396,6 +396,62 @@ describe("PR-3.F2 — Add under… > File calls startAddUnder(\"file\", view, no
 	});
 });
 
+// PR-3.F3: same pattern as PR-3.F2's File block above — the chooser itself is shared, so this only
+// needs to prove the "Module" entry reaches the dispatcher with the clicked row's own view/node
+// (never the selection). The real create-and-nest behaviour behind that call is
+// `add-under-module.test.ts`'s job.
+describe("PR-3.F3 — Add under… > Module calls startAddUnder(\"module\", view, node) with the clicked row", () => {
+	function fakeHost() {
+		return {
+			plugin: {
+				app: new App(),
+				unitIndex: { getUnits: () => [{ type: "root-file", path: "U.md" }] },
+				viewsManager: { getNode: () => null, managedRowFilterState: () => "shown" },
+			},
+			startAddUnder: vi.fn(),
+		};
+	}
+
+	function chooseModule(built: Menu): void {
+		built.items.find((i) => i.title === "Add under…")!.clickHandler!();
+		const chooser = Menu.shownAtPosition[Menu.shownAtPosition.length - 1];
+		chooser.items.find((i) => i.title === "Module")!.clickHandler!();
+	}
+
+	it("on a unit row", () => {
+		const node: ViewNode = { id: "u", type: "unit", ref: { kind: "file", path: "U.md" }, children: [] };
+		const fake = fakeHost();
+		let built: Menu | undefined;
+		const show = vi.spyOn(Menu.prototype, "showAtMouseEvent").mockImplementation(function (this: Menu) {
+			built = this;
+		});
+		(AtlasExplorerView.prototype as unknown as { showUnitMenu: (...a: unknown[]) => void }).showUnitMenu.call(
+			fake,
+			new MouseEvent("contextmenu"),
+			{ kind: "file", path: "U.md" },
+			view,
+			node,
+			"U"
+		);
+		show.mockRestore();
+		chooseModule(built!);
+		expect(fake.startAddUnder).toHaveBeenCalledWith("module", view, node);
+	});
+
+	it("on a Folder row", () => {
+		const node: ViewNode = { id: "m", type: "meta", label: "Folder", children: [] };
+		const fake = fakeHost();
+		let built: Menu | undefined;
+		const show = vi.spyOn(Menu.prototype, "showAtMouseEvent").mockImplementation(function (this: Menu) {
+			built = this;
+		});
+		(AtlasExplorerView.prototype as unknown as { showMetaFolderMenu: (...a: unknown[]) => void }).showMetaFolderMenu.call(fake, new MouseEvent("contextmenu"), node, view);
+		show.mockRestore();
+		chooseModule(built!);
+		expect(fake.startAddUnder).toHaveBeenCalledWith("module", view, node);
+	});
+});
+
 // PR-2.F3 (G10): the real Folder add-under flow against the real `ViewsManager`. R1 fix: a Folder
 // (meta) row renders unconditionally in `renderNode`'s meta branch — only a unit row returns early
 // on `!matchesFilter` — so an active filter can never be the reason a new Folder's row fails to
