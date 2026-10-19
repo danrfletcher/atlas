@@ -1,8 +1,9 @@
-import type { Vault } from "obsidian";
+import type { MetadataCache, TAbstractFile, Vault } from "obsidian";
 import { TFile, TFolder } from "obsidian";
 import { McpTool } from "./mcp-protocol";
 import { resolveViewForWrite, vaultIdentity, viewIdentity } from "./mcp-status-tools";
-import { UnitRef } from "./types";
+import { UnitIndex } from "./unit-index";
+import { UnitRef, View, ViewNode, nodeHoldsLiveDataSource, unitRefsEqual, unitToRef } from "./types";
 import { ViewsManager } from "./views";
 
 /**
@@ -32,6 +33,24 @@ export interface McpArrangeToolsContext {
 	getVaultPath: () => string;
 	/** G4: the one piece of real vault knowledge `add_node` needs — read-only, never a write method. */
 	getVault: () => Pick<Vault, "getAbstractFileByPath">;
+	/** R4 review: `add_node` must validate a resolved path against the plugin's own unit
+	 * classification, not just "exists on disk" (`resolveVaultPathToRef` only ever checks the
+	 * latter). `isExcludedPath`/`isInterfaceNoteFile` are the same rules `UnitIndex` itself applies
+	 * when deciding what counts as a unit at all. */
+	getUnitIndex: () => Pick<UnitIndex, "getUnits" | "isExcludedPath" | "isInterfaceNoteFile">;
+	/** R4 review: validates a block reference's subpath against the file's own heading/block cache,
+	 * so a `#subpath` that doesn't actually exist in the file is refused rather than placed as a
+	 * row that only ever renders "(missing)". */
+	getMetadataCache: () => Pick<MetadataCache, "getFileCache">;
+	/** R4 review: promotes a module-internal file/folder/block that merely hasn't been promoted yet
+	 * — the exact same thing the UI's own "Promote and place in view…" does (`addManualPromotion` +
+	 * persist), never touching disk. */
+	promoteUnit: (ref: UnitRef) => void;
+	/** R3 review: clears a removed node's device-local source state (its `ApiHeadersStore` headers
+	 * and/or `FolderSourcePathStore` Outside-Vault path) — the same thing the explorer's own
+	 * "Remove from view" does for a sourced row, so a token or Outside path never lingers under a
+	 * dead node id. */
+	forgetDeviceLocalSourceState: (nodeId: string) => void;
 }
 
 /** E3/E9-style: a node id argument (parent or target) that doesn't resolve in the named view. */
@@ -40,6 +59,9 @@ export class McpArrangeNodeNotFoundError extends Error {}
 export class McpUnitNotFoundError extends Error {}
 /** G4: a vault path that does exist, but not as the kind the caller said (or implied) it was. */
 export class McpWrongUnitKindError extends Error {}
+/** R5 review: an Outside-Vault-managed row named as a target or parent — the UI's own drag-and-drop
+ * never drags one of these rows and never accepts a drop onto one, and neither can these tools. */
+export class McpOutsideManagedError extends Error {}
 
 function requireString(args: Record<string, unknown>, key: string, toolName: string): string {
 	const value = args[key];
@@ -90,11 +112,20 @@ function optionalKindHint(args: Record<string, unknown>, toolName: string): "fil
  * a `parentNodeId`/`newParentId` that doesn't resolve in `view` — `ViewsManager.placeUnit`/
  * `addMetaFolder` would otherwise silently fall back to the view root for exactly this case
  * (`parentId ? this.findNode(...) : null` — a *found* `null` and a *not-found* lookup both take the
- * "no parent" branch), which is the specific silent-misplacement bug this check exists to prevent. */
+ * "no parent" branch), which is the specific silent-misplacement bug this check exists to prevent.
+ *
+ * R5 review: also refuses a parent that *does* exist but is an Outside-Vault-managed row — the
+ * explorer's own drag-and-drop never accepts a drop onto one of these, and neither can add_node,
+ * move_node or create_folder. */
 function requireParentExists(viewsManager: ViewsManager, view: { id: string; name: string }, parentNodeId: string | null, toolName: string, argName: string): void {
 	if (parentNodeId === null) return;
 	if (!viewsManager.getNode(view.id, parentNodeId)) {
 		throw new McpArrangeNodeNotFoundError(`${toolName}: no node with id "${parentNodeId}" (the "${argName}" argument) was found in view "${view.name}".`);
+	}
+	if (viewsManager.isOutsideManagedNode(view.id, parentNodeId)) {
+		throw new McpOutsideManagedError(
+			`${toolName}: node "${parentNodeId}" (the "${argName}" argument) is an Outside-Vault-managed row in view "${view.name}" — the UI never nests anything onto one of these, and neither can ${toolName}.`
+		);
 	}
 }
 
@@ -111,6 +142,11 @@ function splitBlockPath(path: string): { base: string; subpath: string } | null 
  * that resolves to nothing at all, or `McpWrongUnitKindError` for a path that does resolve but not
  * as `kindHint` says (when given) — e.g. `kind: "file"` against a path that is actually a folder,
  * or a `path#subpath` block reference whose base path is a folder rather than a file.
+ *
+ * Deliberately stops at "does this exist on disk" — it never decides whether the result is an
+ * actual *Atlas unit* (a vault-root folder, a promoted/linked file, folder or block). That decision
+ * is `ensurePlaceableUnit`'s job (R4 review), run separately so this function's own existing tests
+ * and contract (a bare `UnitRef`, nothing else) stay unchanged.
  */
 export function resolveVaultPathToRef(vault: Pick<Vault, "getAbstractFileByPath">, path: string, kindHint?: "file" | "folder" | "block"): UnitRef {
 	const split = splitBlockPath(path);
@@ -135,20 +171,99 @@ export function resolveVaultPathToRef(vault: Pick<Vault, "getAbstractFileByPath"
 	return actualKind === "folder" ? { kind: "folder", path: basePath } : { kind: "file", path: basePath };
 }
 
+function isKnownUnit(unitIndex: Pick<UnitIndex, "getUnits">, ref: UnitRef): boolean {
+	return unitIndex.getUnits().some((unit) => unitRefsEqual(unitToRef(unit), ref));
+}
+
+/** R4 review: a block reference's subpath actually has to resolve against the file's own cached
+ * headings/blocks — unlike a resolved link (which Atlas already trusts without re-checking the
+ * subpath, see `UnitIndex.computePromotions`), an agent-typed `#subpath` has no link behind it to
+ * have already been resolved once. `^id` block references are matched the same lower-cased way
+ * `display-text.ts` matches them; a heading reference is matched by trimmed, case-insensitive text,
+ * the same tolerance Obsidian's own heading-link resolution applies. */
+function blockSubpathExists(metadataCache: Pick<MetadataCache, "getFileCache">, file: TFile, subpath: string): boolean {
+	const cache = metadataCache.getFileCache(file);
+	if (!cache) return false;
+	if (subpath.startsWith("^")) {
+		return Boolean(cache.blocks?.[subpath.slice(1).toLowerCase()]);
+	}
+	const needle = subpath.trim().toLowerCase();
+	return Boolean(cache.headings?.some((heading) => heading.heading.trim().toLowerCase() === needle));
+}
+
+/**
+ * R4 review: decides whether a path `add_node` just resolved to `ref` (via `resolveVaultPathToRef`)
+ * is actually placeable — "exists on disk" is not the same thing as "is an Atlas unit", and placing
+ * the latter renders a permanently-greyed "(missing)" row (`ExplorerView.resolveRef` finds no unit
+ * for it) rather than failing up front. Three outcomes:
+ *   - `ref` is already a recognised Atlas unit (`UnitIndex.getUnits()`) — placed as is, same as
+ *     before this review fix.
+ *   - `ref` names a module-internal file/folder that merely hasn't been promoted yet, or a block
+ *     reference whose subpath genuinely resolves to a heading/block in its file — promoted first
+ *     (`ctx.promoteUnit`, the same manual promotion "Promote and place in view…" performs:
+ *     `UnitIndex.addManualPromotion` + persist, never touching disk) and then placed.
+ *   - `ref` is one of the cases the UI's own "Promote and place" can never reach in the first
+ *     place — the vault root, a folder's own interface note (AGENTS.md: not a unit ref), a path
+ *     inside an excluded folder, or a block reference whose subpath doesn't exist — refused
+ *     outright.
+ */
+function ensurePlaceableUnit(ctx: McpArrangeToolsContext, file: TAbstractFile, ref: UnitRef): void {
+	const unitIndex = ctx.getUnitIndex();
+	if (isKnownUnit(unitIndex, ref)) return;
+
+	if (ref.kind === "block") {
+		if (!(file instanceof TFile) || !blockSubpathExists(ctx.getMetadataCache(), file, ref.subpath)) {
+			throw new McpUnitNotFoundError(
+				`add_node: "${ref.path}#${ref.subpath}" does not resolve to an existing heading or block in that file.`
+			);
+		}
+		ctx.promoteUnit(ref);
+		return;
+	}
+
+	if (file instanceof TFolder && file.isRoot()) {
+		throw new McpWrongUnitKindError(`add_node: the vault root is not a vault unit.`);
+	}
+	if (file instanceof TFile && unitIndex.isInterfaceNoteFile(file)) {
+		throw new McpWrongUnitKindError(
+			`add_node: "${ref.path}" is its folder's interface note, not a unit of its own — add_node the containing module (folder) instead.`
+		);
+	}
+	if (unitIndex.isExcludedPath(ref.path)) {
+		throw new McpWrongUnitKindError(`add_node: "${ref.path}" is inside an excluded folder and is never a vault unit.`);
+	}
+
+	// Not yet a recognised unit, but eligible: the same manual promotion the UI's own "Promote and
+	// place in view…" (Module Contents modal) performs for exactly this case — never touches disk.
+	ctx.promoteUnit(ref);
+}
+
+/** The live children array a node currently sits in — `view.root` for the view root, or the live
+ * `ViewNode.children` array of whichever node `parentId` names. Used only to read back a node's
+ * *actual* post-move position (R7 review), never to mutate. */
+function childrenOf(viewsManager: ViewsManager, view: View, parentId: string | null): ViewNode[] {
+	if (parentId === null) return view.root;
+	return viewsManager.getNode(view.id, parentId)?.children ?? view.root;
+}
+
 const PARENT_NODE_ID_SCHEMA = { type: ["string", "null"] } as const;
 
 /** G4/GP1/GP3/E9: places an existing vault unit (file, block or module/folder) under a parent node
  * (or the view root) in a named view. Never creates anything — a path absent from the vault, or a
- * `parentNodeId` absent from the view, is refused outright (E9 and its follow-on), and
- * `ViewsManager.placeUnit`'s own existing "move it, don't duplicate" behaviour is unchanged (the
- * ref is resolved and handed to it exactly as every other caller of `placeUnit` already does). */
+ * `parentNodeId` absent from the view, is refused outright (E9 and its follow-on). R4 review:
+ * additionally refused if the path exists on disk but isn't an Atlas unit and isn't eligible for
+ * promotion (`ensurePlaceableUnit`). R1 review: refused if placing would create a cycle — `ref` is
+ * already placed as some node X and `parentNodeId` names X itself or one of X's descendants, which
+ * would otherwise splice X out of the tree and lose it. R2 review: the returned `nodeId` is the
+ * node `placeUnit` itself just moved or created, never a second, possibly-wrong `findUnitNode`
+ * walk over a view that may hold more than one placement of the same ref (PR 13). */
 export function createAddNodeTool(ctx: McpArrangeToolsContext): McpTool {
 	return {
 		name: "add_node",
 		description:
 			'Places an existing vault unit (file, block or module/folder) under a parent node (or the view root when "parentNodeId" is omitted/null) in a named view. ' +
-			'"path" must already exist in the vault — create it with the Obsidian CLI first; add_node never creates, renames or moves a real file. "kind" ("file"/"folder"/"block") ' +
-			"is an optional hint that is checked against the path's actual kind, never trusted blindly.",
+			'"path" must already exist in the vault as an actual Atlas unit (or be eligible for automatic promotion, like a module-internal file) — create it with the Obsidian CLI ' +
+			'first; add_node never creates, renames or moves a real file. "kind" ("file"/"folder"/"block") is an optional hint that is checked against the path\'s actual kind, never trusted blindly.',
 		inputSchema: {
 			type: "object",
 			properties: {
@@ -169,13 +284,21 @@ export function createAddNodeTool(ctx: McpArrangeToolsContext): McpTool {
 			requireParentExists(viewsManager, view, parentNodeId, "add_node", "parentNodeId");
 
 			const ref = resolveVaultPathToRef(ctx.getVault(), path, kindHint);
-			viewsManager.placeUnit(view.id, ref, parentNodeId);
-			const nodeId = viewsManager.getNodeIdForRef(view.id, ref);
-			if (!nodeId) {
-				throw new Error(`add_node: placement into view "${view.name}" succeeded but the new node could not be found afterward — please report this.`);
+			const file = ctx.getVault().getAbstractFileByPath(ref.path);
+			if (!file) {
+				// Unreachable in practice — resolveVaultPathToRef above just resolved this same path.
+				throw new McpUnitNotFoundError(`add_node: "${ref.path}" could not be re-resolved — please report this.`);
+			}
+			ensurePlaceableUnit(ctx, file, ref);
+
+			const node = viewsManager.placeUnit(view.id, ref, parentNodeId);
+			if (!node) {
+				throw new Error(
+					`add_node: "${path}" is already placed in view "${view.name}" at or above "${parentNodeId}" — placing it there would nest it inside itself.`
+				);
 			}
 
-			return { vault: vaultIdentity(ctx), view: viewIdentity(view), nodeId, ref, parentNodeId };
+			return { vault: vaultIdentity(ctx), view: viewIdentity(view), nodeId: node.id, ref, parentNodeId };
 		},
 	};
 }
@@ -184,14 +307,18 @@ export function createAddNodeTool(ctx: McpArrangeToolsContext): McpTool {
  * `ViewsManager.moveNode` — arrangement only, never the drag-onto-module-icon disk move the
  * Obsidian UI offers elsewhere. An unknown `nodeId`/`newParentId` is refused as "not found" before
  * `moveNode` is even called (so the two cases get distinct messages); once both are confirmed to
- * exist, a `false` return from `moveNode` can only mean its own self-or-descendant guard fired. */
+ * exist, a `false` return from `moveNode` can only mean its own self-or-descendant guard fired.
+ * R5 review: `nodeId` itself is refused up front if it names an Outside-Vault-managed row — the
+ * explorer's own drag-and-drop never drags one of these. R7 review: the reply's `index` is the
+ * node's actual position in its new parent after the move, not the (possibly out-of-range or
+ * sentinel `Number.MAX_SAFE_INTEGER`) value the caller asked for. */
 export function createMoveNodeTool(ctx: McpArrangeToolsContext): McpTool {
 	return {
 		name: "move_node",
 		description:
 			'Reparents or reorders an existing node (unit or meta/Atlas-only folder) within one view. "newParentId" (optional, null/omitted = view root) and "index" ' +
 			'(optional, omitted = append at the end) match ViewsManager.moveNode\'s own semantics, including its out-of-range index clamp. Refuses moving a node into itself ' +
-			"or its own descendant. Never touches the filesystem.",
+			"or its own descendant, and refuses an Outside-Vault-managed row as either the node or its new parent. Never touches the filesystem.",
 		inputSchema: {
 			type: "object",
 			properties: {
@@ -213,6 +340,11 @@ export function createMoveNodeTool(ctx: McpArrangeToolsContext): McpTool {
 			if (!viewsManager.getNode(view.id, nodeId)) {
 				throw new McpArrangeNodeNotFoundError(`move_node: no node with id "${nodeId}" was found in view "${view.name}".`);
 			}
+			if (viewsManager.isOutsideManagedNode(view.id, nodeId)) {
+				throw new McpOutsideManagedError(
+					`move_node: node "${nodeId}" in view "${view.name}" is an Outside-Vault-managed row — the UI never drags one of these, and neither can move_node.`
+				);
+			}
 			requireParentExists(viewsManager, view, newParentId, "move_node", "newParentId");
 
 			const moved = viewsManager.moveNode(view.id, nodeId, newParentId, index);
@@ -221,6 +353,7 @@ export function createMoveNodeTool(ctx: McpArrangeToolsContext): McpTool {
 			}
 
 			const node = viewsManager.getNode(view.id, nodeId)!;
+			const actualIndex = childrenOf(viewsManager, view, newParentId).indexOf(node);
 			return {
 				vault: vaultIdentity(ctx),
 				view: viewIdentity(view),
@@ -229,7 +362,7 @@ export function createMoveNodeTool(ctx: McpArrangeToolsContext): McpTool {
 				ref: node.ref ?? null,
 				label: node.label ?? null,
 				parentNodeId: newParentId,
-				index,
+				index: actualIndex,
 			};
 		},
 	};
@@ -240,13 +373,20 @@ export function createMoveNodeTool(ctx: McpArrangeToolsContext): McpTool {
  * `unplaceNode`'s own `promotableChildren` filter for a Folder-source-owner's managed children. The
  * reply's `liftedChildIds` is only the subset of the removed node's own direct children that are
  * still findable in the view immediately afterward — a managed child `promotableChildren` dropped
- * along with its Outside-Vault owner is correctly absent from it, never misreported as "lifted". */
+ * along with its Outside-Vault owner is correctly absent from it, never misreported as "lifted".
+ *
+ * R3 review: also matches the UI's "Remove from view" in clearing a sourced node's device-local
+ * state (its `ApiHeadersStore` headers and/or `FolderSourcePathStore` Outside-Vault path) before
+ * unplacing it — otherwise a removed API/CSV/table/Folder-sourced node's bearer token or Outside
+ * path would linger on the device under a dead node id. The reply's `sourceRemoved` says whether
+ * this happened, standing in for the UI's own confirmation dialog for a sourced node. */
 export function createRemoveNodeTool(ctx: McpArrangeToolsContext): McpTool {
 	return {
 		name: "remove_node",
 		description:
 			'Removes exactly one node instance by id from a view. Its children lift up one level into its old slot — matching "Remove from view" in the UI — never discarded ' +
-			"silently. Never touches the filesystem.",
+			'silently. If the node holds a live data source (API, CSV, Markdown-table or Folder), its device-local headers and/or Outside-Vault path are cleared too, same as ' +
+			'the UI\'s own "Remove from view" — the reply\'s "sourceRemoved" says whether this happened. Never touches the filesystem.',
 		inputSchema: {
 			type: "object",
 			properties: { view: { type: "string" }, nodeId: { type: "string" } },
@@ -263,11 +403,13 @@ export function createRemoveNodeTool(ctx: McpArrangeToolsContext): McpTool {
 				throw new McpArrangeNodeNotFoundError(`remove_node: no node with id "${nodeId}" was found in view "${view.name}".`);
 			}
 			const directChildIds = node.children.map((c) => c.id);
+			const sourceRemoved = nodeHoldsLiveDataSource(node);
+			if (sourceRemoved) ctx.forgetDeviceLocalSourceState(nodeId);
 
 			viewsManager.unplaceNode(view.id, nodeId);
 
 			const liftedChildIds = directChildIds.filter((id) => viewsManager.getNode(view.id, id) !== null);
-			return { vault: vaultIdentity(ctx), view: viewIdentity(view), removedNodeId: nodeId, liftedChildIds };
+			return { vault: vaultIdentity(ctx), view: viewIdentity(view), removedNodeId: nodeId, liftedChildIds, sourceRemoved };
 		},
 	};
 }
@@ -277,13 +419,14 @@ export function createRemoveNodeTool(ctx: McpArrangeToolsContext): McpTool {
  * disk — a meta folder is a label, not a real folder. An empty/whitespace-only label is refused
  * before `addMetaFolder` is even called, rather than silently saved as its own "New folder"
  * fallback (which exists for a different caller — the UI's own "+ folder" button, which has no
- * label yet to validate against). */
+ * label yet to validate against). R5 review: `parentNodeId` is refused the same way `add_node`'s
+ * is if it names an Outside-Vault-managed row. */
 export function createCreateFolderTool(ctx: McpArrangeToolsContext): McpTool {
 	return {
 		name: "create_folder",
 		description:
 			'Creates an Atlas-only meta folder (not a real folder on disk) under a named parent node (or the view root when "parentNodeId" is omitted/null), and returns its ' +
-			"new node id. The label must be non-empty after trimming.",
+			"new node id. The label must be non-empty after trimming. Refuses an Outside-Vault-managed row as the parent.",
 		inputSchema: {
 			type: "object",
 			properties: { view: { type: "string" }, label: { type: "string" }, parentNodeId: PARENT_NODE_ID_SCHEMA },
