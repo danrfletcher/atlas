@@ -213,21 +213,24 @@ describe("E1 — the same endpoint rejects a missing or wrong token with HTTP 40
 		expect(response.status).toBe(401);
 	});
 
-	it("R6/F6: a wrong-token 401 never logs the attempted or real token through console.*", async () => {
-		const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+	it("R6/F6: a wrong-token 401 never logs the attempted or real token through any console method", async () => {
+		const consoleMethods = ["log", "info", "warn", "debug", "error"] as const;
+		const spies = consoleMethods.map((method) => vi.spyOn(console, method).mockImplementation(() => {}));
 		try {
 			const { port, token } = await startPluginBackedServer();
 			const wrongToken = "wrong-but-token-shaped-attempt";
 
 			await postJson(port, wrongToken, { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "atlas_status" } });
 
-			for (const call of consoleSpy.mock.calls) {
-				const text = call.map((arg: unknown) => (typeof arg === "string" ? arg : JSON.stringify(arg))).join(" ");
-				expect(text).not.toContain(token);
-				expect(text).not.toContain(wrongToken);
+			for (const spy of spies) {
+				for (const call of spy.mock.calls) {
+					const text = call.map((arg: unknown) => (typeof arg === "string" ? arg : JSON.stringify(arg))).join(" ");
+					expect(text).not.toContain(token);
+					expect(text).not.toContain(wrongToken);
+				}
 			}
 		} finally {
-			consoleSpy.mockRestore();
+			for (const spy of spies) spy.mockRestore();
 		}
 	});
 });
@@ -245,6 +248,29 @@ describe("G1 — regenerate() rejects the old token on the very next request", (
 
 		const newTokenResponse = await postJson(port, newToken, { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "atlas_status" } });
 		expect(newTokenResponse.status).toBe(200);
+	});
+
+	it("R14/F6: regenerate(), and the 401 it causes for the old token, never log either token through any console method", async () => {
+		const consoleMethods = ["log", "info", "warn", "debug", "error"] as const;
+		const spies = consoleMethods.map((method) => vi.spyOn(console, method).mockImplementation(() => {}));
+		try {
+			const { plugin, port, token: oldToken } = await startPluginBackedServer();
+			const tokenStore = plugin.mcpTokenStore as { regenerate(): string };
+			const newToken = tokenStore.regenerate();
+
+			await postJson(port, oldToken, { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "atlas_status" } });
+			await postJson(port, newToken, { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "atlas_status" } });
+
+			for (const spy of spies) {
+				for (const call of spy.mock.calls) {
+					const text = call.map((arg: unknown) => (typeof arg === "string" ? arg : JSON.stringify(arg))).join(" ");
+					expect(text).not.toContain(oldToken);
+					expect(text).not.toContain(newToken);
+				}
+			}
+		} finally {
+			for (const spy of spies) spy.mockRestore();
+		}
 	});
 });
 
