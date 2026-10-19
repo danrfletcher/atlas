@@ -257,6 +257,13 @@ export default class AtlasPlugin extends Plugin {
 			getVaultName: () => this.app.vault.getName(),
 			getVaultPath: () => this.getVaultBasePath(),
 			getVault: () => this.app.vault,
+			getUnitIndex: () => this.unitIndex,
+			getMetadataCache: () => this.app.metadataCache,
+			promoteUnit: (ref: UnitRef) => {
+				this.unitIndex.addManualPromotion(ref);
+				void this.saveManualPromotions();
+			},
+			forgetDeviceLocalSourceState: (nodeId: string) => this.forgetDeviceLocalSourceState(nodeId),
 		};
 		tools.set("add_node", createAddNodeTool(arrangeToolsContext));
 		tools.set("move_node", createMoveNodeTool(arrangeToolsContext));
@@ -499,6 +506,15 @@ export default class AtlasPlugin extends Plugin {
 
 	async saveManualPromotions(): Promise<void> {
 		await this.persistNow();
+	}
+
+	/** PR-1 (G15e), shared by the explorer's own "Remove from view" and PR-3.F1's `remove_node` MCP
+	 * tool: drops a node's device-local source state — its headers (`ApiHeadersStore`) and its
+	 * Outside-Vault path (`FolderSourcePathStore`). Both are keyed by node id and never synced. One
+	 * place, so no caller that deletes a sourced node can forget one of the two. */
+	forgetDeviceLocalSourceState(nodeId: string): void {
+		this.apiHeadersStore.delete(nodeId);
+		this.folderSourcePathStore.delete(nodeId);
 	}
 
 	/** F1 AC: changing the pool folder re-indexes; free blocks left behind in the old folder are

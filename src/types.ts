@@ -259,6 +259,15 @@ export interface ViewNode extends StatusGovernance {
 	markdownTableSource?: MarkdownTableSourceConfig;
 }
 
+/** PR-1 (G15), shared with PR-3.F1's `remove_node` MCP tool: true when a node holds a live data
+ * source — its device-local headers (`ApiHeadersStore`) and/or Outside-Vault path
+ * (`FolderSourcePathStore`) are what a removal would otherwise leave behind on this device. A
+ * single source of truth so the explorer's own "Remove from view" and the MCP's `remove_node`
+ * can never drift on which nodes count. */
+export function nodeHoldsLiveDataSource(node: ViewNode): boolean {
+	return Boolean(node.apiSource || node.csvSource || node.markdownTableSource || node.folderSource);
+}
+
 /** A single request header, e.g. `Authorization: Bearer …`. Never persisted in `data.json` — see
  * `ApiHeadersStore` (G13: device-local only). */
 export interface ApiHeader {

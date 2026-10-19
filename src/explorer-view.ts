@@ -1,7 +1,7 @@
 import { App, FuzzyMatch, FuzzySuggestModal, ItemView, MarkdownView, Menu, Modal, Notice, Platform, TAbstractFile, TFile, TFolder, WorkspaceLeaf, renderResults, setIcon, setTooltip } from "obsidian";
 import type AtlasPlugin from "./main";
 import type { AtlasSettings } from "./settings";
-import { ApiItemState, PLACEHOLDER_ROW_KIND, StatusGovernance, TruncatedStatusConfig, Unit, UnitRef, View, ViewNode, parseUnitRefKey, unitRefKey, unitToRef } from "./types";
+import { ApiItemState, PLACEHOLDER_ROW_KIND, StatusGovernance, TruncatedStatusConfig, Unit, UnitRef, View, ViewNode, nodeHoldsLiveDataSource, parseUnitRefKey, unitRefKey, unitToRef } from "./types";
 import { matchesActiveFile } from "./active-highlight";
 import {
 	ApiSourceIdPair,
@@ -3292,17 +3292,19 @@ export class AtlasExplorerView extends ItemView {
 
 	/** PR-1 (G15): true when a node holds a live data source. Its device-local headers and Outside path
 	 * are what a removal would otherwise leave behind on this device. Static rows left by "Remove data
-	 * source" don't count — that action already cleared the headers. */
+	 * source" don't count — that action already cleared the headers. Delegates to the shared
+	 * `nodeHoldsLiveDataSource` (types.ts) so this and PR-3.F1's `remove_node` MCP tool can never drift
+	 * on which nodes count. */
 	private holdsLiveDataSource(node: ViewNode): boolean {
-		return Boolean(node.apiSource || node.csvSource || node.markdownTableSource || node.folderSource);
+		return nodeHoldsLiveDataSource(node);
 	}
 
 	/** PR-1 (G15e): drops a node's device-local source state — its headers (`ApiHeadersStore`) and its
 	 * Outside-Vault path (`FolderSourcePathStore`). Both are keyed by node id and never synced. Shared
-	 * by every path that deletes a sourced node, so none of them can forget one of the two. */
+	 * by every path that deletes a sourced node, so none of them can forget one of the two. Delegates to
+	 * `AtlasPlugin.forgetDeviceLocalSourceState`, the same method PR-3.F1's `remove_node` MCP tool calls. */
 	private forgetDeviceLocalSourceState(nodeId: string): void {
-		this.plugin.apiHeadersStore.delete(nodeId);
-		this.plugin.folderSourcePathStore.delete(nodeId);
+		this.plugin.forgetDeviceLocalSourceState(nodeId);
 	}
 
 	/** PR-1 (G15a/b): the one "remove these units from the view" path, used by Remove from view, the
