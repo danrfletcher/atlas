@@ -45,7 +45,7 @@ function setup(root: ViewNode[] = tree(), extraRootFiles: string[] = []) {
 	app.vault.on("create", (f) => index.onVaultCreate(f));
 	app.vault.on("delete", (f) => index.onVaultDelete(f.path));
 	const selection = new Set<string>();
-	const placeUnit = vi.fn((viewId: string, ref: UnitRef, parentId: string | null) => vm.placeUnit(viewId, ref, parentId));
+	const placeNewUnit = vi.fn((viewId: string, ref: UnitRef, parentId: string | null) => vm.placeNewUnit(viewId, ref, parentId));
 	const getParentLabel = vi.fn(async (viewId: string, parentId: string) => {
 		const node = vm.getNode(viewId, parentId);
 		if (!node) return "";
@@ -58,14 +58,14 @@ function setup(root: ViewNode[] = tree(), extraRootFiles: string[] = []) {
 		holdUnit: (path: string) => index.holdUnit(path),
 		getNode: (viewId, nodeId) => vm.getNode(viewId, nodeId),
 		getParentLabel: (viewId, parentId) => getParentLabel(viewId, parentId),
-		placeUnit: (viewId, ref, parentId) => placeUnit(viewId, ref, parentId),
+		placeNewUnit: (viewId, ref, parentId) => placeNewUnit(viewId, ref, parentId),
 		expandParent: (viewId, parentId) => vm.setNodeCollapsed(viewId, parentId, false),
 		selectOnly: (nodeId) => {
 			selection.clear();
 			selection.add(nodeId);
 		},
 	};
-	return { app, vm, index, deps, selection, placeUnit, getParentLabel };
+	return { app, vm, index, deps, selection, placeNewUnit, getParentLabel };
 }
 
 /** A lightweight `AddUnderFileDeps` for tests that only care about the dialog's own options (title
@@ -78,7 +78,7 @@ function minimalDeps(overrides: Partial<AddUnderFileDeps> = {}): AddUnderFileDep
 		holdUnit: () => () => {},
 		getNode: () => ({ id: "p", type: "meta", children: [] }) as ViewNode,
 		getParentLabel: async () => "Parent",
-		placeUnit: () => null,
+		placeNewUnit: () => null,
 		expandParent: () => {},
 		selectOnly: () => {},
 		...overrides,
@@ -123,7 +123,7 @@ describe("startAddUnderFile — G2/GP3-GP5 happy path", () => {
 
 		const parent = s.vm.getNode(VIEW_ID, "quarry-drones")!;
 		expect(parent.children.at(-1)!.id).toBe(created!.id);
-		expect(s.placeUnit).toHaveBeenCalledWith(VIEW_ID, { kind: "file", path }, "quarry-drones");
+		expect(s.placeNewUnit).toHaveBeenCalledWith(VIEW_ID, { kind: "file", path }, "quarry-drones");
 		expect(parent.collapsed).toBe(false);
 		expect([...s.selection]).toEqual([created!.id]);
 
@@ -155,7 +155,7 @@ describe("startAddUnderFile — G8/E1 cancel", () => {
 
 		expect(result).toBeNull();
 		expect(createSpy).not.toHaveBeenCalled();
-		expect(s.placeUnit).not.toHaveBeenCalled();
+		expect(s.placeNewUnit).not.toHaveBeenCalled();
 		expect(s.vm.getNode(VIEW_ID, "projects")!.children).toHaveLength(2);
 		expect(s.selection.size).toBe(0);
 		expect(Notice.instances).toHaveLength(0);
@@ -221,6 +221,56 @@ describe("startAddUnderFile — F5 no moves, only one vault.create", () => {
 		const after = s.app.vault.getFiles().map((f) => f.path).sort();
 		expect(after).toEqual([...before, "Quarry Notes.md"].sort());
 		expect(s.app.vault.getAbstractFileByPath("quarry-drones.md")).not.toBeNull();
+	});
+});
+
+describe("startAddUnderFile — R1 never relocates an existing node sharing the new ref", () => {
+	it("a missing row with children of its own, elsewhere in the view, stays exactly where it is; a fresh node is nested instead", async () => {
+		const missing = unit("quarry-missing", file("Quarry Notes.md"), { children: [unit("old", file("Old.md"))] });
+		const root: ViewNode[] = [meta("other", "Other", [missing]), unit("quarry-drones", file("quarry-drones.md"))];
+		const s = setup(root);
+		dialogMock.impl = async () => "Quarry Notes"; // same name as the missing row's own path
+
+		const created = await startAddUnderFile(s.deps, VIEW_ID, "quarry-drones");
+
+		expect(created).not.toBeNull();
+		expect(created!.id).not.toBe("quarry-missing");
+
+		// The missing row (and its own child "old") is untouched, still nested under "Other" —
+		// never spliced out and moved under quarry-drones just because its ref now exists on disk.
+		const other = s.vm.getNode(VIEW_ID, "other")!;
+		expect(other.children.map((c) => c.id)).toEqual(["quarry-missing"]);
+		expect(other.children[0].children.map((c) => c.id)).toEqual(["old"]);
+
+		// quarry-drones gets exactly the new node as its only child — "old" never arrives here.
+		const parent = s.vm.getNode(VIEW_ID, "quarry-drones")!;
+		expect(parent.children.map((c) => c.id)).toEqual([created!.id]);
+	});
+
+	it("a missing row that is an ancestor of the clicked row is never spliced into its own descendant (no cycle)", async () => {
+		const root: ViewNode[] = [
+			unit("ancestor-missing", file("Quarry Notes.md"), {
+				children: [meta("mid", "Mid", [unit("quarry-drones", file("quarry-drones.md"))])],
+			}),
+		];
+		const s = setup(root);
+		dialogMock.impl = async () => "Quarry Notes"; // same name as the ancestor's own path
+
+		const created = await startAddUnderFile(s.deps, VIEW_ID, "quarry-drones");
+
+		expect(created).not.toBeNull();
+
+		// The ancestor stays exactly where it was — at the view root, still containing "Mid" and
+		// "quarry-drones" — nothing was spliced out of its spot or re-nested into its own descendant.
+		const view = s.vm.getView(VIEW_ID)!;
+		expect(view.root.map((n) => n.id)).toEqual(["ancestor-missing"]);
+		expect(s.vm.getNode(VIEW_ID, "quarry-drones")).not.toBeNull();
+
+		const parent = s.vm.getNode(VIEW_ID, "quarry-drones")!;
+		expect(parent.children.map((c) => c.id)).toEqual([created!.id]);
+
+		// The tree is still a tree, not a cycle: serializes cleanly (a cyclic tree throws here).
+		expect(() => JSON.stringify(view.root)).not.toThrow();
 	});
 });
 
@@ -333,9 +383,9 @@ describe("startAddUnderFile — failure rolls back", () => {
 		expect(again).not.toBeNull();
 	});
 
-	it("placeUnit returns null: file deleted, Notice, no node, selection unchanged", async () => {
+	it("placeNewUnit returns null: file deleted, Notice, no node, selection unchanged", async () => {
 		const s = setup();
-		s.placeUnit.mockImplementation(() => null);
+		s.placeNewUnit.mockImplementation(() => null);
 		dialogMock.impl = async () => "Quarry Notes";
 
 		const result = await startAddUnderFile(s.deps, VIEW_ID, "projects");

@@ -789,6 +789,30 @@ export class ViewsManager {
 		return node;
 	}
 
+	/** PR-3.F2 R1 fix: appends a brand-new node for `ref` under `parentId`, and never relocates an
+	 * existing placement of the same ref anywhere else in the view — unlike `placeUnit`, which
+	 * moves one in instead of creating a duplicate (the right call for "Place in view…" on a ref
+	 * the user picked deliberately). "Add under" kinds (File now, Module later) create a brand-new
+	 * file/folder on disk and must nest *that*, not silently relocate some unrelated existing node
+	 * that happens to share its freshly-typed name — including a greyed missing row whose file is
+	 * gone but whose node (and whatever subtree it still carries) lingers in the view (missing refs
+	 * are never auto-removed), or, worse, an existing node that is an *ancestor* of `parentId`:
+	 * `placeUnit` would splice that ancestor out of its current spot and push it into its own
+	 * descendant's children, creating a cycle and silently dropping the whole subtree out of
+	 * `view.root`. Always creating a fresh node here sidesteps both cases entirely — nothing is
+	 * ever spliced out of its current place. Returns the new node, or `null` only if the view
+	 * itself is gone (an unresolved `parentId` falls back to the view root, same as `placeUnit`). */
+	placeNewUnit(viewId: string, ref: UnitRef, parentId: string | null): ViewNode | null {
+		const view = this.getView(viewId);
+		if (!view) return null;
+		const parent = parentId ? this.findNode(view.root, parentId) : null;
+		const targetChildren = parent ? parent.node.children : view.root;
+		const node: ViewNode = { id: generateNodeId(), type: "unit", ref, children: [] };
+		targetChildren.push(node);
+		this.save();
+		return node;
+	}
+
 	/** Removes *every* placement of `ref` in this view — used when the ref itself has stopped being
 	 * a valid unit (demoted/deleted) and needs purging wherever it appears, not just one instance.
 	 * PR 13: a duplicated unit can now legitimately have more than one placement in the same view,

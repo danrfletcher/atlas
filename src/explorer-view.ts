@@ -3245,7 +3245,7 @@ export class AtlasExplorerView extends ItemView {
 				const info = this.isOutsideManagedUnit(view, parentNode) ? this.resolveOutsideManagedRowInfo(parentNode.ref!) : await this.resolveRef(parentNode.ref!);
 				return info.text;
 			},
-			placeUnit: (viewId, ref, parentId) => plugin.viewsManager.placeUnit(viewId, ref, parentId),
+			placeNewUnit: (viewId, ref, parentId) => plugin.viewsManager.placeNewUnit(viewId, ref, parentId),
 			expandParent: (viewId, parentId) => plugin.viewsManager.setNodeCollapsed(viewId, parentId, false),
 			// Same selection/anchor handling as Block and Folder (E5).
 			selectOnly: (nodeId) => {

@@ -21,10 +21,15 @@ export interface AddUnderFileDeps extends CreateOnDiskDeps, ParentExistsDeps {
 	 * the dialog's title ("Add file under <parent>"); computed fresh rather than cached, so a
 	 * rename that happened since the row last rendered is still reflected. */
 	getParentLabel(viewId: string, parentId: string): Promise<string>;
-	/** `ViewsManager.placeUnit` — nests `ref` as the clicked row's last child and returns the new
-	 * node, or `null` only if the view itself is gone (not expected mid-flow, but handled the same
-	 * way as a vanished parent: a Notice, no node). */
-	placeUnit(viewId: string, ref: UnitRef, parentId: string): ViewNode | null;
+	/** `ViewsManager.placeNewUnit` (PR-3.F2 R1 fix) — nests `ref` as a brand-new node, always the
+	 * clicked row's last child, and returns it, or `null` only if the view itself is gone (not
+	 * expected mid-flow, but handled the same way as a vanished parent: a Notice, no node).
+	 * Deliberately not `placeUnit`: that moves an *existing* node sharing the same ref instead of
+	 * creating a new one, which for a freshly created file could silently relocate an unrelated
+	 * node elsewhere in the view — including a greyed missing row whose file is gone but whose node
+	 * lingers (missing refs are never auto-removed), or an ancestor of the clicked row, which would
+	 * splice that ancestor into its own descendant's children and create a cycle. */
+	placeNewUnit(viewId: string, ref: UnitRef, parentId: string): ViewNode | null;
 	/** Expands the clicked row so the new child is visible without a further click (G2). */
 	expandParent(viewId: string, parentId: string): void;
 	/** Replaces the current bucket selection with exactly the new node's id (E5). */
@@ -37,8 +42,8 @@ function fail(reason: string, extra = ""): void {
 
 /** PR-3.F2 (G2/E1/E2/E4/E5/E6/F5): takes the same per-parent lock every add-under kind shares
  * (`viewId:parentId`), checks the parent still exists before the name dialog opens and again
- * immediately before nesting (E4 — `placeUnit`'s own silent fallback to the view root must never be
- * reachable from here), then — once the dialog resolves a name (Cancel/Escape/close resolve `null`,
+ * immediately before nesting (E4 — `placeNewUnit`'s own silent fallback to the view root must never
+ * be reachable from here), then — once the dialog resolves a name (Cancel/Escape/close resolve `null`,
  * G8/E1) — creates `<name>.md` at the vault root with body `# <name>` via the shared `createOnDisk`,
  * nests it as the clicked row's last child, expands the parent and selects the new row. Never opens
  * the file and never replaces or moves the clicked row (F5). Resolves to the new node on success, or
@@ -74,20 +79,20 @@ export async function startAddUnderFile(deps: AddUnderFileDeps, viewId: string, 
 		}
 
 		// The parent may have gone while the disk step ran (a data sync): don't leave an orphan
-		// file behind, and never let `placeUnit` silently fall back to the view root.
+		// file behind, and never let `placeNewUnit` silently fall back to the view root.
 		if (!parentExists(deps, viewId, parentId)) {
 			const leftover = await made.rollback();
 			made.release();
 			fail("the parent no longer exists", leftover);
 			return null;
 		}
-		// `deps.placeUnit` is `ViewsManager.placeUnit` in production — synchronous and never throws —
-		// but a test double (or a future caller) could; treating a thrown error the same as a null
-		// return keeps the rollback/release path the one thing every failure after create goes
-		// through, so the new file is never left behind unplaced.
+		// `deps.placeNewUnit` is `ViewsManager.placeNewUnit` in production — synchronous and never
+		// throws — but a test double (or a future caller) could; treating a thrown error the same
+		// as a null return keeps the rollback/release path the one thing every failure after
+		// create goes through, so the new file is never left behind unplaced.
 		let node: ViewNode | null;
 		try {
-			node = deps.placeUnit(viewId, made.ref, parentId);
+			node = deps.placeNewUnit(viewId, made.ref, parentId);
 		} catch {
 			node = null;
 		}
