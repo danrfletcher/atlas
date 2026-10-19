@@ -132,8 +132,8 @@ describe("GP2/G8 — atlas_status, driven through AtlasPlugin's own production w
 			vaultPath: FIXTURE_VAULT_PATH,
 			pluginVersion: REAL_MANIFEST.version,
 			// PR-2.F1 added the status read/write tools alongside atlas_status, registered on the
-			// same tool map `getToolNames()` reads from.
-			tools: ["atlas_status", "list_views", "list_nodes", "list_status_sets", "get_node_status", "set_node_status"],
+			// same tool map `getToolNames()` reads from. PR-3.F1 added the five arranging tools.
+			tools: ["atlas_status", "list_views", "list_nodes", "list_status_sets", "get_node_status", "set_node_status", "add_node", "move_node", "remove_node", "create_folder", "rename_folder"],
 		});
 		// The vault path in the reply matches the fixture vault's own root exactly — not a string
 		// the test invented, and not empty (the silent fallback `getVaultBasePath()` takes when the
