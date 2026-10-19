@@ -3,16 +3,21 @@ import { StatusSet } from "./statuses";
 import { ApplyToConfig, StatusGovernance } from "./types";
 
 /** A single text field + OK/Cancel, for anything that needs a short name from the user (new view,
- * rename, new meta folder). Submits on Enter or the OK button. */
+ * rename, new meta folder). Submits on Enter or the OK button.
+ * PR-2.F2: `onCancel` (Cancel button, Esc, or the close button — anything that closes this modal
+ * without submitting) is optional and defaults to a no-op, so every existing caller is unaffected;
+ * "Add under… > Folder" is the first caller that needs it, to release its per-parent lock on E1. */
 export class TextPromptModal extends Modal {
 	private value: string;
+	private submitted = false;
 
 	constructor(
 		app: App,
 		private title: string,
 		initialValue: string,
 		private onSubmit: (value: string) => void,
-		private placeholder = ""
+		private placeholder = "",
+		private onCancel?: () => void
 	) {
 		super(app);
 		this.value = initialValue;
@@ -49,6 +54,7 @@ export class TextPromptModal extends Modal {
 	}
 
 	private submit(): void {
+		this.submitted = true;
 		const value = this.value;
 		this.close();
 		this.onSubmit(value);
@@ -56,6 +62,7 @@ export class TextPromptModal extends Modal {
 
 	onClose(): void {
 		this.contentEl.empty();
+		if (!this.submitted) this.onCancel?.();
 	}
 }
 
