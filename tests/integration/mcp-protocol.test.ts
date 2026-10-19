@@ -125,7 +125,62 @@ describe("mcp-protocol — malformed-input matrix: every row yields a structured
 		await postRaw(port, TOKEN, JSON.stringify({ jsonrpc: "2.0", id: 1, method: "bogus" }));
 
 		const response = await postRaw(port, TOKEN, JSON.stringify({ jsonrpc: "2.0", id: 99, method: "tools/call", params: { name: "atlas_status" } }));
-		const body = response.json as { result: { ok: boolean } };
-		expect(body.result).toEqual({ ok: true });
+		const body = response.json as { result: { content: { type: string; text: string }[] } };
+		expect(JSON.parse(body.result.content[0].text)).toEqual({ ok: true });
+	});
+});
+
+describe("mcp-protocol — R2: MCP's own handshake, not just tools/call", () => {
+	it("initialize returns protocolVersion, capabilities.tools and serverInfo", async () => {
+		const { port } = await startServer();
+		const response = await postRaw(port, TOKEN, JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2024-11-05" } }));
+		expect(response.status).toBe(200);
+		const body = response.json as { jsonrpc: string; id: number; result: { protocolVersion: string; capabilities: { tools: unknown }; serverInfo: { name: string; version: string } } };
+		expect(body.jsonrpc).toBe("2.0");
+		expect(body.id).toBe(1);
+		expect(body.result.protocolVersion).toBe("2024-11-05");
+		expect(body.result.capabilities.tools).toBeDefined();
+		expect(body.result.serverInfo).toBeDefined();
+		expect(typeof body.result.serverInfo.name).toBe("string");
+		expect(typeof body.result.serverInfo.version).toBe("string");
+	});
+
+	it("initialize falls back to a default protocolVersion when the client omits one", async () => {
+		const { port } = await startServer();
+		const response = await postRaw(port, TOKEN, JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: {} }));
+		const body = response.json as { result: { protocolVersion: string } };
+		expect(typeof body.result.protocolVersion).toBe("string");
+		expect(body.result.protocolVersion.length).toBeGreaterThan(0);
+	});
+
+	it("tools/list returns every registered tool, built from the registry", async () => {
+		const { port } = await startServer();
+		const response = await postRaw(port, TOKEN, JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }));
+		expect(response.status).toBe(200);
+		const body = response.json as { result: { tools: { name: string; description: string; inputSchema: unknown }[] } };
+		expect(body.result.tools).toEqual([expect.objectContaining({ name: "atlas_status" })]);
+		expect(body.result.tools[0].inputSchema).toBeDefined();
+	});
+
+	it("notifications/initialized — a notification (no id) gets no JSON-RPC response body at all", async () => {
+		const { port } = await startServer();
+		const response = await postRaw(port, TOKEN, JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }));
+		expect(response.status).toBe(202);
+		expect(response.json).toBeNull();
+	});
+
+	it("any request lacking an id is treated as a notification — no reply even for an unknown method", async () => {
+		const { server, port } = await startServer();
+		const response = await postRaw(port, TOKEN, JSON.stringify({ jsonrpc: "2.0", method: "not/a-real-method" }));
+		expect(response.status).toBe(202);
+		expect(response.json).toBeNull();
+		expect(server.isRunning()).toBe(true);
+	});
+
+	it("tools/call results come back in MCP's content-array shape, not the bare tool return value", async () => {
+		const { port } = await startServer();
+		const response = await postRaw(port, TOKEN, JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "atlas_status" } }));
+		const body = response.json as { result: { content: { type: string; text: string }[] } };
+		expect(body.result.content).toEqual([{ type: "text", text: JSON.stringify({ ok: true }) }]);
 	});
 });
