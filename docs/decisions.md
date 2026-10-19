@@ -4,7 +4,7 @@ Judgement calls made during the build, the alternative considered, and why. Newe
 
 ## PR-1.S1: MCP server — transport shape, mobile gating, and JSON-RPC error semantics
 
-**Decision:** the JSON-RPC method the server recognises is `tools/call` with `params: { name, arguments }` (the MCP convention), not a bespoke per-tool method name. A later PR's tool just adds an entry to the same `tools` map passed into `McpServer`; the transport and dispatch (`src/mcp-protocol.ts`) never change. No `@modelcontextprotocol/sdk` (or any new runtime dependency) was added — the ticket-plan's constraint is "Node's own http and crypto modules; no new runtime dependencies," and a one-tool, one-method server is a small enough surface to implement directly.
+**Decision:** the JSON-RPC method the server recognises for the tool call itself is `tools/call` with `params: { name, arguments }` (the MCP convention), not a bespoke per-tool method name. A later PR's tool just adds an entry to the same `tools` map passed into `McpServer`; the transport and dispatch (`src/mcp-protocol.ts`) never change. No `@modelcontextprotocol/sdk` (or any new runtime dependency) was added — the ticket-plan's constraint is "Node's own http and crypto modules; no new runtime dependencies." R2 added the rest of the handshake a standard MCP client needs: `initialize` (returns `protocolVersion`, `capabilities.tools`, `serverInfo`), `tools/list` (built from the same registry), and `notifications/initialized` (202, no body, per JSON-RPC's own notification semantics for a request with no `id`). `tools/call` results are wrapped in MCP's `{ content: [...] }` shape rather than returned as bare objects.
 
 **Decision:** `McpTokenStore` is not keyed by node id the way `ApiHeadersStore`/`FolderSourcePathStore` are — there's exactly one MCP server per vault per device, so it holds a single `{ port, token }` pair under its own storage key (`atlas-mcp-server`), confirmed distinct from the other two stores' keys in `tests/unit/mcp-token-store.test.ts`.
 
@@ -13,6 +13,8 @@ Judgement calls made during the build, the alternative considered, and why. Newe
 **Decision:** a request body over 1MB doesn't `req.destroy()` the socket — it keeps draining the stream to completion (discarding the bytes) so the handler can still send back a structured JSON-RPC error, per the fence item "never an uncaught exception or a dropped connection." Destroying the socket mid-stream would have violated that for the one edge case (oversized body) where it would have been the simplest implementation.
 
 **Decision:** `McpServer.start()`/`stop()` both return a `Promise<void>` that always resolves, never rejects — a failed start (e.g. `EADDRINUSE`) is reported through the injected `notify`/`logError` callbacks, not an exception, so a caller (the settings tab's toggle, or `onload()`) never needs a `try/catch` around either call.
+
+**Decision:** the Port field (R7) commits on blur/Enter, not on every keystroke — typing a multi-digit port one character at a time would otherwise bind-then-rebind through every in-range prefix along the way, and briefly latch the server off if some prefix happened to already be taken. A commit restarts the server from the user's saved intent (`settings.mcpServerEnabled`), not from `isRunning()`, so a restart after a prior failed start (stale `isRunning()===false`) still comes back on rather than staying silently off.
 
 ## PR-3 T9/E7: "Folder converted by promotion" cannot be built or tested in this ticket
 
