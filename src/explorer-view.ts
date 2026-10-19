@@ -12,7 +12,7 @@ import {
 	nodeHasApiRows,
 } from "./views";
 import { resolveOutsidePath } from "./folder-source-outside";
-import { DropZone, resolveDropZone } from "./drop-zones";
+import { DropDecision, DropZone, resolveDropDecision, resolveDropZone } from "./drop-zones";
 import { resolveUnit } from "./unit-display";
 import { TextPromptModal, ConfirmModal, ConfirmDeleteRowsModal, StatusesModal } from "./modals";
 import { StatusDefinition, pluralizeStatusLabel } from "./statuses";
@@ -40,8 +40,10 @@ import {
 	SORT_MODE_CHOICES,
 	activeSortFor,
 	sortModeLabel,
+	sortedFolderNoticeText,
 	SORT_MODE_ICONS,
 	SortRefreshGate,
+	EffectiveSort,
 } from "./sort";
 
 export const ATLAS_VIEW_TYPE = "atlas-explorer";
@@ -806,6 +808,11 @@ export class AtlasExplorerView extends ItemView {
 	 * row is currently showing one — cleared on `dragleave`, on `drop`, and by the window-level
 	 * `dragend` backstop below, same three places `dragPayload` itself is cleared. */
 	private dropIndicatorEl: HTMLElement | null = null;
+	/** PR-4 (G5): the single shared "this whole list is a sorted-insert target" outline element —
+	 * same one-at-a-time convention as `dropIndicatorEl` above, just applied to a row's *parent*
+	 * list element instead of as a sibling of the row. `null` whenever no list currently shows it —
+	 * cleared on `dragleave`, on `drop`, and by the window-level `dragend` backstop below. */
+	private sortedDropOutlineEl: HTMLElement | null = null;
 	/** Review follow-up (retroactive PR 9 finding): cancels whichever module row's dwell timer is
 	 * currently pending, if any — invoked from the window-level `dragend` backstop below. At most
 	 * one dwell timer is ever pending at a time in practice (only one row can be mid-hover during a
@@ -909,6 +916,7 @@ export class AtlasExplorerView extends ItemView {
 		this.registerDomEvent(window, "dragend", () => {
 			this.dragPayload = null;
 			this.clearDropIndicator(); // PR-3 (G1): same abandoned-drag backstop, for the indicator line.
+			this.clearSortedDropOutline(); // PR-4 (G5): same abandoned-drag backstop, for the sorted-insert outline.
 			// PR-1.S1 R5: if the drag ends while the row is scrolled out of the window, it's sitting
 			// hidden (`display:none`) in the spacer purely so the browser's drag source survived it
 			// scrolling off-screen (F11/E8) — nothing needs it kept around once the drag itself is over,
@@ -3143,28 +3151,41 @@ export class AtlasExplorerView extends ItemView {
 			if (this.isCycleDrop(target.viewId, target.nodeId)) {
 				zone = "nest";
 				this.clearDropIndicator();
+				this.clearSortedDropOutline();
 				el.addClass("atlas-drop-target");
 				return;
 			}
 			const rect = el.getBoundingClientRect();
 			zone = resolveDropZone(evt.clientY - rect.top, rect.height, hasBottomZone);
-			if (zone === "nest") {
+			// PR-4 (G4/G5/G22): a plain edge-vs-nest zone no longer decides line-vs-nest on its own —
+			// `assessDrop` additionally weighs the target list's own effective sort and whether the
+			// drag is one of that list's own existing children (G4, refuse) or from elsewhere (G5,
+			// sorted-insert outline instead of a line).
+			const assessment = this.assessDrop(target, zone, this.dragPayload);
+			const decision: DropDecision = assessment?.decision ?? (zone === "nest" ? "nest" : "reorder");
+			this.clearDropIndicator();
+			el.removeClass("atlas-drop-target");
+			this.clearSortedDropOutline();
+			if (decision === "nest") {
 				el.addClass("atlas-drop-target");
-				this.clearDropIndicator();
-			} else {
-				el.removeClass("atlas-drop-target");
-				this.showDropIndicator(el, zone);
+			} else if (decision === "reorder") {
+				this.showDropIndicator(el, zone as "before" | "after");
+			} else if (decision === "sorted-insert") {
+				this.showSortedDropOutline(el);
 			}
+			// "refuse": no line, no outline, no nest highlight — `handleDrop` shows the Notice.
 		});
 		el.addEventListener("dragleave", () => {
 			el.removeClass("atlas-drop-target");
 			this.clearDropIndicator();
+			this.clearSortedDropOutline();
 		});
 		el.addEventListener("drop", (evt) => {
 			evt.preventDefault();
 			evt.stopPropagation();
 			el.removeClass("atlas-drop-target");
 			this.clearDropIndicator();
+			this.clearSortedDropOutline();
 			this.handleDrop(target, zone);
 		});
 	}
@@ -3269,10 +3290,19 @@ export class AtlasExplorerView extends ItemView {
 				// G1/G2: an edge drop never nests into the target — it lands as a sibling in the
 				// target's own parent (the bucket root, if the target is top-level), at the slot the
 				// indicator line showed: right before the target ("before") or right after it ("after").
-				const parentInfo = this.findNodeParent(view.root, target.nodeId, null);
-				if (!parentInfo) return; // target vanished mid-drag — nothing left to drop onto.
-				parentId = parentInfo.parentId;
-				position = zone === "after" ? parentInfo.index + 1 : parentInfo.index;
+				//
+				// PR-4 (G4/E13): but only once the target's own parent list's effective sort agrees —
+				// `assessDrop` re-derives the same decision `makeDropZone`'s dragover handler showed,
+				// from the live `payload` (not the batch-representative visual shortcut) so a sorted
+				// list's own child is refused outright here too, whole-batch, with the Notice.
+				const assessment = this.assessDrop(target, zone, payload);
+				if (!assessment) return; // target vanished mid-drag — nothing left to drop onto.
+				if (assessment.decision === "refuse") {
+					if (assessment.effectiveSort) void this.showSortedDropRefusedNotice(view, assessment.parentId, assessment.effectiveSort);
+					return;
+				}
+				parentId = assessment.parentId;
+				position = zone === "after" ? assessment.index + 1 : assessment.index;
 			} else {
 				const found = view && this.findNodeAnywhere(view.root, target.nodeId);
 				if (found) parentId = found.node.id;
@@ -3356,6 +3386,114 @@ export class AtlasExplorerView extends ItemView {
 			if (found) return found;
 		}
 		return null;
+	}
+
+	/** PR-4 (G4/G5/G20/G22): builds the same `ancestors` array shape `renderNodeList`'s own
+	 * recursion builds for `targetId`'s children list — `[targetId's node, ...its own ancestors,
+	 * ..., view]`, nearest first — by walking the *real* `ViewNode` tree (never DOM nesting), so a
+	 * folder-source-hoisted row (rendered in its grandparent's list, G20) still resolves to its
+	 * real parent here regardless of where its row sits on screen. `null` only when `targetId`
+	 * isn't found at all (the target vanished mid-drag). */
+	private ancestorChainFor(nodes: ViewNode[], targetId: string, aboveChain: StatusGovernance[]): StatusGovernance[] | null {
+		for (const node of nodes) {
+			if (node.id === targetId) return [node, ...aboveChain];
+			const found = this.ancestorChainFor(node.children, targetId, [node, ...aboveChain]);
+			if (found) return found;
+		}
+		return null;
+	}
+
+	/** PR-4 (G4/G5): the one effective sort a `parentId` list (or the Bucket root, for `null`)
+	 * actually renders by right now — same `activeSortFor`/`findSortGovernor` combination the
+	 * render pass's own status-sort activation and G13 sort indicator use (`renderNodeList`,
+	 * `renderSortIndicator`), so "is this list sorted" can never disagree between what's displayed
+	 * and what a drop onto it does. `null` means effectively Manual. */
+	private effectiveSortForParent(view: View, parentId: string | null): EffectiveSort | null {
+		const ancestors = parentId === null ? [view] : (this.ancestorChainFor(view.root, parentId, [view]) ?? [view]);
+		const sm = this.plugin.statusesManager;
+		const sortGovernor = sm ? sm.findSortGovernor(ancestors) : null;
+		return activeSortFor(ancestors[0] ?? {}, sortGovernor);
+	}
+
+	/** PR-4 (G22): the drop's effective target list is an Outside-Vault source Folder's own
+	 * children — its rows never carry an edge zone in the first place (G20), so this guards the
+	 * (currently unreachable in practice, but spec-mandated) case of a manually-added child row
+	 * still living in that list: the sort-gating added by this PR never applies there, keeping the
+	 * drop "exactly as it does today" regardless of any `sortMode` configured on the folder. */
+	private isOutsideSourceFolder(view: View, parentId: string | null): boolean {
+		if (parentId === null) return false;
+		const found = this.findNodeAnywhere(view.root, parentId);
+		return !!found && found.node.folderSource?.location === "outside";
+	}
+
+	/** PR-4 (G22): true when any node in `payload` (a live drag) is currently a child of
+	 * `targetParentId`'s list — a batch needs only one such row to refuse the whole drop (E13); an
+	 * inbox payload (never a bucket node) is always false. */
+	private batchHasInFolderRow(view: View, payload: DragPayload, targetParentId: string | null): boolean {
+		if (payload.kind !== "node" || payload.viewId !== view.id) return false;
+		return payload.nodeIds.some((id) => (this.findNodeParent(view.root, id, null)?.parentId ?? null) === targetParentId);
+	}
+
+	/** PR-4 (G4/G5/G20/G22): the single source of truth both `makeDropZone`'s dragover visual and
+	 * `handleDrop`'s authoritative decision call — computing it in exactly one place guarantees the
+	 * line/outline/highlight a drag shows always matches what dropping there actually does. `null`
+	 * only when `target.nodeId` itself has vanished mid-drag (`payload` may be null, since
+	 * `makeDropZone`'s dragover guards `!this.dragPayload` before ever reaching this). */
+	private assessDrop(
+		target: DropTarget,
+		zone: DropZone,
+		payload: DragPayload | null
+	): { decision: DropDecision; parentId: string | null; index: number; effectiveSort: EffectiveSort | null } | null {
+		if (target.kind !== "node") return null;
+		const view = this.plugin.viewsManager.getView(target.viewId);
+		if (!view) return null;
+		const parentInfo = this.findNodeParent(view.root, target.nodeId, null);
+		if (!parentInfo) return null;
+		const effectiveSort = this.isOutsideSourceFolder(view, parentInfo.parentId) ? null : this.effectiveSortForParent(view, parentInfo.parentId);
+		const anyInFolder = !!payload && this.batchHasInFolderRow(view, payload, parentInfo.parentId);
+		const decision = resolveDropDecision(zone, anyInFolder ? parentInfo.parentId : undefined, parentInfo.parentId, effectiveSort);
+		return { decision, parentId: parentInfo.parentId, index: parentInfo.index, effectiveSort };
+	}
+
+	/** PR-4 (G4): the target list's own display text for the refusal Notice — "Bucket" for the
+	 * view root, a Folder's label, or a unit's resolved display text (title/first-line/file name),
+	 * same text the row itself shows. */
+	private async sortedParentLabel(view: View, parentId: string | null): Promise<string> {
+		if (parentId === null) return "Bucket";
+		const found = this.findNodeAnywhere(view.root, parentId);
+		if (!found) return "Folder";
+		const node = found.node;
+		if (node.type === "meta") return node.label ?? "Folder";
+		if (!node.ref) return "Folder";
+		const info = await this.resolveRef(node.ref);
+		return info.text;
+	}
+
+	/** PR-4 (G4/E13/E14): shows the exact "<Folder> is sorted <mode>. Set it to Manual to
+	 * reorder." Notice a refused in-folder edge drop asks for. */
+	private async showSortedDropRefusedNotice(view: View, parentId: string | null, effectiveSort: EffectiveSort): Promise<void> {
+		const label = await this.sortedParentLabel(view, parentId);
+		new Notice(sortedFolderNoticeText(label, effectiveSort.mode, effectiveSort.reverse));
+	}
+
+	/** PR-4 (G5): outlines the hovered row's own containing list — never the row itself — since
+	 * the dragged item will land in that list's sorted place, not at the hovered row's position (no
+	 * line is ever drawn alongside this). `el.parentElement` is always that list: `renderNode`/
+	 * `renderApiItemRow`/`renderTruncationGroupHeader` all create a row as a direct child of
+	 * whichever list element `renderNodeList` was handed (`listEl` at the bucket root,
+	 * `childrenInner` for a nested Folder/unit) — never any other wrapper layer at the row's own
+	 * depth. Same one-at-a-time convention as `showDropIndicator`/`dropIndicatorEl`. */
+	private showSortedDropOutline(el: HTMLElement): void {
+		const list = el.parentElement;
+		if (!list) return;
+		if (this.sortedDropOutlineEl && this.sortedDropOutlineEl !== list) this.sortedDropOutlineEl.removeClass("atlas-sorted-drop-outline");
+		list.addClass("atlas-sorted-drop-outline");
+		this.sortedDropOutlineEl = list;
+	}
+
+	private clearSortedDropOutline(): void {
+		this.sortedDropOutlineEl?.removeClass("atlas-sorted-drop-outline");
+		this.sortedDropOutlineEl = null;
 	}
 
 	/** Files/blocks are opaque internals to a folder-unit until something links to them — dropping
