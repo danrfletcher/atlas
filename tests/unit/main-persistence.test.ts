@@ -206,7 +206,7 @@ describe("highlightOpenNote persistence (PR-1.F2, F3)", () => {
 		const persisted = saved[0] as Record<string, unknown>;
 
 		const settingsKeys = Object.keys(persisted.settings as AtlasSettings).sort();
-		expect(settingsKeys).toEqual([...Object.keys(fixture.settings), "noAutoPromoteFolders", "highlightOpenNote"].sort());
+		expect(settingsKeys).toEqual([...Object.keys(fixture.settings), "noAutoPromoteFolders", "highlightOpenNote", "mcpServerEnabled"].sort());
 
 		// No top-level key beyond what PR-2 already established (dismissedByView/dismissedGlobal/
 		// addedItems, defaulted here since the fixture predates them) — PR-1.F2 adds none of its own.
