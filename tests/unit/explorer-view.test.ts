@@ -17,11 +17,13 @@ vi.mock("../../src/api-source-modal", () => {
 });
 
 import type { App } from "obsidian";
-import { Menu } from "obsidian";
+import { Menu, Notice } from "obsidian";
 import { ApiSourceModal } from "../../src/api-source-modal";
 import { AtlasExplorerView } from "../../src/explorer-view";
+import { StatusesManager } from "../../src/statuses";
 import { View, ViewNode } from "../../src/types";
 import { ViewsManager } from "../../src/views";
+import { makeStatusesManager } from "./explorer-view-sort-truncate-helpers";
 import { meta } from "../integration/create-from-meta-fixtures";
 import { App as MockApp } from "../mocks/obsidian";
 
@@ -185,9 +187,10 @@ describe("PR-1 G11b/E-a — source walks reach a sourced node nested under units
 // the assertions are on genuine `moveNode`/`placeUnit` results, not a mock that was merely called.
 describe("PR-3 — edge-drop row wiring (dragover/drop/dragleave against the real drag handlers)", () => {
 	type DropFake = {
-		plugin: { viewsManager: ViewsManager };
+		plugin: { viewsManager: ViewsManager; statusesManager?: StatusesManager };
 		dragPayload: unknown;
 		dropIndicatorEl: HTMLElement | null;
+		sortedDropOutlineEl: HTMLElement | null;
 		selectedBucketNodeIds: Set<string>;
 		selectedInboxRefKeys: Set<string>;
 		queueRender: ReturnType<typeof vi.fn>;
@@ -196,9 +199,12 @@ describe("PR-3 — edge-drop row wiring (dragover/drop/dragleave against the rea
 	};
 	// Every other private method `makeDropZone`'s own closures reach via `this.xxx(...)`
 	// (`handleDrop`, `findNodeAnywhere`, `findNodeParent`, `isCycleDrop`, `nodeContainsDescendant`,
-	// `showDropIndicator`, `clearDropIndicator`) must be assigned onto the fake too -- a closure's
-	// captured `this` is whatever `this` was when `makeDropZone` itself was *called* (`fake`, since
-	// it's invoked as `fake.makeDropZone(...)` below), not just whichever one property is read here.
+	// `showDropIndicator`, `clearDropIndicator`, and PR-4's own `assessDrop`/`batchHasInFolderRow`/
+	// `effectiveSortForParent`/`ancestorChainFor`/`isOutsideSourceFolder`/`sortedParentLabel`/
+	// `showSortedDropRefusedNotice`/`showSortedDropOutline`/`clearSortedDropOutline`/`resolveRef`)
+	// must be assigned onto the fake too -- a closure's captured `this` is whatever `this` was when
+	// `makeDropZone` itself was *called* (`fake`, since it's invoked as `fake.makeDropZone(...)`
+	// below), not just whichever one property is read here.
 	const dragMethodNames = [
 		"makeDropZone",
 		"handleDrop",
@@ -208,18 +214,33 @@ describe("PR-3 — edge-drop row wiring (dragover/drop/dragleave against the rea
 		"nodeContainsDescendant",
 		"showDropIndicator",
 		"clearDropIndicator",
+		"assessDrop",
+		"batchHasInFolderRow",
+		"effectiveSortForParent",
+		"ancestorChainFor",
+		"isOutsideSourceFolder",
+		"sortedParentLabel",
+		"showSortedDropRefusedNotice",
+		"showSortedDropOutline",
+		"clearSortedDropOutline",
+		"resolveRef",
 	] as const;
 	const dragProto = AtlasExplorerView.prototype as unknown as Record<(typeof dragMethodNames)[number], (...a: unknown[]) => unknown>;
 
-	function makeDropFake(viewsManager: ViewsManager): DropFake {
+	function makeDropFake(viewsManager: ViewsManager, statusesManager?: StatusesManager): DropFake {
 		const fake: Record<string, unknown> = {
-			plugin: { viewsManager },
+			plugin: { viewsManager, statusesManager },
 			dragPayload: null,
 			dropIndicatorEl: null,
+			sortedDropOutlineEl: null,
 			selectedBucketNodeIds: new Set(),
 			selectedInboxRefKeys: new Set(),
 			queueRender: vi.fn(),
 			removeUnitsFromView: vi.fn(),
+			// `sortedParentLabel`'s unit branch calls the real `resolveRef`, which needs
+			// `this.unitsByRefKey` -- absent here (no test in this PR-3 block exercises a sorted
+			// Notice over a unit target), so it's empty rather than wired to a real index.
+			unitsByRefKey: new Map(),
 		};
 		for (const name of dragMethodNames) fake[name] = dragProto[name];
 		return fake as unknown as DropFake;
@@ -234,6 +255,17 @@ describe("PR-3 — edge-drop row wiring (dragover/drop/dragleave against the rea
 
 	function dragOverAt(row: HTMLElement, clientY: number): void {
 		row.dispatchEvent(new MouseEvent("dragover", { bubbles: true, cancelable: true, clientY }));
+	}
+
+	/** PR-4: `handleDrop`'s refusal path fires `void this.showSortedDropRefusedNotice(...)`
+	 * fire-and-forget, and that chain (`showSortedDropRefusedNotice` -> `await
+	 * sortedParentLabel(...)`) defers its `new Notice(...)` call to a microtask even for a meta
+	 * folder's synchronous label lookup -- any `await`, including one on an already-resolved value,
+	 * always defers its continuation. Two drained ticks comfortably clears that one-`await`-deep
+	 * chain before a test asserts on `Notice.instances`. */
+	async function flushNoticeMicrotasks(): Promise<void> {
+		await Promise.resolve();
+		await Promise.resolve();
 	}
 
 	function makeVm(root: ViewNode[]): ViewsManager {
@@ -483,5 +515,305 @@ describe("PR-3 — edge-drop row wiring (dragover/drop/dragleave against the rea
 		row.dispatchEvent(new Event("drop", { bubbles: true }));
 
 		expect(vm.getViews()[0].root.map((n) => n.ref?.path)).toEqual(["A.md", "X.md", "Y.md", "B.md"]);
+	});
+
+	// PR-4 (G4/G5/G20/G22/E3/E13/E14/GP4/GP5): a target list's own effective sort gates an edge
+	// drop -- the plain-nest and cycle-guard behaviour above is completely untouched (all 23 PR-3
+	// tests above still pass unmodified), this only changes what happens on an edge once a line
+	// would otherwise have appeared.
+	function folderNode(id: string, label: string, children: ViewNode[], extra: Partial<ViewNode> = {}): ViewNode {
+		return { id, type: "meta", label, children, ...extra };
+	}
+
+	it("GP4/G4: an edge drop of a row within its own sorted (A-Z) parent is refused outright -- no line, no outline, no nest highlight, nothing moves, exact Notice text", async () => {
+		const annual = node("annual", "Annual Review.md");
+		const quarry = node("quarry", "quarry-drones.md");
+		const zebra = node("zebra", "Zebra Census.md");
+		const projects = folderNode("projects", "Projects", [annual, quarry, zebra], { sortMode: "alphabetical" });
+		const vm = makeVm([projects]);
+		const sm = makeStatusesManager();
+		const fake = makeDropFake(vm, sm);
+		fake.dragPayload = { kind: "node", nodeIds: ["zebra"], viewId: "v1" };
+		Notice.reset();
+
+		const container = document.createElement("div");
+		const row = makeRow();
+		container.appendChild(row);
+		fake.makeDropZone(row, { kind: "node", nodeId: "quarry", viewId: "v1" }, true);
+
+		dragOverAt(row, 5); // top edge of quarry-drones
+		expect(container.querySelectorAll(".atlas-drop-indicator")).toHaveLength(0);
+		expect(container.querySelectorAll(".atlas-sorted-drop-outline")).toHaveLength(0);
+		expect(row.classList.contains("atlas-drop-target")).toBe(false);
+
+		row.dispatchEvent(new Event("drop", { bubbles: true }));
+		await flushNoticeMicrotasks();
+		expect(Notice.instances.map((n) => n.message)).toEqual(["Projects is sorted A-Z. Set it to Manual to reorder."]);
+		expect(vm.getViews()[0].root[0].children.map((n) => n.id)).toEqual(["annual", "quarry", "zebra"]); // untouched
+	});
+
+	it("GP5: dragging a row from the Inbox over a sorted folder's rows shows no line and outlines the whole list; dropping it lands at the dropped slot (sorted-insert)", () => {
+		const annual = node("annual", "Annual Review.md");
+		const quarry = node("quarry", "quarry-drones.md");
+		const zebra = node("zebra", "Zebra Census.md");
+		const projects = folderNode("projects", "Projects", [annual, quarry, zebra], { sortMode: "alphabetical" });
+		const vm = makeVm([projects]);
+		const sm = makeStatusesManager();
+		const fake = makeDropFake(vm, sm);
+		fake.dragPayload = { kind: "inbox", refs: [{ kind: "file", path: "Harbour Notes.md" }] };
+		Notice.reset();
+
+		const container = document.createElement("div");
+		const row = makeRow();
+		container.appendChild(row);
+		fake.makeDropZone(row, { kind: "node", nodeId: "annual", viewId: "v1" }, true);
+
+		dragOverAt(row, 90); // bottom edge of Annual Review
+		expect(container.querySelectorAll(".atlas-drop-indicator")).toHaveLength(0);
+		expect(container.classList.contains("atlas-sorted-drop-outline")).toBe(true);
+
+		row.dispatchEvent(new Event("drop", { bubbles: true }));
+		expect(container.classList.contains("atlas-sorted-drop-outline")).toBe(false);
+		expect(Notice.instances).toHaveLength(0);
+		expect(vm.getViews()[0].root[0].children.map((n) => n.ref?.path ?? n.label)).toEqual([
+			"Annual Review.md",
+			"Harbour Notes.md",
+			"quarry-drones.md",
+			"Zebra Census.md",
+		]);
+	});
+
+	it("E3: dropping a row from a different folder onto a sorted folder's edge is allowed (different parent, not refused)", () => {
+		const x = node("x", "X.md");
+		const other = folderNode("other", "Other", [x]);
+		const annual = node("annual", "Annual Review.md");
+		const projects = folderNode("projects", "Projects", [annual], { sortMode: "alphabetical" });
+		const vm = makeVm([projects, other]);
+		const sm = makeStatusesManager();
+		const fake = makeDropFake(vm, sm);
+		fake.dragPayload = { kind: "node", nodeIds: ["x"], viewId: "v1" };
+		Notice.reset();
+
+		const row = makeRow();
+		document.body.appendChild(row);
+		fake.makeDropZone(row, { kind: "node", nodeId: "annual", viewId: "v1" }, true);
+
+		dragOverAt(row, 90); // bottom edge
+		row.dispatchEvent(new Event("drop", { bubbles: true }));
+
+		expect(Notice.instances).toHaveLength(0);
+		expect(vm.getViews()[0].root.find((n) => n.id === "projects")!.children.map((n) => n.id)).toEqual(["annual", "x"]);
+		expect(vm.getViews()[0].root.find((n) => n.id === "other")!.children).toEqual([]);
+	});
+
+	it("E13: a batch mixing one of the sorted folder's own children with a row from elsewhere is refused whole -- neither row moves, exactly one Notice", async () => {
+		const annual = node("annual", "Annual Review.md");
+		const quarry = node("quarry", "quarry-drones.md");
+		const projects = folderNode("projects", "Projects", [annual, quarry], { sortMode: "alphabetical" });
+		const y = node("y", "Y.md");
+		const other = folderNode("other", "Other", [y]);
+		const vm = makeVm([projects, other]);
+		const sm = makeStatusesManager();
+		const fake = makeDropFake(vm, sm);
+		fake.dragPayload = { kind: "node", nodeIds: ["quarry", "y"], viewId: "v1" };
+		Notice.reset();
+
+		const row = makeRow();
+		document.body.appendChild(row);
+		fake.makeDropZone(row, { kind: "node", nodeId: "annual", viewId: "v1" }, true);
+
+		dragOverAt(row, 90);
+		row.dispatchEvent(new Event("drop", { bubbles: true }));
+		await flushNoticeMicrotasks();
+
+		expect(Notice.instances).toHaveLength(1);
+		expect(vm.getViews()[0].root.find((n) => n.id === "projects")!.children.map((n) => n.id)).toEqual(["annual", "quarry"]);
+		expect(vm.getViews()[0].root.find((n) => n.id === "other")!.children.map((n) => n.id)).toEqual(["y"]);
+	});
+
+	it("a batch made up only of rows from elsewhere lands every row in the sorted folder's (manual, stored) order at the dropped slot", () => {
+		const annual = node("annual", "Annual Review.md");
+		const quarry = node("quarry", "quarry-drones.md");
+		const projects = folderNode("projects", "Projects", [annual, quarry], { sortMode: "alphabetical" });
+		const x1 = node("x1", "X1.md");
+		const x2 = node("x2", "X2.md");
+		const other = folderNode("other", "Other", [x1, x2]);
+		const vm = makeVm([projects, other]);
+		const sm = makeStatusesManager();
+		const fake = makeDropFake(vm, sm);
+		fake.dragPayload = { kind: "node", nodeIds: ["x1", "x2"], viewId: "v1" };
+		Notice.reset();
+
+		const row = makeRow();
+		document.body.appendChild(row);
+		fake.makeDropZone(row, { kind: "node", nodeId: "annual", viewId: "v1" }, true);
+
+		dragOverAt(row, 90);
+		row.dispatchEvent(new Event("drop", { bubbles: true }));
+
+		expect(Notice.instances).toHaveLength(0);
+		expect(vm.getViews()[0].root.find((n) => n.id === "projects")!.children.map((n) => n.id)).toEqual(["annual", "x1", "x2", "quarry"]);
+	});
+
+	it("E14: a folder that already sorts by Status refuses an in-folder reorder, Notice names Status / Status, reversed", async () => {
+		const a = node("a", "A.md");
+		const b = node("b", "B.md");
+		const projects = folderNode("projects", "Projects", [a, b], { statusEnabled: true, statusSetId: "S", sortMode: "status", sortReverse: true });
+		const vm = makeVm([projects]);
+		const sm = makeStatusesManager();
+		const fake = makeDropFake(vm, sm);
+		fake.dragPayload = { kind: "node", nodeIds: ["a"], viewId: "v1" };
+		Notice.reset();
+
+		const row = makeRow();
+		document.body.appendChild(row);
+		fake.makeDropZone(row, { kind: "node", nodeId: "b", viewId: "v1" }, true);
+
+		dragOverAt(row, 10);
+		row.dispatchEvent(new Event("drop", { bubbles: true }));
+		await flushNoticeMicrotasks();
+
+		expect(Notice.instances.map((n) => n.message)).toEqual(["Projects is sorted Status, reversed. Set it to Manual to reorder."]);
+		expect(vm.getViews()[0].root[0].children.map((n) => n.id)).toEqual(["a", "b"]);
+	});
+
+	it("E14: a folder with no sort setting of its own, under a governor whose status sort inherits down (inheritToSubfolders), still refuses an in-folder reorder", async () => {
+		const a = node("a", "A.md");
+		const b = node("b", "B.md");
+		const sub = folderNode("sub", "Sub", [a, b]); // no sort setting of its own
+		const governor = folderNode("gov", "Gov", [sub], { statusEnabled: true, statusSetId: "S", sortMode: "status", inheritToSubfolders: true });
+		const vm = makeVm([governor]);
+		const sm = makeStatusesManager();
+		const fake = makeDropFake(vm, sm);
+		fake.dragPayload = { kind: "node", nodeIds: ["a"], viewId: "v1" };
+		Notice.reset();
+
+		const row = makeRow();
+		document.body.appendChild(row);
+		fake.makeDropZone(row, { kind: "node", nodeId: "b", viewId: "v1" }, true);
+
+		dragOverAt(row, 10);
+		row.dispatchEvent(new Event("drop", { bubbles: true }));
+		await flushNoticeMicrotasks();
+
+		expect(Notice.instances.map((n) => n.message)).toEqual(["Sub is sorted Status. Set it to Manual to reorder."]);
+		expect(vm.getViews()[0].root[0].children[0].children.map((n) => n.id)).toEqual(["a", "b"]);
+	});
+
+	it("explicit Manual overriding an inherited status sort allows the in-folder reorder, with no Notice", () => {
+		const a = node("a", "A.md");
+		const b = node("b", "B.md");
+		const sub = folderNode("sub", "Sub", [a, b], { sortMode: "manual" });
+		const governor = folderNode("gov", "Gov", [sub], { statusEnabled: true, statusSetId: "S", sortMode: "status", inheritToSubfolders: true });
+		const vm = makeVm([governor]);
+		const sm = makeStatusesManager();
+		const fake = makeDropFake(vm, sm);
+		fake.dragPayload = { kind: "node", nodeIds: ["a"], viewId: "v1" };
+		Notice.reset();
+
+		const row = makeRow();
+		document.body.appendChild(row);
+		fake.makeDropZone(row, { kind: "node", nodeId: "b", viewId: "v1" }, true);
+
+		dragOverAt(row, 10);
+		row.dispatchEvent(new Event("drop", { bubbles: true }));
+
+		expect(Notice.instances).toHaveLength(0);
+		expect(vm.getViews()[0].root[0].children[0].children.map((n) => n.id)).toEqual(["a", "b"]);
+	});
+
+	it("G4 at the Bucket root: a sorted Bucket root refuses an in-root edge reorder of its own top-level rows, Notice reads \"Bucket is sorted ...\"", async () => {
+		const a = node("a", "A.md");
+		const b = node("b", "B.md");
+		const app = new MockApp() as unknown as App;
+		const vm = new ViewsManager(app, [{ id: "v1", name: "Default", inboxMode: "view", root: [a, b], sortMode: "alphabetical" }], "v1", () => {});
+		const sm = makeStatusesManager();
+		const fake = makeDropFake(vm, sm);
+		fake.dragPayload = { kind: "node", nodeIds: ["a"], viewId: "v1" };
+		Notice.reset();
+
+		const row = makeRow();
+		document.body.appendChild(row);
+		fake.makeDropZone(row, { kind: "node", nodeId: "b", viewId: "v1" }, true);
+
+		dragOverAt(row, 10);
+		row.dispatchEvent(new Event("drop", { bubbles: true }));
+		await flushNoticeMicrotasks();
+
+		expect(Notice.instances.map((n) => n.message)).toEqual(["Bucket is sorted A-Z. Set it to Manual to reorder."]);
+		expect(vm.getViews()[0].root.map((n) => n.id)).toEqual(["a", "b"]);
+	});
+
+	it("G22: the target's effective list being an Outside-Vault source folder behaves exactly as today, regardless of any sortMode configured on it -- no outline, no Notice", () => {
+		const m = node("m", "M.md");
+		const n2 = node("n", "N.md");
+		const outside = folderNode("outside", "Outside", [m, n2], {
+			sortMode: "alphabetical",
+			folderSource: { location: "outside", path: "", showFiles: true, showFolders: true },
+		});
+		const vm = makeVm([outside]);
+		const sm = makeStatusesManager();
+		const fake = makeDropFake(vm, sm);
+		fake.dragPayload = { kind: "node", nodeIds: ["n"], viewId: "v1" };
+		Notice.reset();
+
+		const container = document.createElement("div");
+		const row = makeRow();
+		container.appendChild(row);
+		fake.makeDropZone(row, { kind: "node", nodeId: "m", viewId: "v1" }, true);
+
+		dragOverAt(row, 10); // top edge of "m" -- today's plain reorder line, sort ignored for this list
+		expect(container.querySelectorAll(".atlas-drop-indicator")).toHaveLength(1);
+		expect(container.querySelectorAll(".atlas-sorted-drop-outline")).toHaveLength(0);
+
+		row.dispatchEvent(new Event("drop", { bubbles: true }));
+		expect(Notice.instances).toHaveLength(0);
+		expect(vm.getViews()[0].root[0].children.map((n) => n.id)).toEqual(["n", "m"]);
+	});
+
+	it("dragging away from a sorted folder's row without dropping clears the outline, same as the indicator line does", () => {
+		const annual = node("annual", "Annual Review.md");
+		const projects = folderNode("projects", "Projects", [annual], { sortMode: "alphabetical" });
+		const vm = makeVm([projects]);
+		const sm = makeStatusesManager();
+		const fake = makeDropFake(vm, sm);
+		fake.dragPayload = { kind: "inbox", refs: [{ kind: "file", path: "New.md" }] };
+
+		const container = document.createElement("div");
+		const row = makeRow();
+		container.appendChild(row);
+		fake.makeDropZone(row, { kind: "node", nodeId: "annual", viewId: "v1" }, true);
+
+		dragOverAt(row, 90);
+		expect(container.classList.contains("atlas-sorted-drop-outline")).toBe(true);
+
+		row.dispatchEvent(new Event("dragleave", { bubbles: true }));
+		expect(container.classList.contains("atlas-sorted-drop-outline")).toBe(false);
+		expect(fake.sortedDropOutlineEl).toBeNull();
+	});
+
+	it("a refused drop leaves the tree, sort settings and selection state completely unchanged (data safety)", async () => {
+		const annual = node("annual", "Annual Review.md");
+		const quarry = node("quarry", "quarry-drones.md");
+		const projects = folderNode("projects", "Projects", [annual, quarry], { sortMode: "alphabetical" });
+		const vm = makeVm([projects]);
+		const before = JSON.parse(JSON.stringify(vm.getViews()[0].root));
+		const sm = makeStatusesManager();
+		const fake = makeDropFake(vm, sm);
+		fake.dragPayload = { kind: "node", nodeIds: ["quarry"], viewId: "v1" };
+		fake.selectedBucketNodeIds.add("quarry");
+		Notice.reset();
+
+		const row = makeRow();
+		document.body.appendChild(row);
+		fake.makeDropZone(row, { kind: "node", nodeId: "annual", viewId: "v1" }, true);
+
+		dragOverAt(row, 10);
+		row.dispatchEvent(new Event("drop", { bubbles: true }));
+		await flushNoticeMicrotasks();
+
+		expect(vm.getViews()[0].root).toEqual(before);
+		expect(fake.selectedBucketNodeIds.has("quarry")).toBe(true);
+		expect(Notice.instances).toHaveLength(1);
 	});
 });

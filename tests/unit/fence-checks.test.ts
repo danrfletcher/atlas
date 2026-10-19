@@ -293,3 +293,49 @@ describe("PR-3 fence — no new command id from the edge-drop/reorder work", () 
 		for (const id of ids) expect(id.toLowerCase()).not.toMatch(/sort|reorder|move-up|move-down/);
 	});
 });
+
+// PR-4 (fence F7): the sorted-drop gating (resolveDropDecision/assessDrop/sortedFolderNoticeText)
+// lives only in drop-zones.ts/sort.ts/explorer-view.ts's own drag handlers -- it never leaks into
+// the Module Contents modal or any other modal, which has no drag/drop code of its own to gate.
+describe("PR-4 fence F7 — no reorder/sorted-drop code reaches the modals", () => {
+	it("src/modals.ts has no drag/drop or sorted-drop-decision code at all", () => {
+		const body = read("src/modals.ts");
+		expect(body).not.toMatch(/makeDropZone|resolveDropDecision|assessDrop|sortedFolderNoticeText|atlas-sorted-drop-outline|dragover|dragstart|draggable\s*=/);
+	});
+});
+
+// PR-4 (fence): no new disk-write call anywhere in the sorted-drop gating this PR adds -- a
+// refused or allowed sorted-insert drop is exactly as disk-free as every other arrange-only
+// action (per F5's own named three exceptions, none of which this PR touches).
+describe("PR-4 fence — the sorted-drop gating has no disk-write call", () => {
+	it("src/drop-zones.ts (the pure decision function) has no disk-write call anywhere", () => {
+		expect(read("src/drop-zones.ts")).not.toMatch(DISK_WRITE_CALL);
+	});
+
+	it("sortedFolderNoticeText and the sortedParentLabel/showSortedDropRefusedNotice/assessDrop slice of explorer-view.ts have no disk-write call", () => {
+		expect(read("src/sort.ts")).not.toMatch(DISK_WRITE_CALL);
+		const body = folderSourceSlice("src/explorer-view.ts", "private assessDrop(", "\n	private async sortedParentLabel(");
+		expect(body).not.toMatch(DISK_WRITE_CALL);
+		const noticeBody = folderSourceSlice("src/explorer-view.ts", "private async sortedParentLabel(", "\n	private showSortedDropOutline(");
+		expect(noticeBody).not.toMatch(DISK_WRITE_CALL);
+	});
+
+	it("driving a real refused drop and a real sorted-insert drop records no Vault call", async () => {
+		const app = new MockApp();
+		app.vault.seedFile("A.md");
+		app.vault.seedFile("B.md");
+		const vm = new ViewsManager(app as unknown as App, [], "", () => {});
+		const view = vm.getViews()[0];
+		vm.placeUnit(view.id, { kind: "file", path: "A.md" }, null);
+		vm.placeUnit(view.id, { kind: "file", path: "B.md" }, null);
+		const folderNodeId = vm.getViews()[0].root[0].id;
+		vm.getViews()[0].root[0] = { ...vm.getViews()[0].root[0], type: "meta", label: "Folder", sortMode: "alphabetical" };
+
+		// a refused in-folder edge drop
+		vm.moveNode(view.id, folderNodeId, null, 1);
+		// a sorted-insert from elsewhere
+		vm.placeUnit(view.id, { kind: "file", path: "C.md" }, null, 1);
+
+		expect(app.vault.calls).toEqual([]);
+	});
+});
