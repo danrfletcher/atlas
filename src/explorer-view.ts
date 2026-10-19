@@ -487,7 +487,9 @@ function addSortMenuItem(
 	menu.addItem((item) =>
 		item
 			.setTitle("Sort children…")
-			.setIcon("arrow-down-az")
+			// PR-2 (T5): MenuItem.setIcon() needs the lucide-prefixed id, same as the G13
+			// indicator's setIcon() call below — see the SORT_MODE_ICONS doc comment in sort.ts.
+			.setIcon("lucide-arrow-down-az")
 			.onClick(() => {
 				const chooser = new Menu();
 				// PR-2 (R1/G19/E5): the ticks and the Reverse-disabled state are derived from

@@ -24,14 +24,15 @@ describe("PR-2 G13 — the sort indicator's icon and tooltip, per mode and direc
 	// in this file so other suites' default (no-op) setIcon/setTooltip aren't left spied on.
 	afterEach(() => vi.restoreAllMocks());
 
-	it("A-Z: arrow-down-az icon, 'Sorted: A-Z' tooltip", () => {
+	it("A-Z: lucide-arrow-down-az icon, 'Sorted: A-Z' tooltip", () => {
 		const { el, setIconSpy, setTooltipSpy } = render({ sortMode: "alphabetical" });
 		const icon = el.querySelector(".atlas-sort-indicator") as HTMLElement;
 		expect(icon).toBeTruthy();
-		// PR-2 (T1): must be the real Lucide id "arrow-down-az" — the hyphenated
-		// "arrow-down-a-z" doesn't exist in the installed Obsidian build and setIcon()
-		// silently no-ops on it, leaving the indicator an empty 0x0 element.
-		expect(setIconSpy).toHaveBeenCalledWith(icon, "arrow-down-az");
+		// PR-2 (T1/T5): must be the lucide-prefixed id "lucide-arrow-down-az" — neither the
+		// hyphenated "arrow-down-a-z" (doesn't exist) nor the bare "arrow-down-az" (exists, but
+		// setIcon()/MenuItem.setIcon() don't resolve it unprefixed) renders anything; both leave
+		// the indicator an empty 0x0 element.
+		expect(setIconSpy).toHaveBeenCalledWith(icon, "lucide-arrow-down-az");
 		expect(setTooltipSpy).toHaveBeenCalledWith(icon, "Sorted: A-Z");
 	});
 
@@ -105,7 +106,7 @@ describe("PR-2 G13 — the Bucket header carries the same indicator as a Folder 
 		await h.render();
 		const icon = h.bucketHeader().querySelector(".atlas-sort-indicator") as HTMLElement;
 		expect(icon).toBeTruthy();
-		expect(setIconSpy).toHaveBeenCalledWith(icon, "arrow-down-az");
+		expect(setIconSpy).toHaveBeenCalledWith(icon, "lucide-arrow-down-az");
 		h.teardown();
 	});
 

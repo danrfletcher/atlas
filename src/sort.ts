@@ -152,14 +152,20 @@ export function sortModeLabel(mode: SortMode, reverse: boolean): string {
 /** PR-2 (G21): the icon per mode for the "Sort children…" item and the G13 sort indicator. No
  * icon is ever shown for `"manual"` (an effectively-Manual list shows no indicator at all).
  *
- * PR-2 (T1): the alphabetical id is `"arrow-down-az"`, not the hyphenated `"arrow-down-a-z"` the
- * spec's prose uses — the installed Obsidian build (1.14.4) only registers the Lucide icon under
- * `arrow-down-az`; `arrow-down-a-z` doesn't exist, so `setIcon()` silently no-ops and the
- * indicator renders as an empty 0x0 element. Confirmed by grepping `resources/obsidian.asar` in
- * that build. */
+ * PR-2 (T1/T5): the alphabetical id is `"lucide-arrow-down-az"`, not the bare `"arrow-down-az"`
+ * (itself a fix of the originally-hyphenated `"arrow-down-a-z"`, which doesn't exist at all). The
+ * installed Obsidian build (1.14.4) does register the Lucide icon as `arrow-down-az` internally,
+ * but Atlas's plugin-facing entry points — the global `setIcon()` and `MenuItem.setIcon()` — only
+ * resolve it under the `lucide-` prefixed id; the bare form silently no-ops on both, leaving the
+ * indicator and the "Sort children…" menu icon as empty 0x0 elements. `ItemView.addAction()`
+ * resolves the bare id fine, and Obsidian's own internal table-sort feature calls this exact icon
+ * via `lucide-arrow-down-az` (confirmed by grepping `resources/obsidian.asar`). The other four
+ * modes' ids (`clock`, `calendar-plus`, `list-ordered`, and the empty Manual string) are already
+ * confirmed live to resolve bare through these same entry points, so only this one needs the
+ * prefix — don't prefix the others by analogy without re-confirming them live first. */
 export const SORT_MODE_ICONS: Record<SortMode, string> = {
 	manual: "",
-	alphabetical: "arrow-down-az",
+	alphabetical: "lucide-arrow-down-az",
 	modified: "clock",
 	"time-added": "calendar-plus",
 	status: "list-ordered",
