@@ -76,10 +76,26 @@ export class McpServer {
 	 * R1: calling `start()` again while a previous call is still pending (e.g. an `onload`
 	 * auto-start racing a settings-toggle start) returns the same in-flight promise rather than
 	 * attempting a second, redundant `listen()` on the same port.
+	 *
+	 * R11: if a `stop()` is *also* waiting on that pending attempt (it will close the socket the
+	 * moment it binds, per `stopRequested` below), this call's own intent — "start", issued after
+	 * that `stop()` — must not be silently dropped by just handing back the same promise the
+	 * `stop()` is about to make moot. Instead it chains a fresh attempt to run right after the
+	 * pending one settles, so the last caller's intent (start) wins rather than the `stop()` that
+	 * merely arrived in between.
 	 */
 	start(): Promise<void> {
 		if (this.running) return Promise.resolve();
-		if (this.startPromise) return this.startPromise;
+		if (this.startPromise) {
+			if (!this.stopRequested) return this.startPromise;
+			const chained: Promise<void> = this.startPromise.then(() => this.startFresh());
+			this.startPromise = chained;
+			return chained;
+		}
+		return this.startFresh();
+	}
+
+	private startFresh(): Promise<void> {
 		this.stopRequested = false;
 		const wrapped: Promise<void> = this.attemptStart().finally(() => {
 			if (this.startPromise === wrapped) this.startPromise = null;

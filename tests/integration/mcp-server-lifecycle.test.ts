@@ -1,7 +1,7 @@
 import { createServer as createNetServer } from "node:net";
 import { request } from "node:http";
 import { networkInterfaces } from "node:os";
-import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { App, Platform } from "obsidian";
 import { McpServer, shouldAutoStartMcpServer } from "../../src/mcp-server";
 import { McpTool } from "../../src/mcp-protocol";
@@ -185,6 +185,19 @@ describe("McpServer — R1: start()/stop() race safety", () => {
 		expect(server.getBoundAddress()).toEqual({ address: "127.0.0.1", port });
 	});
 
+	it("R11: a start() issued right after stop() while an earlier start() is still pending wins — the last intent (on) takes effect", async () => {
+		const port = await getFreePort();
+		const server = makeServer(() => port);
+
+		const a = server.start();
+		const b = server.stop();
+		const c = server.start();
+		await Promise.all([a, b, c]);
+
+		expect(server.isRunning()).toBe(true);
+		expect(server.getBoundAddress()).toEqual({ address: "127.0.0.1", port });
+	});
+
 	it("an onload auto-start racing a settings toggle never produces a false 'port already in use' Notice", async () => {
 		const port = await getFreePort();
 		const notifications: string[] = [];
@@ -303,37 +316,52 @@ describe("McpServer — F1: binds 127.0.0.1 explicitly", () => {
 	});
 
 	const lanIp = pickNonInternalIPv4();
-	// R3: some sandboxes/VPN-tunnelled hosts silently drop packets to a closed port on a
-	// non-loopback local address instead of sending TCP RST (no ECONNREFUSED ever arrives, only a
-	// timeout) — a firewall/network-namespace property of the *environment*, not something this
-	// server's own code controls either way. Probed once in `beforeAll`, against a port nothing
-	// binds, so the real assertion below skips itself with a clear reason on such a host rather
-	// than failing on something this PR can't fix.
-	let canObserveRefusal = false;
-	beforeAll(async () => {
-		if (!lanIp) return;
-		try {
-			await connectWithTimeout(lanIp, 1, 1500);
-		} catch (err) {
-			canObserveRefusal = (err as NodeJS.ErrnoException).code === "ECONNREFUSED";
-		}
-	});
 
-	it("a request addressed to the machine's own LAN/external IP is refused (ECONNREFUSED) — only 127.0.0.1 is listening", async (ctx) => {
+	// R13: the naive version of this test (probe a closed port directly and expect ECONNREFUSED)
+	// always skipped on this dev Mac — its LAN interface silently drops packets to closed ports
+	// over a non-loopback address instead of sending TCP RST, so no ECONNREFUSED (or any reply)
+	// ever arrives, closed port or not. That made the skip-check indistinguishable from "this
+	// environment can't observe LAN refusal at all" and from "this environment can't route to
+	// its own LAN IP at all" — the real F1 property (127.0.0.1-only binding) was never actually
+	// exercised here. A *control* listener, explicitly bound to `0.0.0.0` (all interfaces), is
+	// reachable via the LAN IP on this same host — proving the environment *can* route LAN-IP
+	// traffic to a real listener. Only once that control succeeds does the test ask whether the
+	// MCP server's own 127.0.0.1-only listener is reachable the same way (it must not be);
+	// skip is reserved for the case where even the control itself can't connect.
+	it("a 0.0.0.0 control listener is reachable over the LAN IP, but the MCP server's 127.0.0.1-only listener is not", async (ctx) => {
 		if (!lanIp) {
 			ctx.skip("this machine has no non-internal IPv4 address to probe against");
 			return;
 		}
-		if (!canObserveRefusal) {
-			ctx.skip("this environment doesn't deliver ECONNREFUSED for a closed port on a non-loopback local address (a firewall/VPN property of the sandbox, not this server's code)");
+
+		const { createServer: createHttpServer } = await import("node:http");
+		const control = createHttpServer((_req, res) => res.end("ok"));
+		await new Promise<void>((resolve, reject) => {
+			control.once("error", reject);
+			control.listen(0, "0.0.0.0", () => resolve());
+		});
+		const controlPort = (control.address() as { port: number }).port;
+
+		try {
+			await connectWithTimeout(lanIp, controlPort, 1500);
+		} catch (err) {
+			ctx.skip(
+				`this environment doesn't deliver LAN-IP traffic even to a 0.0.0.0 control listener (${(err as Error).message}) — a sandbox/VPN property of the environment, not this server's code`
+			);
 			return;
+		} finally {
+			await new Promise<void>((resolve) => control.close(() => resolve()));
 		}
+
 		const server = makeServer(() => 0);
 		await server.start();
 		const port = server.getBoundAddress()!.port;
 
-		await expect(connectWithTimeout(lanIp, port, 2000)).rejects.toMatchObject({ code: "ECONNREFUSED" });
-	}, 5000);
+		// F1: refused outright (ECONNREFUSED) or, on a host that drops rather than resets,
+		// never answered within the bound — either way, never a real response the way the
+		// 0.0.0.0 control above just proved this environment is capable of delivering.
+		await expect(connectWithTimeout(lanIp, port, 2000)).rejects.toBeInstanceOf(Error);
+	}, 8000);
 });
 
 /** The first non-internal (not 127.0.0.1/::1) IPv4 address this machine has, or `null` if there
