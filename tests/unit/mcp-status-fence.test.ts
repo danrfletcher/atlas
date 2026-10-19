@@ -1,7 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
-import { mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { tmpdir } from "node:os";
 import type { App } from "obsidian";
 import { App as MockApp } from "../mocks/obsidian";
 import { ViewsManager } from "../../src/views";
@@ -19,10 +18,16 @@ import {
 /**
  * PR-2.F1's own fence (F2): "No file, folder or node-placement mutation — every write only ever
  * assigns `explicitStatusId`". Combines a static source-text check (no disk-write API call
- * anywhere in the new MCP status-tool files) with two behavioral ones (actually driving every
- * tool, including `set_node_status`, against the mock `Vault`'s own `calls` tracker, and a second
- * check against a real file on real disk) — the same pattern `tests/unit/fence-checks.test.ts`
+ * anywhere in the new MCP status-tool files) with a behavioral one (actually driving every tool,
+ * including `set_node_status`, against the mock `Vault`'s own `calls` tracker and a full
+ * before/after snapshot of every file it holds) — the same pattern `tests/unit/fence-checks.test.ts`
  * (F5) uses for Folder sources.
+ *
+ * R2 fix: this file used to also assert against a real file in a freshly `mkdtemp`'d directory
+ * with no connection to the mock vault built by `setup()` — nothing the tool does could ever reach
+ * that path, so the assertion could never fail regardless of what the code did. Removed in favor
+ * of a `vaultSnapshot` taken before and after against the one vault the tools actually see, which
+ * a stray write *would* change.
  */
 
 const root = join(__dirname, "../..");
@@ -64,13 +69,23 @@ function setup() {
 		getStatusesManager: () => statusesManager,
 		getVaultName: () => "Fixture Vault",
 		getVaultPath: () => "/tmp/fixture",
+		getFolderSourcePath: () => "",
 	};
 	return { app, ctx };
 }
 
+/** A snapshot of every file the mock vault currently holds — path, extension, stat (ctime/mtime/
+ * size) and, where it exists, the content `vault.create` would have written. Equal before/after
+ * snapshots are a real guarantee here: any stray `vault.create`/`modify`/etc. call against *this*
+ * vault (the one the tools actually see) would change one of these fields. */
+function vaultSnapshot(app: MockApp): unknown {
+	return app.vault.getFiles().map((f) => ({ path: f.path, extension: f.extension, stat: { ...f.stat }, content: app.vault.contents.get(f.path) }));
+}
+
 describe("F2 behavioral check — driving every status tool, including set_node_status, never records a Vault write", () => {
-	it("list_views/list_nodes/list_status_sets/get_node_status/set_node_status leave vault.calls empty", () => {
+	it("list_views/list_nodes/list_status_sets/get_node_status/set_node_status leave vault.calls empty, and every file's own stat/content untouched", () => {
 		const { app, ctx } = setup();
+		const before = vaultSnapshot(app);
 
 		createListViewsTool(ctx).handler({});
 		createListNodesTool(ctx).handler({});
@@ -79,27 +94,9 @@ describe("F2 behavioral check — driving every status tool, including set_node_
 		createSetNodeStatusTool(ctx).handler({ view: "Job Hunt", nodeId: "node-datadog", statusLabel: "Applied" });
 
 		expect(app.vault.calls).toEqual([]);
-	});
-});
-
-describe("F2 real-filesystem check — a status write leaves the vault's actual file list, content and mtime untouched", () => {
-	it("a real file on disk is byte-for-byte and mtime-identical before and after set_node_status", async () => {
-		const dir = mkdtempSync(join(tmpdir(), "atlas-mcp-f2-"));
-		const filePath = join(dir, "Datadog.md");
-		writeFileSync(filePath, "# Datadog\n\nSome note content.\n");
-		const before = statSync(filePath);
-		const contentBefore = readFileSync(filePath, "utf8");
-
-		const { ctx } = setup();
-		createSetNodeStatusTool(ctx).handler({ view: "Job Hunt", nodeId: "node-datadog", statusLabel: "Applied" });
-
-		// Give any stray async disk write a chance to land before asserting it didn't.
-		await new Promise((resolve) => setTimeout(resolve, 10));
-
-		const after = statSync(filePath);
-		const contentAfter = readFileSync(filePath, "utf8");
-		expect(contentAfter).toBe(contentBefore);
-		expect(after.mtimeMs).toBe(before.mtimeMs);
-		expect(after.size).toBe(before.size);
+		// R2: the mock vault's own file list, every file's stat and any written content are
+		// byte-for-byte identical before and after — a stray write to a file this fixture actually
+		// owns would change this, unlike the old mkdtemp-dir check which nothing could ever reach.
+		expect(vaultSnapshot(app)).toEqual(before);
 	});
 });
