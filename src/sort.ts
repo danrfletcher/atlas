@@ -4,6 +4,7 @@
  * file only adds `"alphabetical"` / `"modified"` / `"time-added"`, which — unlike `"status"` — are
  * never inherited past a governor's own direct children (F6), so the render pass reads them
  * straight off the nearest ancestor rather than walking `findSortGovernor`'s inheritance chain. */
+import { addIcon } from "obsidian";
 import { ViewNode, StatusGovernance } from "./types";
 
 /** Every value `StatusGovernance.sortMode` can hold. Kept here (not re-exported from `types.ts`)
@@ -149,23 +150,50 @@ export function sortModeLabel(mode: SortMode, reverse: boolean): string {
 	}
 }
 
+/** PR-2 (T12): the A-Z/Z-A icon registered under Atlas's own id, bypassing Obsidian's Lucide
+ * lookup entirely. Three straight rounds (T1/T5/T9, see `src/explorer-view.ts`'s git history)
+ * tried progressively different id strings for the same built-in Lucide icon — the bare
+ * `"arrow-down-az"`, then the `lucide-`-prefixed `"lucide-arrow-down-az"` — and both left the
+ * indicator and the "Sort children…" menu item as an empty 0x0 element with no `<svg>`, confirmed
+ * live across multiple plugin reloads and full app restarts. The icon's own path data does exist
+ * in the installed Obsidian build's Lucide table (confirmed by grepping `resources/obsidian.asar`
+ * for a bare `"arrow-down-az"` key with real path data), so the failure is specifically in how
+ * Atlas's plugin-facing entry points — the global `setIcon()` and `MenuItem.setIcon()` — resolve
+ * an id at runtime; this one Lucide icon apparently isn't eagerly registered into Obsidian's live
+ * icon cache the way `clock`/`calendar-plus`/`list-ordered` are, and no bare-or-prefixed string
+ * ever reaches it through those two entry points. `addIcon()` sidesteps the lookup altogether by
+ * registering a plugin-owned icon id with its own inline SVG, the same way any plugin ships a
+ * custom icon — `registerSortIcons()` below must run once, before any view renders, so both
+ * `SORT_MODE_ICONS.alphabetical` and the "Sort children…" menu item's `.setIcon()` call
+ * (`src/explorer-view.ts`) always resolve a real icon. */
+export const ATLAS_SORT_AZ_ICON_ID = "atlas-sort-az";
+
+/** Lucide's own `arrow-down-az` path data (5 strokes), wrapped in a `<g>` that scales Lucide's
+ * 24x24 viewBox up to Obsidian's 100x100 `addIcon` convention (100/24 ≈ 4.1667) and carries the
+ * stroke styling Lucide icons expect. Exported only for the registration test below. */
+export const ATLAS_SORT_AZ_ICON_SVG =
+	'<g transform="scale(4.1667)" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m3 16 4 4 4-4"/><path d="M7 20V4"/><path d="M20 8h-5"/><path d="M15 10V6.5a2.5 2.5 0 0 1 5 0V10"/><path d="M15 14h5l-5 6h5"/></g>';
+
+/** PR-2 (T12): registers `ATLAS_SORT_AZ_ICON_ID` with Obsidian via `addIcon()`. Called once from
+ * `AtlasPlugin.onload()`, before `registerView()`, so the id is resolvable the first time any
+ * view renders the G13 indicator or opens the "Sort children…" menu. */
+export function registerSortIcons(): void {
+	addIcon(ATLAS_SORT_AZ_ICON_ID, ATLAS_SORT_AZ_ICON_SVG);
+}
+
 /** PR-2 (G21): the icon per mode for the "Sort children…" item and the G13 sort indicator. No
  * icon is ever shown for `"manual"` (an effectively-Manual list shows no indicator at all).
  *
- * PR-2 (T1/T5): the alphabetical id is `"lucide-arrow-down-az"`, not the bare `"arrow-down-az"`
- * (itself a fix of the originally-hyphenated `"arrow-down-a-z"`, which doesn't exist at all). The
- * installed Obsidian build (1.14.4) does register the Lucide icon as `arrow-down-az` internally,
- * but Atlas's plugin-facing entry points — the global `setIcon()` and `MenuItem.setIcon()` — only
- * resolve it under the `lucide-` prefixed id; the bare form silently no-ops on both, leaving the
- * indicator and the "Sort children…" menu icon as empty 0x0 elements. `ItemView.addAction()`
- * resolves the bare id fine, and Obsidian's own internal table-sort feature calls this exact icon
- * via `lucide-arrow-down-az` (confirmed by grepping `resources/obsidian.asar`). The other four
- * modes' ids (`clock`, `calendar-plus`, `list-ordered`, and the empty Manual string) are already
- * confirmed live to resolve bare through these same entry points, so only this one needs the
- * prefix — don't prefix the others by analogy without re-confirming them live first. */
+ * PR-2 (T12): the alphabetical id is Atlas's own `ATLAS_SORT_AZ_ICON_ID`, registered via
+ * `registerSortIcons()` — see that function's doc comment for why a Lucide id string alone (bare
+ * or `lucide-`-prefixed) never resolves through `setIcon()`/`MenuItem.setIcon()` for this
+ * particular icon. The other four modes' ids (`clock`, `calendar-plus`, `list-ordered`, and the
+ * empty Manual string) are already confirmed live to resolve bare through these same entry
+ * points, so only this one needs its own registered icon — don't register the others by analogy
+ * without re-confirming them live first. */
 export const SORT_MODE_ICONS: Record<SortMode, string> = {
 	manual: "",
-	alphabetical: "lucide-arrow-down-az",
+	alphabetical: ATLAS_SORT_AZ_ICON_ID,
 	modified: "clock",
 	"time-added": "calendar-plus",
 	status: "list-ordered",

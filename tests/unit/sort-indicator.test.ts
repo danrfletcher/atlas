@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import * as obsidianMock from "obsidian";
 import { AtlasExplorerView } from "../../src/explorer-view";
+import { ATLAS_SORT_AZ_ICON_ID } from "../../src/sort";
 import type { StatusGovernance } from "../../src/types";
 import { makeSectionHarness } from "../explorer-header-fixtures";
 
@@ -24,15 +25,16 @@ describe("PR-2 G13 — the sort indicator's icon and tooltip, per mode and direc
 	// in this file so other suites' default (no-op) setIcon/setTooltip aren't left spied on.
 	afterEach(() => vi.restoreAllMocks());
 
-	it("A-Z: lucide-arrow-down-az icon, 'Sorted: A-Z' tooltip", () => {
+	it("A-Z: resolves to Atlas's own registered sort-az icon id, 'Sorted: A-Z' tooltip", () => {
 		const { el, setIconSpy, setTooltipSpy } = render({ sortMode: "alphabetical" });
 		const icon = el.querySelector(".atlas-sort-indicator") as HTMLElement;
 		expect(icon).toBeTruthy();
-		// PR-2 (T1/T5): must be the lucide-prefixed id "lucide-arrow-down-az" — neither the
-		// hyphenated "arrow-down-a-z" (doesn't exist) nor the bare "arrow-down-az" (exists, but
-		// setIcon()/MenuItem.setIcon() don't resolve it unprefixed) renders anything; both leave
-		// the indicator an empty 0x0 element.
-		expect(setIconSpy).toHaveBeenCalledWith(icon, "lucide-arrow-down-az");
+		// PR-2 (T1/T5/T9/T12): neither the hyphenated "arrow-down-a-z" (doesn't exist), the bare
+		// "arrow-down-az", nor the lucide-prefixed "lucide-arrow-down-az" ever rendered anything
+		// through setIcon()/MenuItem.setIcon() in the real Obsidian build — all three left the
+		// indicator an empty 0x0 element across three fix rounds. Atlas now registers its own
+		// icon id via addIcon() (see registerSortIcons() in sort.ts) and points here at that id.
+		expect(setIconSpy).toHaveBeenCalledWith(icon, ATLAS_SORT_AZ_ICON_ID);
 		expect(setTooltipSpy).toHaveBeenCalledWith(icon, "Sorted: A-Z");
 	});
 
@@ -106,7 +108,7 @@ describe("PR-2 G13 — the Bucket header carries the same indicator as a Folder 
 		await h.render();
 		const icon = h.bucketHeader().querySelector(".atlas-sort-indicator") as HTMLElement;
 		expect(icon).toBeTruthy();
-		expect(setIconSpy).toHaveBeenCalledWith(icon, "lucide-arrow-down-az");
+		expect(setIconSpy).toHaveBeenCalledWith(icon, ATLAS_SORT_AZ_ICON_ID);
 		h.teardown();
 	});
 

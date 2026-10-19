@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { Menu } from "obsidian";
 import { AtlasExplorerView } from "../../src/explorer-view";
+import { ATLAS_SORT_AZ_ICON_ID } from "../../src/sort";
 import { ApiItemState, StatusGovernance, View, ViewNode } from "../../src/types";
 
 const view: View = { id: "v1", name: "Default", inboxMode: "view", root: [] };
@@ -330,6 +331,14 @@ describe("PR-1 G6/G7 — Sort children… menu", () => {
 		expect(build("showUnitMenu", unitNode()).menu.titles()).toContain("Sort children…");
 		expect(build("showMetaFolderMenu", metaNode()).menu.titles()).toContain("Sort children…");
 		expect(build("showBucketHeaderMenu").menu.titles()).toContain("Sort children…");
+	});
+
+	// PR-2 (T12): the "Sort children…" item's own icon must resolve to Atlas's registered
+	// sort-az id, not a bare or lucide-prefixed Lucide string — neither ever rendered an <svg>
+	// through MenuItem.setIcon() in the real Obsidian build across three fix rounds (T5/T9/T12).
+	it("its own icon is Atlas's registered sort-az icon id", () => {
+		const { menu } = build("showUnitMenu", unitNode());
+		expect(menu.items.find((i) => i.title === "Sort children…")!.icon).toBe(ATLAS_SORT_AZ_ICON_ID);
 	});
 
 	it("its chooser lists exactly Manual, A-Z, Modified, Time added, then Reverse order", () => {

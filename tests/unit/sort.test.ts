@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { compareSortKeys, currentSortMode, displayNameFor, isDirectSortMode, SORT_MODE_CHOICES } from "../../src/sort";
+import * as obsidianMock from "obsidian";
+import { ATLAS_SORT_AZ_ICON_ID, ATLAS_SORT_AZ_ICON_SVG, compareSortKeys, currentSortMode, displayNameFor, isDirectSortMode, registerSortIcons, SORT_MODE_CHOICES, SORT_MODE_ICONS } from "../../src/sort";
 import type { SortKey } from "../../src/sort";
 import type { ViewNode } from "../../src/types";
 
@@ -79,7 +80,7 @@ describe("PR-1 sort.ts — SORT_MODE_CHOICES", () => {
 	});
 });
 
-describe("PR-1 sort.ts — displayNameFor", () => {
+describe("PR-2 sort.ts — displayNameFor", () => {
 	it("uses a meta folder's own label", () => {
 		const node: ViewNode = { id: "f", type: "meta", label: "My Folder", children: [] };
 		expect(displayNameFor(node, "ignored")).toBe("My Folder");
@@ -89,5 +90,25 @@ describe("PR-1 sort.ts — displayNameFor", () => {
 		const node: ViewNode = { id: "u", type: "unit", ref: { kind: "file", path: "X.md" }, children: [] };
 		expect(displayNameFor(node, "X")).toBe("X");
 		expect(displayNameFor(node, undefined)).toBe("");
+	});
+});
+
+// PR-2 (T12): registerSortIcons() registers Atlas's own A-Z icon id via addIcon() — see
+// ATLAS_SORT_AZ_ICON_ID's doc comment for why a Lucide id string alone never resolved through
+// setIcon()/MenuItem.setIcon() for this icon across three straight fix rounds (T1/T5/T9).
+describe("PR-2 sort.ts — registerSortIcons", () => {
+	it("calls addIcon with ATLAS_SORT_AZ_ICON_ID and real, non-empty SVG path data", () => {
+		const before = obsidianMock.addIconCalls.length;
+		registerSortIcons();
+		const calls = obsidianMock.addIconCalls.slice(before);
+		expect(calls).toEqual([{ iconId: ATLAS_SORT_AZ_ICON_ID, svgContent: ATLAS_SORT_AZ_ICON_SVG }]);
+		expect(ATLAS_SORT_AZ_ICON_SVG).toContain("<path");
+		expect(ATLAS_SORT_AZ_ICON_SVG.length).toBeGreaterThan(0);
+	});
+
+	it("SORT_MODE_ICONS.alphabetical points at the registered id, not a bare or lucide-prefixed Lucide string", () => {
+		expect(SORT_MODE_ICONS.alphabetical).toBe(ATLAS_SORT_AZ_ICON_ID);
+		expect(SORT_MODE_ICONS.alphabetical).not.toBe("arrow-down-az");
+		expect(SORT_MODE_ICONS.alphabetical).not.toBe("lucide-arrow-down-az");
 	});
 });

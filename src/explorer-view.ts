@@ -35,6 +35,7 @@ import {
 	compareSortKeys,
 	currentSortMode,
 	isDirectSortMode,
+	ATLAS_SORT_AZ_ICON_ID,
 	SORT_MODE_CHOICES,
 	activeSortFor,
 	sortModeLabel,
@@ -487,9 +488,10 @@ function addSortMenuItem(
 	menu.addItem((item) =>
 		item
 			.setTitle("Sort children…")
-			// PR-2 (T5): MenuItem.setIcon() needs the lucide-prefixed id, same as the G13
-			// indicator's setIcon() call below — see the SORT_MODE_ICONS doc comment in sort.ts.
-			.setIcon("lucide-arrow-down-az")
+			// PR-2 (T12): neither a bare nor a lucide-prefixed Lucide id ever resolved here —
+			// see ATLAS_SORT_AZ_ICON_ID's doc comment in sort.ts. Use Atlas's own registered icon,
+			// same as the G13 indicator's setIcon() call below.
+			.setIcon(ATLAS_SORT_AZ_ICON_ID)
 			.onClick(() => {
 				const chooser = new Menu();
 				// PR-2 (R1/G19/E5): the ticks and the Reverse-disabled state are derived from
