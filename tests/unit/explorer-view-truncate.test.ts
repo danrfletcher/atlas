@@ -148,3 +148,24 @@ describe("G25 — truncate: API item rows share the one truncation-group count r
 		expect(fake.renderTruncationGroupHeader.mock.calls[0][5]).toBe(2);
 	});
 });
+
+// PR-2.F3 (G10) regression: the "Add under…" hidden-row helper decides whether a new row rendered
+// by looking for an element carrying its id in the bucket's DOM — production code tags each real
+// row with `data-select-key`, this fixture's stubbed `renderNode` tags it `data-id` instead, but
+// the underlying invariant the helper depends on is the same either way: a node folded into a
+// truncated group gets no element of its own at all, under any attribute name.
+describe("PR-2.F3 (G10) regression — a node folded into a truncated group has no element, matching the hidden-row helper's own DOM check", () => {
+	it("the third same-status sibling (standing in for one just added under the group) renders no element of its own", async () => {
+		const sm = makeStatusesManager();
+		const folder = folderGovernor({ truncatedStatuses: { todo: { enabled: true } } });
+		const real1 = realNode("real-1", { explicitStatusId: "todo" });
+		const real2 = realNode("real-2", { explicitStatusId: "todo" }); // stands in for the newly added-under row
+
+		const fake = makeFakeExplorer(sm);
+		const container = document.createElement("div");
+		await callRenderNodeList(fake, [real1, real2], container, view, 1, [folder], folder);
+
+		expect(container.querySelector('[data-id="real-2"]')).toBeNull();
+		expect(rowOrder(container)).toEqual(["group:node:folder:todo"]);
+	});
+});
