@@ -123,16 +123,19 @@ describe("UT-11 the menu builders", () => {
 	}
 
 	it("a meta folder's menu gains Replace with… between Rename and the rest, in the old order otherwise", () => {
+		// PR-2.F1: "Add under…" now also sits between Rename folder and Replace with…, but that's a
+		// different PR's own addition — this test still only pins the old Create/Replace with… order.
 		const empty = metaMenu(meta("m", "Empty"));
-		expect(empty.menu.titles()).toEqual(["Duplicate (Meta)", "Rename folder", "Replace with…", "Swap with…", "Data source…", "Delete folder"]);
+		expect(empty.menu.titles()).toEqual(["Duplicate (Meta)", "Rename folder", "Add under…", "Replace with…", "Swap with…", "Data source…", "Delete folder"]);
 		const full = metaMenu(meta("m", "Full", [unit("u", file("Existing.md"))]));
-		expect(full.menu.titles()).toEqual(["Duplicate (Meta)", "Rename folder", "Replace with…", "Swap with…", "Statuses", "Data source…", "Delete folder"]);
+		expect(full.menu.titles()).toEqual(["Duplicate (Meta)", "Rename folder", "Add under…", "Replace with…", "Swap with…", "Statuses", "Data source…", "Delete folder"]);
 	});
 
 	it("choosing Block, File or Module in the chooser starts that flow for this folder", () => {
 		const node = meta("m", "Empty");
 		const { menu, fake } = metaMenu(node);
-		menu.items[2].clickHandler!();
+		// index 2 is PR-2.F1's own "Add under…" item; "Replace with…" is now index 3.
+		menu.items[3].clickHandler!();
 		const chooser = Menu.shownAtPosition[0];
 		chooser.items[1].clickHandler!();
 		expect(fake.startCreateFromMeta).toHaveBeenCalledWith("file", view, node);
