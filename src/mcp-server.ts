@@ -165,7 +165,20 @@ export class McpServer {
 		// means the port was never successfully read.
 		let port: number | null = null;
 		try {
-			const { createServer } = await import("node:http"); // R8: lazy — never required on mobile
+			// T1: a dynamic `import("node:http")` survives `tsc` and vitest (both run under Node,
+			// where it's natively supported) but esbuild's cjs bundle leaves it as a literal
+			// runtime `import("node:http")` in main.js. Electron's renderer routes that through its
+			// ES module loader, which enforces CORS-like scheme restrictions and always rejects it
+			// with "Failed to fetch dynamically imported module: node:http" — so the real desktop
+			// app can never bind a listener at all, even though every test (running under Node)
+			// passes. A plain `require("node:http")` bundles to a CommonJS `require` call instead
+			// (the same shape `folder-source-outside.ts` already uses successfully for `fs`), which
+			// Electron's renderer handles natively. Calling it from here, lazily, inside
+			// `attemptStart()` (itself only ever reached from the `!Platform.isMobile` path in
+			// `main.ts`) keeps R8's original guarantee: the call executes only when a desktop
+			// `start()` actually attempts a bind, never at module-load time, so nothing runs on
+			// mobile where Node builtins don't exist.
+			const { createServer } = requireNodeHttp();
 			port = this.options.getPort();
 			const boundPort = port;
 			await new Promise<void>((resolve) => {
@@ -285,6 +298,17 @@ export class McpServer {
 			}
 		}
 	}
+}
+
+/** T1: a lazy, typed wrapper around the global `require` for `node:http`. A plain
+ * `require("node:http")` call (rather than `import("node:http")`) is what makes this bundle to a
+ * CommonJS `require` in esbuild's cjs output instead of a literal runtime `import()` — see the
+ * call site's comment in `attemptStart()` for why that distinction matters live, in Electron's
+ * renderer. Declared as its own function (rather than inlined) purely so the `require` global
+ * (declared by `@types/node`) and its return type are both resolved in exactly one place. */
+function requireNodeHttp(): typeof import("node:http") {
+	// eslint-disable-next-line @typescript-eslint/no-require-imports -- T1: must stay `require`, not `import()` — see above.
+	return require("node:http");
 }
 
 /** The user/console-facing message for a failed start — shared between the `error` event (always
