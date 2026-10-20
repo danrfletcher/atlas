@@ -83,6 +83,34 @@ describe("PR-2 R11 — the focus-regain refresh waits for the pointer gesture", 
 		expect(render).toHaveBeenCalledTimes(1); // the refresh the trigger promised, after the gesture
 	});
 
+	it("holds when the leaf is activated by a capture-phase pointerdown listener on the leaf container, as Obsidian does", async () => {
+		await open();
+		const render = vi.spyOn(ex, "render");
+		fireLeafChange({}); // the editor was the active pane
+
+		// Obsidian: `leafContainer.addEventListener("pointerdown", () => setActiveLeaf(leaf), { capture: true })`.
+		// The event really travels document-capture -> container-capture -> row, so this only passes if
+		// Atlas's own listener is on the document in the capture phase (a bubble-phase or row-level
+		// listener would run after the activation, when the render has already been queued).
+		const container = document.body.appendChild(document.createElement("div"));
+		const row = container.appendChild(document.createElement("div"));
+		const onClick = vi.fn();
+		row.addEventListener("click", onClick);
+		container.addEventListener("pointerdown", () => fireLeafChange(ex.leaf), { capture: true });
+
+		row.dispatchEvent(new Event("pointerdown", { bubbles: true }));
+		await vi.advanceTimersByTimeAsync(50);
+		expect(render).not.toHaveBeenCalled();
+		expect(row.isConnected).toBe(true);
+
+		row.dispatchEvent(new Event("pointerup", { bubbles: true }));
+		row.dispatchEvent(new Event("click", { bubbles: true }));
+		expect(onClick).toHaveBeenCalledTimes(1);
+		expect(render).not.toHaveBeenCalled();
+		await vi.advanceTimersByTimeAsync(10);
+		expect(render).toHaveBeenCalledTimes(1);
+	});
+
 	it("without a pointer gesture the focus-regain refresh still renders right away", async () => {
 		await open();
 		const render = vi.spyOn(ex, "render");
