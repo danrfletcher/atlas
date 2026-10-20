@@ -114,6 +114,7 @@ describe("startAddUnderModule — G3 happy path", () => {
 		expect(openNameDialog).toHaveBeenCalledWith(s.deps.app, {
 			title: "Add module under quarry-drones",
 			confirmLabel: "Add",
+			mode: "full",
 			initialValue: "",
 			poolFolder: "_pool",
 			excludedFolders: ["_pool"],

@@ -41,6 +41,7 @@ function setup(root: ViewNode[] = tree()) {
 	const app = new App();
 	const vm = new ViewsManager(app as unknown as App, [{ id: VIEW_ID, name: "Default", inboxMode: "view", root }], VIEW_ID, () => {});
 	const selection = new Set<string>();
+	const tracked = new Set<{ close(): void }>();
 	const addMetaFolder = vi.fn((viewId: string, parentId: string | null, label: string) => vm.addMetaFolder(viewId, parentId, label));
 	const deps: AddUnderFolderDeps = {
 		app: app as unknown as App,
@@ -51,8 +52,12 @@ function setup(root: ViewNode[] = tree()) {
 			selection.clear();
 			selection.add(nodeId);
 		},
+		trackPrompt: (prompt) => {
+			tracked.add(prompt);
+			return () => void tracked.delete(prompt);
+		},
 	};
-	return { app, vm, deps, selection, addMetaFolder };
+	return { app, vm, deps, selection, addMetaFolder, tracked };
 }
 
 beforeEach(() => {

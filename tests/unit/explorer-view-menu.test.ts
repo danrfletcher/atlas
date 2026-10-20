@@ -145,7 +145,7 @@ describe("PR-1 G11e — shared source/status menu items on a meta and a unit men
 	const apiSource = { url: "https://x", method: "GET" as const, mapping: { idField: "id", labelField: "name" }, mode: "merge" as const, refreshOnViewLoad: false };
 
 	function fakeFor(): Record<string, unknown> {
-		const plugin = { app: {}, unitIndex: { getUnits: () => [] }, viewsManager: { getNode: () => null } };
+		const plugin = { app: {}, unitIndex: { getUnits: () => [] }, viewsManager: { getNode: () => null, managedRowFilterState: () => "shown" } };
 		const target: Record<string, unknown> = { plugin };
 		return new Proxy(target, {
 			get: (t, prop: string) => (prop in t ? t[prop] : vi.fn()),
@@ -195,7 +195,7 @@ describe("PR-2 G1-G4 — Swap menu items", () => {
 
 	function swapFake() {
 		return {
-			plugin: { app: {}, unitIndex: { getUnits: () => [] }, viewsManager: { getNode: () => null } },
+			plugin: { app: {}, unitIndex: { getUnits: () => [] }, viewsManager: { getNode: () => null, managedRowFilterState: () => "shown" } },
 			openSwapPicker: vi.fn(),
 			openSwapForFolder: vi.fn(),
 		};
@@ -472,6 +472,7 @@ describe("PR-2.F3 — Add under… > Folder: an active filter is never named as 
 		const fakeThis = {
 			plugin: { app, statusesManager, viewsManager: vm },
 			filterText: "drone",
+			openAddUnderPrompts: new Set<{ close(): void }>(),
 			bucketListEl: document.createElement("div"), // never gets the new row appended: a plain fixture, not a real render
 			selectedBucketNodeIds: new Set<string>(),
 			selectedInboxRefKeys: new Set<string>(),
@@ -488,6 +489,8 @@ describe("PR-2.F3 — Add under… > Folder: an active filter is never named as 
 		};
 		(fakeThis as Record<string, unknown>).addUnderFolderDeps = proto.addUnderFolderDeps;
 		(fakeThis as Record<string, unknown>).addUnderHiddenSignals = proto.addUnderHiddenSignals;
+		(fakeThis as Record<string, unknown>).addUnderParentLabel = (AtlasExplorerView.prototype as unknown as Record<string, unknown>).addUnderParentLabel;
+		(fakeThis as Record<string, unknown>).expandAddUnderParent = (AtlasExplorerView.prototype as unknown as Record<string, unknown>).expandAddUnderParent;
 		(fakeThis as Record<string, unknown>).ancestorsForNode = proto.ancestorsForNode;
 
 		return { fakeThis, parentNode, promise: proto.runAddUnderFolder.call(fakeThis, liveView, parentNode) };
@@ -583,6 +586,9 @@ describe("PR-3.F1 — Add under… > Block: real flow, wired through startAddUnd
 		};
 		for (const key of ["runAddUnderBlock", "addUnderBlockDeps", "addUnderHiddenSignals", "ancestorsForNode", "matchesFilter"] as const) {
 			(fakeThis as Record<string, unknown>)[key] = proto[key];
+		}
+		for (const key of ["addUnderParentLabel", "expandAddUnderParent"]) {
+			(fakeThis as Record<string, unknown>)[key] = (AtlasExplorerView.prototype as unknown as Record<string, unknown>)[key];
 		}
 
 		return { fakeThis, proto, liveView, parentNode };
@@ -713,7 +719,7 @@ describe("PR-1 G6/G7 — Sort children… menu", () => {
 			plugin: {
 				app: { vault, fileManager: { renameFile: vi.fn() } },
 				unitIndex: { getUnits: () => [] },
-				viewsManager: { getNode: () => null, updateStatusGovernance: vi.fn() },
+				viewsManager: { getNode: () => null, managedRowFilterState: () => "shown", updateStatusGovernance: vi.fn() },
 				statusesManager: { findSortGovernor: vi.fn(() => statusGovernor) },
 			},
 		};

@@ -9,10 +9,12 @@ import {
 	blockPath,
 	buildBlockContent,
 	createOnDisk,
+	describe,
 	filePath,
 	freeBlockPath,
 	modulePaths,
 	parentExists,
+	trimmed,
 	usablePoolFolder,
 } from "./create-and-nest";
 
@@ -27,15 +29,6 @@ export const CREATE_ITEM_TITLE = "Replace with…";
 export function createDialogTitle(kind: CreateKind): string {
 	const { label } = CREATE_KINDS.find((entry) => entry.kind === kind)!;
 	return `Create ${label}`;
-}
-
-/** The chosen name with surrounding whitespace dropped. Inner text is kept exactly as typed. */
-function trimmed(name: string): string {
-	return name.trim();
-}
-
-function describe(error: unknown): string {
-	return error instanceof Error ? error.message : String(error);
 }
 
 export interface CreateFromMetaDeps {

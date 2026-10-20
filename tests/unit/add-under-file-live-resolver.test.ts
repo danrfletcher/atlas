@@ -63,6 +63,8 @@ describe("PR-3.F2 — Add under > File: real flow, wired through startAddUnder, 
 			startAddUnder(this: unknown, kind: string, view: View, node: ViewNode): void;
 			runAddUnderFile(this: unknown, view: View, node: ViewNode): Promise<void>;
 			addUnderFileDeps(this: unknown): unknown;
+			addUnderParentLabel(this: unknown, ...a: unknown[]): unknown;
+			expandAddUnderParent(this: unknown, ...a: unknown[]): unknown;
 			addUnderHiddenSignals(this: unknown, ...a: unknown[]): unknown;
 			ancestorsForNode(this: unknown, ...a: unknown[]): unknown;
 			matchesFilter(this: unknown, text: string): boolean;
@@ -74,6 +76,8 @@ describe("PR-3.F2 — Add under > File: real flow, wired through startAddUnder, 
 			"startAddUnder",
 			"runAddUnderFile",
 			"addUnderFileDeps",
+			"addUnderParentLabel",
+			"expandAddUnderParent",
 			"addUnderHiddenSignals",
 			"ancestorsForNode",
 			"matchesFilter",

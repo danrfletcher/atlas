@@ -111,6 +111,7 @@ describe("startAddUnderFile — G2/GP3-GP5 happy path", () => {
 		expect(openNameDialog).toHaveBeenCalledWith(s.deps.app, {
 			title: "Add file under quarry-drones",
 			confirmLabel: "Add",
+			mode: "full",
 			initialValue: "",
 			poolFolder: "_pool",
 			excludedFolders: ["_pool"],
