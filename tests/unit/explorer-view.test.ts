@@ -16,16 +16,29 @@ vi.mock("../../src/api-source-modal", () => {
 	return { ApiSourceModal: FakeApiSourceModal };
 });
 
+/** PR-2.F2 R2: `startAddUnderFolder` itself (the prompt, the per-parent lock, the parent-exists
+ * checks) already has full coverage in `tests/unit/add-under-folder.test.ts`. Mocking it here
+ * isolates `runAddUnderFolder`'s own wiring — the render-then-check-visibility step — and lets the
+ * test drive the real `addUnderFolderDeps()`/`render()`/`awaitRenderSettled()`/`queueRender()`
+ * methods through a deliberately staged overlapping-render race. */
+vi.mock("../../src/add-under-folder", async (importOriginal) => {
+	const actual = await importOriginal<typeof import("../../src/add-under-folder")>();
+	return { ...actual, startAddUnderFolder: vi.fn() };
+});
+
 import type { App } from "obsidian";
 import { Menu, Notice } from "obsidian";
 import { ApiSourceModal } from "../../src/api-source-modal";
 import { AtlasExplorerView } from "../../src/explorer-view";
+import { AddUnderFolderDeps, startAddUnderFolder } from "../../src/add-under-folder";
 import { StatusesManager } from "../../src/statuses";
 import { View, ViewNode } from "../../src/types";
 import { ViewsManager } from "../../src/views";
 import { makeStatusesManager } from "./explorer-view-sort-truncate-helpers";
 import { meta } from "../integration/create-from-meta-fixtures";
 import { App as MockApp } from "../mocks/obsidian";
+
+const mockStartAddUnderFolder = startAddUnderFolder as unknown as ReturnType<typeof vi.fn>;
 
 const FakeApiSourceModal = ApiSourceModal as unknown as {
 	instances: { app: unknown; initial: unknown; headers: unknown; open: () => void; onSave: (result: unknown) => void }[];
@@ -264,6 +277,192 @@ describe("PR-1 G11b/E-a — source walks reach a sourced node nested under units
 		});
 	}
 });
+
+// PR-2.F2 R1: addUnderFolderDeps.selectOnly only ever cleared the bucket selection, leaving a prior
+// inbox selection (and a stale anchor) live — this broke "bucket and inbox selections are mutually
+// exclusive" (E5) whenever Add under… > Folder ran right-clicked with inbox rows still selected.
+describe("PR-2.F2 R1 — addUnderFolderDeps.selectOnly keeps bucket/inbox selection mutually exclusive", () => {
+	it("clears any inbox selection, replaces the bucket selection with exactly the new node, and anchors in bucket scope", () => {
+		const fakeThis = {
+			plugin: { app: {}, viewsManager: { getNode: vi.fn(), addMetaFolder: vi.fn(), setNodeCollapsed: vi.fn() } },
+			selectedBucketNodeIds: new Set<string>(["old-bucket-node"]),
+			selectedInboxRefKeys: new Set<string>(["file:Some.md"]),
+			selectionAnchor: "old-anchor" as string | null,
+			selectionAnchorScope: "inbox" as "bucket" | "inbox" | null,
+		};
+		const deps = (AtlasExplorerView.prototype as unknown as { addUnderFolderDeps: () => AddUnderFolderDeps }).addUnderFolderDeps.call(fakeThis);
+
+		deps.selectOnly("new-node");
+
+		expect([...fakeThis.selectedBucketNodeIds]).toEqual(["new-node"]);
+		expect([...fakeThis.selectedInboxRefKeys]).toEqual([]);
+		expect(fakeThis.selectionAnchor).toBe("new-node");
+		expect(fakeThis.selectionAnchorScope).toBe("bucket");
+	});
+});
+
+// PR-2.F2 R2: `render()`'s own `isCurrent()` guard only tells a superseded render to bail out early
+// — it says nothing about whether the render that superseded it has itself finished building the DOM
+// yet. A caller that needs the truly-latest, fully-settled DOM (like `runAddUnderFolder`'s G10 check)
+// must follow whichever render turns out to be the most recently *started* one, even if it only
+// starts after the caller began waiting.
+describe("PR-2.F2 R2 — render()/awaitRenderSettled track the truly latest render across an overlap", () => {
+	it("waits for a render that starts and supersedes an in-flight one, not just the first render it saw", async () => {
+		const resolvers: Array<() => void> = [];
+		const fakeThis: { latestRenderPromise: Promise<void> | null; renderNow: () => Promise<void> } = {
+			latestRenderPromise: null,
+			renderNow: vi.fn(() => new Promise<void>((resolve) => resolvers.push(resolve))),
+		};
+		const render = (AtlasExplorerView.prototype as unknown as { render: () => Promise<void> }).render.bind(fakeThis);
+		const awaitRenderSettled = (AtlasExplorerView.prototype as unknown as { awaitRenderSettled: () => Promise<void> }).awaitRenderSettled.bind(fakeThis);
+
+		// Render A starts (e.g. runAddUnderFolder's own direct `render()` call) ...
+		void render();
+		let settled = false;
+		const settledPromise = awaitRenderSettled().then(() => {
+			settled = true;
+		});
+
+		// ... then, while A is still in flight, render B starts and supersedes it — exactly the
+		// queued setTimeout(0) render firing mid-flight that R2 describes.
+		void render();
+
+		// A resolves (the superseded render bailing out early via its own isCurrent() check).
+		resolvers[0]();
+		await Promise.resolve();
+		await Promise.resolve();
+		expect(settled).toBe(false); // must still be waiting on B, the real latest render
+
+		resolvers[1]();
+		await settledPromise;
+		expect(settled).toBe(true);
+	});
+});
+
+// PR-2.F2 R2: `startAddUnderFolder` itself is mocked (see the top of this file) so this test can
+// stage the exact overlapping-render race against the real `addUnderFolderDeps()`, `render()`,
+// `awaitRenderSettled()` and `queueRender()` — only `ViewsManager.addMetaFolder`/`setNodeCollapsed`
+// (already covered by `tests/unit/views*.test.ts`) and the DOM-building half of `render()` are
+// stubbed, standing in for the parts this test doesn't need to re-prove.
+describe("PR-2.F2 R2 — runAddUnderFolder waits for an overlapping queued render before checking visibility", () => {
+	it("doesn't show the 'hidden by filter/sort/grouping' Notice when a save()-triggered render starts and finishes after the add's own direct render", async () => {
+		Notice.reset();
+		// jsdom in this test environment has no global `CSS` at all (not even without `.escape`),
+		// which `runAddUnderFolder`'s own visibility check relies on, same as `render()` itself
+		// already does elsewhere (src/explorer-view.ts). None of the IDs this test uses need real
+		// escaping, so a minimal stand-in is enough; restored after the test either way.
+		const originalCSS = (globalThis as { CSS?: unknown }).CSS;
+		(globalThis as { CSS?: { escape: (value: string) => string } }).CSS = {
+			escape: (value: string) => value.replace(/[^a-zA-Z0-9_-]/g, (ch) => `\\${ch}`),
+		};
+
+		try {
+			const created: ViewNode = meta("new-node", "Archive");
+			const parentNode: ViewNode = meta("parent", "Projects");
+
+			let callIndex = 0;
+			let resolveD: (() => void) | null = null;
+			let resolveQ: (() => void) | null = null;
+			const fakeThis: Record<string, unknown> = {
+				bucketListEl: document.createElement("div"),
+				latestRenderPromise: null,
+				renderQueued: false,
+				selectedBucketNodeIds: new Set<string>(),
+				selectedInboxRefKeys: new Set<string>(),
+				selectionAnchor: null,
+				selectionAnchorScope: null,
+				filterText: "",
+				expandedTruncationGroups: new Set<string>(),
+				plugin: {
+					app: {},
+					// PR-2.F3: `addUnderHiddenSignals` reads this to resolve the new row's governance —
+					// neither node here has `statusEnabled`, so a no-op stub (always "no governor") is
+					// enough; this test is about the render-overlap race, not reason classification.
+					statusesManager: { findGoverningAncestor: () => null, resolveNodeStatus: () => null },
+					viewsManager: {
+						getNode: vi.fn(() => parentNode),
+						// Standing in for the real ViewsManager.addMetaFolder, which calls save() and so
+						// (via this view's own ViewsManager.onChange subscription) queueRender() — the
+						// trigger for the race this test stages.
+						addMetaFolder: vi.fn(() => {
+							(fakeThis.queueRender as () => void)();
+							return created;
+						}),
+						setNodeCollapsed: vi.fn(() => {
+							(fakeThis.queueRender as () => void)();
+						}),
+					},
+				},
+			};
+			fakeThis.render = (AtlasExplorerView.prototype as unknown as { render: () => Promise<void> }).render;
+			fakeThis.awaitRenderSettled = (AtlasExplorerView.prototype as unknown as { awaitRenderSettled: () => Promise<void> }).awaitRenderSettled;
+			fakeThis.addUnderFolderDeps = (AtlasExplorerView.prototype as unknown as { addUnderFolderDeps: () => AddUnderFolderDeps }).addUnderFolderDeps;
+			fakeThis.queueRender = (AtlasExplorerView.prototype as unknown as { queueRender: () => void }).queueRender;
+			fakeThis.runAddUnderFolder = (AtlasExplorerView.prototype as unknown as { runAddUnderFolder: (view: View, node: ViewNode) => Promise<void> }).runAddUnderFolder;
+			fakeThis.addUnderHiddenSignals = (AtlasExplorerView.prototype as unknown as { addUnderHiddenSignals: (...a: unknown[]) => unknown }).addUnderHiddenSignals;
+			fakeThis.ancestorsForNode = (AtlasExplorerView.prototype as unknown as { ancestorsForNode: (...a: unknown[]) => unknown }).ancestorsForNode;
+			fakeThis.renderNow = vi.fn(() => {
+				callIndex += 1;
+				if (callIndex === 1) {
+					// D: runAddUnderFolder's own direct render call. Kept pending (e.g. still awaiting a
+					// promoted block's disk read in a real render) until this test resolves it below.
+					return new Promise<void>((resolve) => {
+						resolveD = resolve;
+					});
+				}
+				// Q: the queued render triggered above by addMetaFolder/setNodeCollapsed. Reassigns
+				// bucketListEl to a fresh, still-empty list right away (mirroring renderBucketSection's
+				// own `this.bucketListEl = listEl` before any row has been appended), and only appends
+				// the new row once this render itself actually finishes.
+				fakeThis.bucketListEl = document.createElement("div");
+				return new Promise<void>((resolve) => {
+					resolveQ = () => {
+						const row = document.createElement("div");
+						row.setAttribute("data-select-key", created.id);
+						(fakeThis.bucketListEl as HTMLElement).appendChild(row);
+						resolve();
+					};
+				});
+			});
+
+			mockStartAddUnderFolder.mockImplementation(async (deps: AddUnderFolderDeps, viewId: string, parentId: string) => {
+				const node = deps.addMetaFolder(viewId, parentId, "Archive");
+				if (!node) return null;
+				deps.expandParent(viewId, parentId);
+				deps.selectOnly(node.id);
+				return node;
+			});
+
+			const runPromise = (fakeThis.runAddUnderFolder as (view: View, node: ViewNode) => Promise<void>).call(fakeThis, view, parentNode);
+			let settled = false;
+			void runPromise.then(() => {
+				settled = true;
+			});
+
+			// Let the real setTimeout(0) scheduled by queueRender (inside addMetaFolder, above) actually
+			// fire — this is render Q starting mid-flight through render D, the overlap R2 describes.
+			await new Promise((resolve) => setTimeout(resolve, 0));
+			expect(resolveQ).not.toBeNull();
+			expect(settled).toBe(false); // D hasn't resolved yet; nothing should have settled
+
+			// D resolves (bails out early via isCurrent()) while Q is still mid-build (no row appended
+			// yet). The buggy version checked `bucketListEl` right here and wrongly showed the Notice.
+			resolveD!();
+			await Promise.resolve();
+			await Promise.resolve();
+			expect(settled).toBe(false); // must still be waiting on Q, the real latest render
+
+			// Q finishes and actually appends the new row.
+			resolveQ!();
+			await runPromise;
+
+			expect(Notice.instances.some((n) => n.message.includes("hidden by the current filter"))).toBe(false);
+		} finally {
+			(globalThis as { CSS?: unknown }).CSS = originalCSS;
+		}
+	});
+});
+
 
 // PR-3 (G1/G2/G3/E1/E2/F3): the real `makeDropZone`/`handleDrop` wiring, driven with dispatched
 // `dragover`/`drop`/`dragleave` events and a mocked row rectangle, against a real `ViewsManager` so

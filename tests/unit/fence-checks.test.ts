@@ -105,6 +105,96 @@ describe("F5 behavioral check — driving the real Folder-source paths never rec
 	});
 });
 
+// PR-2.F2: Folder is the first real "Add under…" choice (G4) — these grep-style checks mirror
+// PR-2.F1's own add-under-fence.test.ts for the one new module this PR adds, plus a static
+// check for the fence's F4 ("always the last child, no position choice").
+describe("PR-2.F2 fence — F2 (no command/toolbar change) and F4 (no sibling-insert/position choice)", () => {
+	it("src/add-under-folder.ts adds no new command, hotkey or toolbar button", () => {
+		const body = read("src/add-under-folder.ts");
+		expect(body).not.toMatch(/addCommand\(/);
+		expect(body).not.toMatch(/hotkeys\s*:/);
+		expect(body).not.toMatch(/toolbarButton\(/);
+	});
+
+	it("the toolbar's create section (Add block/file/module/folder) still has exactly four buttons", () => {
+		const body = read("src/explorer-view.ts");
+		const start = body.indexOf("// --- section 2: create");
+		const end = body.indexOf("// --- section 3: view controls");
+		expect(start).toBeGreaterThan(-1);
+		expect(end).toBeGreaterThan(start);
+		const section = body.slice(start, end);
+		expect((section.match(/this\.toolbarButton\(/g) ?? []).length).toBe(4);
+	});
+
+	it("src/add-under-folder.ts never splices or unshifts into a children array, and offers no position choice", () => {
+		const body = read("src/add-under-folder.ts");
+		expect(body).not.toMatch(/\.splice\(/);
+		expect(body).not.toMatch(/\.unshift\(/);
+		expect(body).not.toMatch(/position/i);
+	});
+
+	it("src/add-under-folder.ts contains no disk-write call (Folder is data-only)", () => {
+		expect(read("src/add-under-folder.ts")).not.toMatch(DISK_WRITE_CALL);
+	});
+});
+
+// PR-3.F3: Module's own fence check — F8 ("no undo: after a successful add there is no undo
+// entry, command or Notice button, and nothing in the code reverses a completed add"). Mirrors
+// PR-2.F2's own grep-style checks above for the new module this PR adds.
+describe("PR-3.F3 fence — F8 no undo for Add under > Module", () => {
+	it("src/add-under-module.ts adds no undo path, command, hotkey or toolbar button", () => {
+		const body = read("src/add-under-module.ts");
+		expect(body).not.toMatch(/addCommand\(/);
+		expect(body).not.toMatch(/hotkeys\s*:/);
+		expect(body).not.toMatch(/toolbarButton\(/);
+		expect(body).not.toMatch(/undo/i);
+	});
+
+	it("the toolbar's create section (Add block/file/module/folder) still has exactly four buttons", () => {
+		const body = read("src/explorer-view.ts");
+		const start = body.indexOf("// --- section 2: create");
+		const end = body.indexOf("// --- section 3: view controls");
+		expect(start).toBeGreaterThan(-1);
+		expect(end).toBeGreaterThan(start);
+		const section = body.slice(start, end);
+		expect((section.match(/this\.toolbarButton\(/g) ?? []).length).toBe(4);
+	});
+});
+
+// PR-2.F3: the G10 hidden-row helper only ever reads `filterText`, sort settings,
+// `truncatedStatuses` and `expandedTruncationGroups` (via the signals its caller computes) — it
+// must never write any of them. Static grep plus a behavioral check that a real call leaves a
+// `state` object with those fields byte-identical.
+describe("PR-2.F3 fence — the G10 helper never writes filterText, sort settings, truncatedStatuses or expandedTruncationGroups", () => {
+	const WRITES_GOVERNED_STATE = /\b(filterText|sortMode|sortReverse|truncatedStatuses|expandedTruncationGroups)\s*(=(?!=)|\.\s*(add|delete|clear|push|splice)\s*\()/;
+
+	it("src/add-under-hidden-notice.ts has no assignment or mutating call on any of those names", () => {
+		expect(read("src/add-under-hidden-notice.ts")).not.toMatch(WRITES_GOVERNED_STATE);
+	});
+
+	it("a real call leaves the caller's own governed-state object untouched, whether the row is hidden or visible", async () => {
+		const originalCSS = (globalThis as { CSS?: unknown }).CSS;
+		(globalThis as { CSS?: { escape: (v: string) => string } }).CSS = { escape: (v: string) => v };
+		try {
+			const { noticeIfAddedRowHidden } = await import("../../src/add-under-hidden-notice");
+			const governedState = { filterText: "drone", sortMode: "status", sortReverse: true, truncatedStatuses: { done: { enabled: true } }, expandedTruncationGroups: new Set(["a"]) };
+			const before = JSON.stringify({ ...governedState, expandedTruncationGroups: [...governedState.expandedTruncationGroups] });
+
+			await noticeIfAddedRowHidden("new-1", "Quarry Notes", "quarry-drones", {
+				render: () => Promise.resolve(),
+				getBucketListEl: () => document.createElement("div"), // empty: the row never rendered
+				filterActive: governedState.filterText.trim() !== "",
+			});
+
+			const after = JSON.stringify({ ...governedState, expandedTruncationGroups: [...governedState.expandedTruncationGroups] });
+			expect(after).toBe(before);
+		} finally {
+			(globalThis as { CSS?: unknown }).CSS = originalCSS;
+		}
+	});
+});
+
+
 // PR-1 (R1 fix) — F9: no new command-palette entry and no new keyboard shortcut is registered.
 describe("PR-1 F9 — no new command or keyboard shortcut", () => {
 	it("the registered command id set is exactly the pre-existing seven, with no sort command added", () => {

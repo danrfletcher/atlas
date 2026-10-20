@@ -22,7 +22,7 @@ import {
 export type { CreateKind };
 export { CREATE_KINDS, blockPath, buildBlockContent, filePath, freeBlockPath, modulePaths, usablePoolFolder };
 
-export const CREATE_ITEM_TITLE = "Create";
+export const CREATE_ITEM_TITLE = "Replace with…";
 
 export function createDialogTitle(kind: CreateKind): string {
 	const { label } = CREATE_KINDS.find((entry) => entry.kind === kind)!;
@@ -137,8 +137,10 @@ export async function startCreateFromMeta(deps: CreateFromMetaFlowDeps, kind: Cr
 	}
 }
 
-/** Adds "Create" to a meta folder's menu. Obsidian's public Menu API has no submenu, so choosing it
- * pops a second small menu with Block, File and Module at the same spot: two clicks either way. */
+/** Adds "Replace with…" to a meta folder's menu (PR-1.F1: renamed from "Create" to sit alongside
+ * "Swap with…"; the operation itself — replace the folder in place with a new Block, File or Module —
+ * is unchanged). Obsidian's public Menu API has no submenu, so choosing it pops a second small menu
+ * with Block, File and Module at the same spot: two clicks either way. */
 export function addCreateItem(menu: Menu, evt: Pick<MouseEvent, "clientX" | "clientY">, onChoose: (kind: CreateKind) => void): void {
 	menu.addItem((item) =>
 		item

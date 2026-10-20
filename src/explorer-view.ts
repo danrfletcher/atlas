@@ -21,9 +21,15 @@ import { createInterfaceNote, findInterfaceNote } from "./interface-notes";
 import { addBlock } from "./commands";
 import { addCreateModuleItem, startCreateModule, unitForRef } from "./create-module";
 import { CreateKind, addCreateItem, startCreateFromMeta } from "./create-from-meta";
+import { AddUnderKind, addAddUnderItem, canAddUnder, startAddUnder } from "./add-under";
+import { AddUnderFolderDeps, startAddUnderFolder } from "./add-under-folder";
+import { AddUnderBlockDeps, startAddUnderBlock } from "./add-under-block";
+import { AddUnderFileDeps, startAddUnderFile } from "./add-under-file";
+import { AddUnderModuleDeps, startAddUnderModule } from "./add-under-module";
+import { AddUnderHiddenNoticeSignals, noticeIfAddedRowHidden } from "./add-under-hidden-notice";
 import { SwapCandidate, SwapPickerModal, SwapSourceBlock, buildSwapCandidates, canSwapForAtlasFolder, canSwapNode } from "./swap";
 import { noticeIfLinksNotUpdated } from "./links-notice";
-import { generateBlockId } from "./display-text";
+import { generateBlockId, getFreeBlockDisplayTextFromContent } from "./display-text";
 import { ApiSourceModal } from "./api-source-modal";
 import { ViewLoadTrigger, dotStateFor, dotTooltip } from "./api-source-controller";
 import { obsidianRequestImpl } from "./api-request-obsidian";
@@ -854,6 +860,13 @@ export class AtlasExplorerView extends ItemView {
 	 * dismissed by ... view close counts as unanswered on an automatic refresh"). */
 	private openConfirmDeleteModals: ConfirmDeleteRowsModal[] = [];
 	private renderQueued = false;
+	/** PR-2.F2 R2: every call to `render()` (direct or via `queueRender`'s timeout) overwrites this
+	 * with its own promise before any `await` inside it can yield, so this always names the most
+	 * recently *started* render even if a later call supersedes an earlier one still in flight
+	 * (`renderSeq`'s `isCurrent()` check only tells a superseded render to bail early — it says
+	 * nothing about whether the one that superseded it has itself finished building the DOM yet).
+	 * `awaitRenderSettled()` polls this to know when the dust has actually settled. */
+	private latestRenderPromise: Promise<void> | null = null;
 	/** F11: rebuilt once per render from the flat unit list, so resolving a ref is O(1) instead of
 	 * an O(n) `find` per row — at thousands of units the naive scan-per-row was O(n^2) per render. */
 	private unitsByRefKey = new Map<string, Unit>();
@@ -1600,7 +1613,32 @@ export class AtlasExplorerView extends ItemView {
 
 	// --- top-level render --------------------------------------------------------------------------
 
-	private async render(): Promise<void> {
+	/** PR-2.F2 R2: thin wrapper around `renderNow()` so every call site (direct `await`/`void`, and
+	 * `queueRender`'s own deferred call) records its promise in `latestRenderPromise` before
+	 * returning — synchronously, so no macrotask or microtask can slip in between a call starting
+	 * and this being set. See `awaitRenderSettled()`. */
+	private render(): Promise<void> {
+		const promise = this.renderNow();
+		this.latestRenderPromise = promise;
+		return promise;
+	}
+
+	/** PR-2.F2 R2: waits not just for "a" render to finish, but for whichever render turns out to be
+	 * the most recently *started* one by the time the dust settles — including one that starts only
+	 * after this call begins waiting (the overlapping-render race `render()`'s own `isCurrent()` guard
+	 * describes: a render superseded mid-flight returns early without the newer render necessarily
+	 * having finished building the DOM yet). Any caller that needs to inspect the rendered DOM right
+	 * after triggering a mutation that may itself queue a render (e.g. via `ViewsManager.onChange`)
+	 * should call this instead of trusting a single `await this.render()`. */
+	private async awaitRenderSettled(): Promise<void> {
+		let prev: Promise<void> | null = null;
+		while (this.latestRenderPromise !== prev) {
+			prev = this.latestRenderPromise;
+			await prev;
+		}
+	}
+
+	private async renderNow(): Promise<void> {
 		const container = this.containerEl.children[1] as HTMLElement;
 		const renderId = ++this.renderSeq;
 		const isCurrent = () => renderId === this.renderSeq;
@@ -3678,6 +3716,17 @@ export class AtlasExplorerView extends ItemView {
 		addSortMenuItem(menu, evt, node, unitStatusGovernor, (patch) => this.plugin.viewsManager.updateStatusGovernance(view.id, node.id, patch));
 		addSourceAndStatusItems(menu, this.plugin, this, view, node, true);
 		menu.addSeparator();
+		// PR-2.F1 (G6/G7): "Add under…" sits directly above "Duplicate (Meta)". Eligibility is judged
+		// fresh here from the live node, never from render-time state — `missing`/`filteredOut` may
+		// have changed since the row was last drawn (e.g. a data source was just added).
+		if (
+			canAddUnder({ getNode: (viewId, nodeId) => this.plugin.viewsManager?.getNode(viewId, nodeId) ?? null }, view.id, node, {
+				missing: !unitForRef(this.plugin.unitIndex.getUnits(), ref),
+				filteredOut: this.plugin.viewsManager?.managedRowFilterState?.(view.id, node) === "filteredOut",
+			})
+		) {
+			addAddUnderItem(menu, evt, (kind) => this.startAddUnder(kind, view, node));
+		}
 		// PR 13: clones this row (and its whole meta-nested subtree, if it has one) as a new sibling
 		// right after it — same underlying unit, no disk duplicate, no naming scheme (two rows with
 		// the same label is expected — see duplicateNode's own doc comment for why).
@@ -3717,6 +3766,284 @@ export class AtlasExplorerView extends ItemView {
 			},
 			file
 		);
+	}
+
+	/** PR-2.F1: the seam every "Add under" choice calls. PR-2.F2: Folder gets its real create-and-nest
+	 * flow here. PR-3.F1: Block does too. PR-3.F2: File does too. PR-3.F3: Module does too — every
+	 * kind now has a real flow, so the no-op in `add-under.ts` is unreachable from here (kept only
+	 * as the shared type/menu-building module). */
+	private startAddUnder(kind: AddUnderKind, view: View, node: ViewNode): void {
+		if (kind === "folder") {
+			void this.runAddUnderFolder(view, node);
+			return;
+		}
+		if (kind === "block") {
+			void this.runAddUnderBlock(view, node);
+			return;
+		}
+		if (kind === "file") {
+			void this.runAddUnderFile(view, node);
+			return;
+		}
+		if (kind === "module") {
+			void this.runAddUnderModule(view, node);
+			return;
+		}
+		startAddUnder(kind, view, node);
+	}
+
+	/** PR-2.F2 (G4) / PR-2.F3 (G10): runs the Folder add-under flow against the real `ViewsManager`
+	 * and this view's own selection state, then — once the view has re-rendered with the new row
+	 * selected and its parent expanded — hands off to the shared `noticeIfAddedRowHidden` helper
+	 * (`add-under-hidden-notice.ts`), which checks whether the new row actually has a rendered
+	 * element and, if not, names the reason (G10); the node, selection and expansion are unaffected
+	 * either way. PR-3.F1-F3 (Block/File/Module) call the same helper unchanged. */
+	private async runAddUnderFolder(view: View, node: ViewNode): Promise<void> {
+		const created = await startAddUnderFolder(this.addUnderFolderDeps(), view.id, node.id);
+		if (!created) return;
+		const signals = this.addUnderHiddenSignals(view, node, created);
+		// R2 fix: `addMetaFolder`/`setNodeCollapsed` above each already went through `save()` and so
+		// `ViewsManager.onChange` → `queueRender()` before we ever get here, which can leave a render
+		// queued via `setTimeout(0)`. A plain `await this.render()` only guarantees *this* call's own
+		// render finished — if the queued one fires mid-flight (crossing a real macrotask, e.g. a
+		// promoted block's disk read in `resolveUnit`) and supersedes it, `render()`'s own
+		// `isCurrent()` guard makes the superseded call return early while the superseding one may
+		// still be mid-build, so `this.bucketListEl` could be the newer render's list with the new
+		// row not appended yet. `noticeIfAddedRowHidden`'s own `render` step is `awaitRenderSettled()`
+		// — it follows `latestRenderPromise` until it stops changing, so the DOM check inside it
+		// always runs against a render that has actually finished.
+		void this.render();
+		await noticeIfAddedRowHidden(created.id, created.label ?? "New folder", node.label ?? unitBasename(node), {
+			render: () => this.awaitRenderSettled(),
+			getBucketListEl: () => this.bucketListEl,
+			...signals,
+		});
+	}
+
+	/** PR-3.F1 (G1) / PR-2.F3 (G10): runs the Block add-under flow against the real `ViewsManager`,
+	 * unit index and workspace — `startAddUnderBlock` itself creates the file, nests it, expands the
+	 * parent, selects the new row and opens it in the editor (G1) — then, once the view has
+	 * re-rendered with the new row selected and expanded, hands off to the shared
+	 * `noticeIfAddedRowHidden` helper the same way `runAddUnderFolder` does. The new block is opened
+	 * regardless of whether its row ends up visible in the bucket; the hidden-row check only ever
+	 * affects the Notice, never the editor. */
+	private async runAddUnderBlock(view: View, node: ViewNode): Promise<void> {
+		const created = await startAddUnderBlock(this.addUnderBlockDeps(), view.id, node.id);
+		if (!created) return;
+		const label = getFreeBlockDisplayTextFromContent("", this.plugin.settings.blockDisplayLength);
+		const signals = this.addUnderHiddenSignals(view, node, created, label);
+		void this.render();
+		await noticeIfAddedRowHidden(created.id, label, node.label ?? unitBasename(node), {
+			render: () => this.awaitRenderSettled(),
+			getBucketListEl: () => this.bucketListEl,
+			...signals,
+		});
+	}
+
+	/** PR-3.F2 (G2) / PR-2.F3 (G10): runs the File add-under flow against the real `ViewsManager`
+	 * and this view's own selection state — `startAddUnderFile` creates the note, nests it, expands
+	 * the parent and selects the new row (never opens it) — then hands off to the shared
+	 * `noticeIfAddedRowHidden` helper the same way `runAddUnderBlock`/`runAddUnderFolder` do. The new
+	 * file's display text (its basename, same as a plain note's row) is what the filter-as-cause
+	 * check in `addUnderHiddenSignals` matches against — never Block's "(empty block)" fallback. */
+	private async runAddUnderFile(view: View, node: ViewNode): Promise<void> {
+		const created = await startAddUnderFile(this.addUnderFileDeps(), view.id, node.id);
+		if (!created) return;
+		const label = unitBasename(created).replace(/\.md$/, "");
+		const signals = this.addUnderHiddenSignals(view, node, created, label);
+		void this.render();
+		await noticeIfAddedRowHidden(created.id, label, node.label ?? unitBasename(node), {
+			render: () => this.awaitRenderSettled(),
+			getBucketListEl: () => this.bucketListEl,
+			...signals,
+		});
+	}
+
+	private addUnderFileDeps(): AddUnderFileDeps {
+		const { plugin } = this;
+		return {
+			app: plugin.app,
+			getPoolFolder: () => plugin.settings.poolFolder,
+			getExcludedFolders: () => plugin.settings.excludedFolders,
+			holdUnit: (path) => plugin.unitIndex.holdUnit(path),
+			getNode: (viewId, nodeId) => plugin.viewsManager.getNode(viewId, nodeId),
+			// The same label a live row currently shows: a Folder's own label, or the resolved text
+			// `resolveRef`/`resolveOutsideManagedRowInfo` already compute for a unit row (basename, or
+			// a free block's title/first line) — never a stale value captured at the row's last render.
+			getParentLabel: async (viewId, parentId) => {
+				const parentNode = plugin.viewsManager.getNode(viewId, parentId);
+				if (!parentNode) return "";
+				if (parentNode.type === "meta") return parentNode.label ?? "";
+				const view = plugin.viewsManager.getViews().find((v) => v.id === viewId);
+				if (!view) return parentNode.ref ? unitBasename(parentNode) : "";
+				const info = this.isOutsideManagedUnit(view, parentNode) ? this.resolveOutsideManagedRowInfo(parentNode.ref!) : await this.resolveRef(parentNode.ref!);
+				return info.text;
+			},
+			placeNewUnit: (viewId, ref, parentId) => plugin.viewsManager.placeNewUnit(viewId, ref, parentId),
+			expandParent: (viewId, parentId) => plugin.viewsManager.setNodeCollapsed(viewId, parentId, false),
+			// Same selection/anchor handling as Block and Folder (E5).
+			selectOnly: (nodeId) => {
+				this.selectedInboxRefKeys.clear();
+				this.selectedBucketNodeIds.clear();
+				this.selectedBucketNodeIds.add(nodeId);
+				this.selectionAnchor = nodeId;
+				this.selectionAnchorScope = "bucket";
+			},
+		};
+	}
+
+	/** PR-3.F3 (G3) / PR-2.F3 (G10): runs the Module add-under flow against the real `ViewsManager`
+	 * and this view's own selection state — `startAddUnderModule` creates the folder-plus-note,
+	 * nests it, expands the parent and selects the new row (never opens it) — then hands off to
+	 * the shared `noticeIfAddedRowHidden` helper the same way `runAddUnderFile` does. The new
+	 * module's display text is its own basename (its ref's `path`, which for a `folder` ref is
+	 * already the plain module name with no extension to strip, unlike File's `.md`). */
+	private async runAddUnderModule(view: View, node: ViewNode): Promise<void> {
+		const created = await startAddUnderModule(this.addUnderModuleDeps(), view.id, node.id);
+		if (!created) return;
+		const label = unitBasename(created);
+		const signals = this.addUnderHiddenSignals(view, node, created, label);
+		void this.render();
+		await noticeIfAddedRowHidden(created.id, label, node.label ?? unitBasename(node), {
+			render: () => this.awaitRenderSettled(),
+			getBucketListEl: () => this.bucketListEl,
+			...signals,
+		});
+	}
+
+	private addUnderModuleDeps(): AddUnderModuleDeps {
+		const { plugin } = this;
+		return {
+			app: plugin.app,
+			getPoolFolder: () => plugin.settings.poolFolder,
+			getExcludedFolders: () => plugin.settings.excludedFolders,
+			holdUnit: (path) => plugin.unitIndex.holdUnit(path),
+			getNode: (viewId, nodeId) => plugin.viewsManager.getNode(viewId, nodeId),
+			// Same live-label resolver as File's own deps (see its doc comment above).
+			getParentLabel: async (viewId, parentId) => {
+				const parentNode = plugin.viewsManager.getNode(viewId, parentId);
+				if (!parentNode) return "";
+				if (parentNode.type === "meta") return parentNode.label ?? "";
+				const view = plugin.viewsManager.getViews().find((v) => v.id === viewId);
+				if (!view) return parentNode.ref ? unitBasename(parentNode) : "";
+				const info = this.isOutsideManagedUnit(view, parentNode) ? this.resolveOutsideManagedRowInfo(parentNode.ref!) : await this.resolveRef(parentNode.ref!);
+				return info.text;
+			},
+			placeNewUnit: (viewId, ref, parentId) => plugin.viewsManager.placeNewUnit(viewId, ref, parentId),
+			expandParent: (viewId, parentId) => plugin.viewsManager.setNodeCollapsed(viewId, parentId, false),
+			// Same selection/anchor handling as File, Block and Folder (E5).
+			selectOnly: (nodeId) => {
+				this.selectedInboxRefKeys.clear();
+				this.selectedBucketNodeIds.clear();
+				this.selectedBucketNodeIds.add(nodeId);
+				this.selectionAnchor = nodeId;
+				this.selectionAnchorScope = "bucket";
+			},
+			// R1: a flushed, awaited save — same as `startCreateFromMeta`'s own `save` dep — so a
+			// rejection surfaces as a "created but not saved" Notice instead of vanishing into the
+			// debounced persist's fire-and-forget write.
+			save: () => plugin.flushSave(),
+		};
+	}
+
+	private addUnderBlockDeps(): AddUnderBlockDeps {
+		const { plugin } = this;
+		return {
+			app: plugin.app,
+			getPoolFolder: () => plugin.settings.poolFolder,
+			holdUnit: (path) => plugin.unitIndex.holdUnit(path),
+			getNode: (viewId, nodeId) => plugin.viewsManager.getNode(viewId, nodeId),
+			placeUnit: (viewId, ref, parentId) => plugin.viewsManager.placeUnit(viewId, ref, parentId),
+			expandParent: (viewId, parentId) => plugin.viewsManager.setNodeCollapsed(viewId, parentId, false),
+			// R1 fix (same as Folder): clears a prior inbox selection too (E5 — bucket and inbox
+			// selections are mutually exclusive) and sets the anchor to the new row, so a later
+			// shift-click extends from it rather than a stale pre-add anchor.
+			selectOnly: (nodeId) => {
+				this.selectedInboxRefKeys.clear();
+				this.selectedBucketNodeIds.clear();
+				this.selectedBucketNodeIds.add(nodeId);
+				this.selectionAnchor = nodeId;
+				this.selectionAnchorScope = "bucket";
+			},
+		};
+	}
+
+	/** PR-2.F3 (G10): the real-governance signals `noticeIfAddedRowHidden` classifies into a reason,
+	 * computed fresh against the live tree right after the add — `parentNode` is whatever the caller
+	 * captured at menu-build time, possibly stale by now, so this re-reads the live parent and child
+	 * by id before resolving status. Filter/truncation/hidden-status are read-only lookups; nothing
+	 * here writes `filterText`, `truncatedStatuses` or `expandedTruncationGroups` (fence).
+	 *
+	 * R1 fix: `renderNode`'s meta branch (src/explorer-view.ts) renders a Folder row unconditionally
+	 * — only a unit row returns early on `!matchesFilter`. So an active filter can never be why a new
+	 * Folder's own row fails to render; naming it anyway broke G10's "whichever applies" whenever a
+	 * filter happened to be active while adding a Folder (the row always shows regardless).
+	 *
+	 * PR-3.F1: a unit-kind row (so far Block and File, via `runAddUnderBlock`/`runAddUnderFile`) is
+	 * different — the filter *can* be the cause, but only when that new row's own display text
+	 * itself fails `matchesFilter`, since a matching row bypasses hide and truncate the same way it
+	 * does today (never a blanket "any filter active" check). The caller computes that display text
+	 * itself (Block: always `getFreeBlockDisplayTextFromContent`'s empty-content fallback,
+	 * `"(empty block)"`; File: the new note's own basename; Module, PR-3.F3: the new module's own
+	 * basename, its ref's `path`) and passes it in as `displayText`. Folder's own call site never
+	 * needs a real value here, since its `newNode.type` is always `"meta"`. */
+	private addUnderHiddenSignals(view: View, parentNode: ViewNode, newNode: ViewNode, displayText = ""): AddUnderHiddenNoticeSignals {
+		const filterActive = newNode.type === "unit" && !this.matchesFilter(displayText);
+		const liveParent = this.plugin.viewsManager.getNode(view.id, parentNode.id);
+		if (!liveParent) return { filterActive };
+		const liveNode = liveParent.children.find((c) => c.id === newNode.id) ?? newNode;
+		const ancestors: StatusGovernance[] = [liveParent, ...this.ancestorsForNode(view, liveParent.id)];
+		const sm = this.plugin.statusesManager;
+		const governor = sm.findGoverningAncestor(ancestors, liveNode);
+		const status = governor ? sm.resolveNodeStatus(ancestors, liveNode) : null;
+		if (!status || !governor) return { filterActive };
+		const hiddenBySortOrGrouping = (!!status.isCompleted && !!governor.hideCompleted) || (!!status.isCancelled && !!governor.hideCancelled);
+		if (hiddenBySortOrGrouping) return { filterActive, hiddenBySortOrGrouping };
+		const config = governor.truncatedStatuses?.[status.id];
+		if (!config?.enabled) return { filterActive };
+		const sameStatusSiblings = liveParent.children.filter((sibling) => sm.resolveNodeStatus(ancestors, sibling)?.id === status.id).length;
+		if (sameStatusSiblings < 2) return { filterActive };
+		const key = (governor === view ? `view:${view.id}` : `node:${(governor as ViewNode).id}`) + `:${status.id}`;
+		if (this.expandedTruncationGroups.has(key)) return { filterActive };
+		return { filterActive, truncatedGroupLabel: config.label?.trim() || status.label };
+	}
+
+	/** The ancestors chain (nearest first, ending with `view`) for `targetId`'s own parent — the
+	 * same shape `renderNodeList` would pass as `ancestors` for `targetId` itself, not including
+	 * `targetId`. There's no stored parent pointer on `ViewNode`, so this walks the live tree fresh;
+	 * cheap enough for the one-off post-add check above, not meant for the render hot path. */
+	private ancestorsForNode(view: View, targetId: string): StatusGovernance[] {
+		const walk = (nodes: ViewNode[], chain: StatusGovernance[]): StatusGovernance[] | null => {
+			for (const candidate of nodes) {
+				if (candidate.id === targetId) return chain;
+				const found = walk(candidate.children, [candidate, ...chain]);
+				if (found) return found;
+			}
+			return null;
+		};
+		return walk(view.root, [view]) ?? [view];
+	}
+
+	private addUnderFolderDeps(): AddUnderFolderDeps {
+		const { plugin } = this;
+		return {
+			app: plugin.app,
+			getNode: (viewId, nodeId) => plugin.viewsManager.getNode(viewId, nodeId),
+			addMetaFolder: (viewId, parentId, label) => plugin.viewsManager.addMetaFolder(viewId, parentId, label),
+			expandParent: (viewId, parentId) => plugin.viewsManager.setNodeCollapsed(viewId, parentId, false),
+			// R1 fix: bucket and inbox selections are mutually exclusive (E5) — right-clicking a
+			// bucket row doesn't itself change the selection, so a prior inbox selection could still
+			// be live when this runs. Clear it too, and set the anchor the same way
+			// `buildNodeDragPayload` does (src/explorer-view.ts), so a later shift-click extends from
+			// the new row rather than a stale anchor left over from before the add.
+			selectOnly: (nodeId) => {
+				this.selectedInboxRefKeys.clear();
+				this.selectedBucketNodeIds.clear();
+				this.selectedBucketNodeIds.add(nodeId);
+				this.selectionAnchor = nodeId;
+				this.selectionAnchorScope = "bucket";
+			},
+		};
 	}
 
 	private startCreateFromMeta(kind: CreateKind, view: View, node: ViewNode): void {
@@ -3974,11 +4301,16 @@ export class AtlasExplorerView extends ItemView {
 					}).open();
 				})
 		);
-		// Create: turns this meta folder into a real block, file or module (one item on disk, the row
-		// keeps its place, settings and children). Offered on every meta folder, whatever its children,
-		// depth or fold state; ignores any multi-selection, so it only ever acts on this one row.
+		// PR-2.F1 (G6): "Add under…" sits directly above "Replace with…", i.e. after "Rename folder".
+		if (canAddUnder({ getNode: (viewId, nodeId) => this.plugin.viewsManager?.getNode(viewId, nodeId) ?? null }, view.id, node)) {
+			addAddUnderItem(menu, evt, (kind) => this.startAddUnder(kind, view, node));
+		}
+		// Replace with… (PR-1.F1: renamed from "Create" to sit beside "Swap with…"): turns this meta
+		// folder into a real block, file or module (one item on disk, the row keeps its place, settings
+		// and children). Offered on every meta folder, whatever its children, depth or fold state;
+		// ignores any multi-selection, so it only ever acts on this one row.
 		addCreateItem(menu, evt, (kind) => this.startCreateFromMeta(kind, view, node));
-		// PR-2 (G3): on an Atlas folder, right after "Create". Only "Swap with…" applies here (G4).
+		// PR-2 (G3): on an Atlas folder, right after "Replace with…". Only "Swap with…" applies here (G4).
 		addSwapItems(menu, this, view, node, node.label ?? "");
 		// PR-1 (G6): "Sort children…" on every Folder, any depth, whether it has children yet or not.
 		const folderStatusGovernor = this.plugin.statusesManager?.findSortGovernor([node, ...ancestors]) ?? null;

@@ -122,6 +122,27 @@ describe("G25 — sort: API item rows share the one sort pass real units get", (
 	});
 });
 
+// PR-2.F3 (G10) regression: a newly added-under row with a hidden status (hideCompleted) gets no
+// element of its own regardless of where the sort pass places it — the sort pass reorders what's
+// visible, it never rescues a row `hideCompleted`/`hideCancelled` already excluded (G10's "current
+// sort or grouping" reason assumes exactly this).
+describe("PR-2.F3 (G10) regression — a hidden-status row stays elementless even when the sort pass runs", () => {
+	it("a 'done' sibling under hideCompleted renders no element, whatever position sortMode would otherwise give it", async () => {
+		const sm = makeStatusesManager();
+		const folder = folderGovernor({ sortMode: "status", hideCompleted: true });
+		const real1 = realNode("real-1", { explicitStatusId: "todo" });
+		const real2 = realNode("real-2", { explicitStatusId: "done" }); // stands in for the newly added-under row
+
+		const fake = makeFakeExplorer(sm);
+		const container = document.createElement("div");
+		await callRenderNodeList(fake, [real1, real2], container, view, 1, [folder], folder);
+
+		expect(container.querySelector('[data-id="real-2"]')).toBeNull();
+		expect(rowOrder(container)).toEqual(["real-1"]);
+	});
+});
+
+
 // PR-1 (G6-G21): A-Z / Modified / Time added — read straight off the list's own direct governor
 // (`ancestors[0]`), never inherited past it (unlike sortMode: "status" above).
 describe("PR-1 — sort children: alphabetical / modified / time-added", () => {

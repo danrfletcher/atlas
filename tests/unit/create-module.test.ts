@@ -519,7 +519,9 @@ describe("UT-11 menu builder (the real showUnitMenu)", () => {
 		return { menu: built!, startCreate };
 	}
 
-	const BASE = ["Open", "Open in new tab", "Reveal in native explorer", "Copy link", "Sort children…", "Data source…", "Duplicate (Meta)", "Swap with…", "Swap for Atlas folder", "Remove from view", "Place in view…"];
+	const BASE = ["Open", "Open in new tab", "Reveal in native explorer", "Copy link", "Sort children…", "Data source…", "Add under…", "Duplicate (Meta)", "Swap with…", "Swap for Atlas folder", "Remove from view", "Place in view…"];
+	// PR-2.F1: "Add under…" is excluded on a missing row (G7) — same BASE minus that one entry.
+	const BASE_MISSING = BASE.filter((t) => t !== "Add under…");
 
 	it("offers exactly one Create Module after every existing item, in their old order", () => {
 		const ref: UnitRef = { kind: "file", path: "Foo.md" };
@@ -533,7 +535,7 @@ describe("UT-11 menu builder (the real showUnitMenu)", () => {
 		const ref: UnitRef = { kind: "file", path: "Foo.md" };
 		const child: ViewNode = { id: "c", type: "unit", ref: { kind: "file", path: "Zed.md" }, children: [] };
 		const { menu } = menuFor(ref, [{ type: "root-file", path: "Foo.md" }], node(ref, [child]));
-		expect(menu.titles()).toEqual(["Open", "Open in new tab", "Reveal in native explorer", "Copy link", "Sort children…", "Statuses", "Data source…", "Duplicate (Meta)", "Swap with…", "Swap for Atlas folder", "Remove from view", "Place in view…", "Create Module"]);
+		expect(menu.titles()).toEqual(["Open", "Open in new tab", "Reveal in native explorer", "Copy link", "Sort children…", "Statuses", "Data source…", "Add under…", "Duplicate (Meta)", "Swap with…", "Swap for Atlas folder", "Remove from view", "Place in view…", "Create Module"]);
 	});
 
 	it.each<[string, UnitRef, Unit | undefined, string[]]>([
@@ -541,9 +543,9 @@ describe("UT-11 menu builder (the real showUnitMenu)", () => {
 		["promoted nested file", { kind: "file", path: "Beta/Deep.md" }, { type: "promoted-file", path: "Beta/Deep.md", topLevelFolder: "Beta" }, BASE],
 		["manual promotion of an interface note", { kind: "file", path: "Alpha/Alpha.md" }, { type: "promoted-file", path: "Alpha/Alpha.md", topLevelFolder: "Alpha" }, BASE],
 		["root pdf", { kind: "file", path: "Foo.pdf" }, { type: "root-file", path: "Foo.pdf" }, BASE],
-		["missing file", { kind: "file", path: "Gone.md" }, undefined, BASE],
-		["promoted block", { kind: "block", path: "Foo.md", subpath: "^abc123" }, { type: "promoted-block", path: "Foo.md", subpath: "^abc123" }, ["Open", "Open in new tab", "Copy link", "Sort children…", "Data source…", "Duplicate (Meta)", "Swap with…", "Swap for Atlas folder", "Remove from view", "Place in view…"]],
-		["module row", { kind: "folder", path: "Alpha" }, { type: "folder-unit", path: "Alpha" }, ["Open", "Open in new tab", "Reveal in native explorer", "View module contents", "Copy link", "Sort children…", "Data source…", "Duplicate (Meta)", "Swap with…", "Swap for Atlas folder", "Remove from view", "Place in view…"]],
+		["missing file", { kind: "file", path: "Gone.md" }, undefined, BASE_MISSING],
+		["promoted block", { kind: "block", path: "Foo.md", subpath: "^abc123" }, { type: "promoted-block", path: "Foo.md", subpath: "^abc123" }, ["Open", "Open in new tab", "Copy link", "Sort children…", "Data source…", "Add under…", "Duplicate (Meta)", "Swap with…", "Swap for Atlas folder", "Remove from view", "Place in view…"]],
+		["module row", { kind: "folder", path: "Alpha" }, { type: "folder-unit", path: "Alpha" }, ["Open", "Open in new tab", "Reveal in native explorer", "View module contents", "Copy link", "Sort children…", "Data source…", "Add under…", "Duplicate (Meta)", "Swap with…", "Swap for Atlas folder", "Remove from view", "Place in view…"]],
 	])("%s: exactly the existing items, no Create Module", (_label, ref, unit, expected) => {
 		const { menu } = menuFor(ref, unit ? [unit] : []);
 		expect(menu.titles()).toEqual(expected);
