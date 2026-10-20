@@ -3,6 +3,7 @@ import { Notice } from "obsidian";
 import { AddUnderBlockDeps, startAddUnderBlock } from "../../src/add-under-block";
 import { acquireParentLock } from "../../src/create-and-nest";
 import { UnitRef, ViewNode } from "../../src/types";
+import { heldCount } from "../helpers";
 import { setup, tMany, tNested } from "../integration/create-from-meta-fixtures";
 
 // PR-3.F1 (G1): `startAddUnderBlock` is driven against the real `ViewsManager`/`UnitIndex` the
@@ -223,7 +224,7 @@ describe("startAddUnderBlock — failure paths roll back, Notice, no node, selec
 		expect(selectOnly).not.toHaveBeenCalled();
 		expect(expandParent).not.toHaveBeenCalled();
 		expect(heldPaths).toHaveLength(1);
-		expect(s.index.heldCount(heldPaths[0])).toBe(0);
+		expect(heldCount(s.index, heldPaths[0])).toBe(0);
 		expect(Notice.instances).toHaveLength(1);
 		expect(Notice.instances[0].message).toContain("no longer exists");
 
@@ -255,7 +256,7 @@ describe("startAddUnderBlock — failure paths roll back, Notice, no node, selec
 		expect(s.views.getNode("default", "ft")!.children).toHaveLength(4);
 		expect(selectOnly).not.toHaveBeenCalled();
 		expect(heldPaths).toHaveLength(1);
-		expect(s.index.heldCount(heldPaths[0])).toBe(0);
+		expect(heldCount(s.index, heldPaths[0])).toBe(0);
 		expect(Notice.instances).toHaveLength(1);
 
 		// The lock is free again: a real add on the same parent now runs to completion.
@@ -297,7 +298,7 @@ describe("startAddUnderBlock — opening the new block in the editor fails", () 
 		expect(ft.collapsed).toBe(false);
 		expect(selectOnly).toHaveBeenCalledWith(created!.id);
 		expect(s.contentOf(newBlockPath(created!))).toBe(""); // the file stays: nothing is rolled back
-		expect(s.index.heldCount(newBlockPath(created!))).toBe(0);
+		expect(heldCount(s.index, newBlockPath(created!))).toBe(0);
 		expect(Notice.instances).toHaveLength(1);
 		expect(Notice.instances[0].message).toBe("Atlas: the block was added, but opening it failed: no leaf available");
 
@@ -340,7 +341,7 @@ describe("startAddUnderBlock — E7 inbox hold", () => {
 		expect(created).not.toBeNull();
 		const path = newBlockPath(created!);
 		expect(midCreatePaths).not.toContain(path);
-		expect(s.index.heldCount(path)).toBe(0);
+		expect(heldCount(s.index, path)).toBe(0);
 	});
 
 	it("the hold is released on a failure too, so nothing stays hidden", async () => {
@@ -358,7 +359,7 @@ describe("startAddUnderBlock — E7 inbox hold", () => {
 		const result = await startAddUnderBlock(deps, "default", "ft");
 
 		expect(result).toBeNull();
-		expect(s.index.heldCount(createdPath)).toBe(0);
+		expect(heldCount(s.index, createdPath)).toBe(0);
 	});
 });
 

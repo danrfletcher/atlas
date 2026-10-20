@@ -10,7 +10,7 @@ import { startAddUnderFile } from "../../src/add-under-file";
 import { startAddUnderModule } from "../../src/add-under-module";
 import { startAddUnderFolder } from "../../src/add-under-folder";
 import { file, meta, unit } from "../integration/create-from-meta-fixtures";
-import { flush, key, modals, seedRoot } from "../helpers";
+import { flush, heldCount, key, modals, seedRoot } from "../helpers";
 
 // PR-1.S1 R1/R2 (polish): every add-under kind driven through its own real entry point
 // (startAddUnderBlock/File/Module/Folder) against a real ViewsManager, UnitIndex and mock vault —
@@ -204,7 +204,7 @@ describe("E4 — the parent is removed mid-flow: refused, nothing placed, nothin
 		expect(s.spies.addMetaFolder).not.toHaveBeenCalled();
 		expect(s.rootIds()).toEqual(rootBefore); // never planted at the view root
 		expect(s.listing()).toEqual(before);
-		for (const path of heldPaths(kind)) expect(s.index.heldCount(path)).toBe(0);
+		for (const path of heldPaths(kind)) expect(heldCount(s.index, path)).toBe(0);
 		expect([...s.selection]).toEqual([]);
 		expect(notices().some((m) => m.includes("the parent no longer exists"))).toBe(true);
 		const lock = acquireParentLock(VIEW, PARENTS[parent], false);
@@ -231,7 +231,7 @@ describe("E4 — the parent is removed mid-flow: refused, nothing placed, nothin
 		expect(s.rootIds()).toEqual(rootBefore);
 		expect(s.listing()).toEqual(before);
 		expect(s.app.vault.getAbstractFileByPath("Field Ops")).toBeNull();
-		for (const path of heldPaths(kind)) expect(s.index.heldCount(path)).toBe(0);
+		for (const path of heldPaths(kind)) expect(heldCount(s.index, path)).toBe(0);
 		expect(notices().some((m) => m.includes("the parent no longer exists"))).toBe(true);
 		const lock = acquireParentLock(VIEW, PARENTS[parent], false);
 		expect(lock).not.toBeNull();
@@ -290,7 +290,7 @@ describe("the per-parent lock is taken by each kind's own entry point", () => {
 		if (kind === "folder") captured.prompts[0].onSubmit("Field Ops");
 		const node = await run;
 		expect(node).not.toBeNull();
-		for (const path of heldPaths(kind)) expect(s.index.heldCount(path)).toBe(0);
+		for (const path of heldPaths(kind)) expect(heldCount(s.index, path)).toBe(0);
 		const again = acquireParentLock(VIEW, "docs", false);
 		expect(again).not.toBeNull();
 		again!();
@@ -307,7 +307,7 @@ describe("the per-parent lock is taken by each kind's own entry point", () => {
 		if (kind === "folder") captured.prompts[0].onSubmit("Field Ops");
 		expect(await run).toBeNull();
 		expect(s.listing()).toEqual(before);
-		for (const path of heldPaths(kind)) expect(s.index.heldCount(path)).toBe(0);
+		for (const path of heldPaths(kind)) expect(heldCount(s.index, path)).toBe(0);
 		const again = acquireParentLock(VIEW, "docs", false);
 		expect(again).not.toBeNull();
 		again!();
@@ -345,7 +345,7 @@ describe("the per-parent lock is taken by each kind's own entry point", () => {
 		await flush();
 		if (kind === "folder") captured.prompts[0].onSubmit("Field Ops");
 		expect(await outcome).toBe("boom");
-		for (const path of heldPaths(kind)) expect(s.index.heldCount(path)).toBe(0);
+		for (const path of heldPaths(kind)) expect(heldCount(s.index, path)).toBe(0);
 		const again = acquireParentLock(VIEW, "docs", false);
 		expect(again).not.toBeNull();
 		again!();

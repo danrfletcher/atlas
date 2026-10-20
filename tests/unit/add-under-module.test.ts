@@ -7,7 +7,7 @@ import { UnitRef, ViewNode } from "../../src/types";
 import { AddUnderModuleDeps, startAddUnderModule } from "../../src/add-under-module";
 import { acquireParentLock } from "../../src/create-and-nest";
 import { file, meta, unit } from "../integration/create-from-meta-fixtures";
-import { seedRoot } from "../helpers";
+import { heldCount, seedRoot } from "../helpers";
 
 // PR-3.F3: mirrors add-under-file.test.ts (PR-3.F2) almost exactly — same shared foundation, same
 // name dialog, same mock-driving pattern — but for the Module kind: `<name>/<name>.md` instead of
@@ -133,7 +133,7 @@ describe("startAddUnderModule — G3 happy path", () => {
 		expect([...s.selection]).toEqual([created!.id]);
 
 		// E7: not left in the Inbox — it was held until nested, and the hold is released right after.
-		expect(s.index.heldCount("Field Ops")).toBe(0);
+		expect(heldCount(s.index, "Field Ops")).toBe(0);
 		const inbox = s.vm.getInboxUnits(s.index.getUnits(), VIEW_ID, "view").map((u) => u.path);
 		expect(inbox).not.toContain("Field Ops");
 		expect(inbox).not.toContain("Field Ops/Field Ops.md");
@@ -434,7 +434,7 @@ describe("startAddUnderModule — G9 every failure path restores the seed, relea
 
 		expect(result).toBeNull();
 		expect(vaultListing(s.app)).toEqual(seed);
-		expect(s.index.heldCount("Field Ops")).toBe(0);
+		expect(heldCount(s.index, "Field Ops")).toBe(0);
 		expect(s.selection.size).toBe(0);
 		expect(s.vm.getView(VIEW_ID)!.root.map((n) => n.id)).toEqual(rootBefore);
 		expect(Notice.instances).toHaveLength(1);
@@ -446,7 +446,7 @@ describe("startAddUnderModule — G9 every failure path restores the seed, relea
 		if (!s.vm.getNode(VIEW_ID, "quarry-drones")) return;
 		const again = await startAddUnderModule(s.deps, VIEW_ID, "quarry-drones");
 		expect(again).not.toBeNull();
-		expect(s.index.heldCount("Field Ops")).toBe(0);
+		expect(heldCount(s.index, "Field Ops")).toBe(0);
 	});
 
 	it("rollback incomplete: a delete throws — the Notice says what was left in place, and the hold and lock still clear", async () => {
@@ -466,7 +466,7 @@ describe("startAddUnderModule — G9 every failure path restores the seed, relea
 		expect(Notice.instances[0].message).toContain('module "Field Ops"');
 		expect(Notice.instances[0].message).toContain("the parent no longer exists");
 		expect(Notice.instances[0].message).toContain("Atlas couldn't clean up what it had made (permission denied)");
-		expect(s.index.heldCount("Field Ops")).toBe(0);
+		expect(heldCount(s.index, "Field Ops")).toBe(0);
 		expect(s.vm.getNode(VIEW_ID, "quarry-drones")!.children.map((c) => c.ref)).not.toContainEqual({ kind: "folder", path: "Field Ops" });
 		const lock = acquireParentLock(VIEW_ID, "quarry-drones", false);
 		expect(lock).not.toBeNull();

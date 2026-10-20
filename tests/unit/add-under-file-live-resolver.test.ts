@@ -5,7 +5,7 @@ import { DEFAULT_SETTINGS } from "../../src/settings";
 import { UnitIndex } from "../../src/unit-index";
 import { ViewsManager } from "../../src/views";
 import { UnitRef, View, ViewNode, unitRefKey, unitToRef } from "../../src/types";
-import { button, flush, key, modals, seedRoot, type } from "../helpers";
+import { button, flush, heldCount, key, modals, seedRoot, type } from "../helpers";
 import { file, meta, unit } from "../integration/create-from-meta-fixtures";
 
 // PR-3.F2 (T1 fix): every other add-under-file.test.ts case drives `startAddUnderFile` with a
@@ -145,7 +145,7 @@ describe("PR-3.F2 — Add under > File: real flow, wired through startAddUnder, 
 		expect(modals()).toHaveLength(0);
 		const children = vm.getNode("v1", "quarry-drones")!.children;
 		expect(children).toHaveLength(1);
-		expect(index.heldCount("Quarry Notes.md")).toBe(0);
+		expect(heldCount(index, "Quarry Notes.md")).toBe(0);
 		expect([...fakeThis.selectedBucketNodeIds]).toEqual([children[0].id]);
 	});
 
