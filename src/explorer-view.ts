@@ -3703,7 +3703,12 @@ export class AtlasExplorerView extends ItemView {
 	 * `renderApiItemRow`/`renderTruncationGroupHeader` all create a row as a direct child of
 	 * whichever list element `renderNodeList` was handed (`listEl` at the bucket root,
 	 * `childrenInner` for a nested Folder/unit) — never any other wrapper layer at the row's own
-	 * depth. Same one-at-a-time convention as `showDropIndicator`/`dropIndicatorEl`. */
+	 * depth. Same one-at-a-time convention as `showDropIndicator`/`dropIndicatorEl`.
+	 *
+	 * Known limitation (PR-4 R6): for a folder-source *hoisted* row (G20) that list is the
+	 * grandparent's rendered list, while the drop decision and landing use the row's real hidden
+	 * parent and that parent's sort. The outline can therefore highlight a list the item won't land
+	 * in. The decision and the landing are right; only the highlight is approximate. */
 	private showSortedDropOutline(el: HTMLElement): void {
 		const list = el.parentElement;
 		if (!list) return;
