@@ -57,6 +57,12 @@ describe("chevron (G6, G7)", () => {
 		// Collapsed content is 28 + 700 rows tall, so the settle target is the top of the body.
 		expect(h.scrollCalls).toEqual([{ top: 0, behavior: "auto" }]);
 		expect(h.body().scrollTop).toBe(0);
+		// PR-1.B1 R5: this used to also assert `h.inboxHeader().style.transform).toBe("")`. PR-1.B1
+		// replaced the JS scroll-driven transform (`updateStickyHeaders()`) with a native CSS
+		// `position: sticky` rule, so the sticky headers no longer get a JS-set transform at all, in
+		// this test or any other state. That's now covered once, for every scroll position, by
+		// "never sets a transform or scroll-padding on either label at any scroll position" in
+		// explorer-sticky-headers.test.ts, so it was dropped here rather than kept as a dead check.
 	});
 
 	it("a chevron collapse never lands mid-inbox: the scroll is capped at the collapsed content's maximum", () => {
