@@ -113,7 +113,12 @@ describe("G8/F7 — nest-disabled rule: an Outside-Vault-managed row is never ma
 		const node = unit("c2", file("Notes/a.md"));
 		const { fake } = await renderUnitRow(node);
 
-		expect((fake as { makeDropZone: ReturnType<typeof vi.fn> }).makeDropZone).toHaveBeenCalledWith(expect.anything(), { kind: "node", nodeId: "c2", viewId: "v1" });
+		// PR-3: makeDropZone now also carries a third `hasBottomZone` argument.
+		expect((fake as { makeDropZone: ReturnType<typeof vi.fn> }).makeDropZone).toHaveBeenCalledWith(
+			expect.anything(),
+			{ kind: "node", nodeId: "c2", viewId: "v1" },
+			expect.anything()
+		);
 	});
 });
 

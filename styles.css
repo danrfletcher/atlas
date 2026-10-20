@@ -314,6 +314,17 @@
 	outline-offset: -2px;
 }
 
+/* PR-3 (G1): the single shared sibling-insert indicator line, shown as a sibling of whichever row
+ * the pointer is currently hovering an edge zone of (`AtlasExplorerView.showDropIndicator`) — not
+ * a child of the row, so it never participates in `.atlas-row-text`'s shared flex layout. */
+.atlas-drop-indicator {
+	height: 2px;
+	margin-block: -1px;
+	background: var(--interactive-accent);
+	border-radius: 1px;
+	pointer-events: none;
+}
+
 .atlas-chevron {
 	display: flex;
 	width: 14px;

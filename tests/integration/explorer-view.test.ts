@@ -341,6 +341,11 @@ function setupHighlightHarness(settings: AtlasSettings = { ...DEFAULT_SETTINGS }
 		renderNode: proto.renderNode,
 		renderNodeList: proto.renderNodeList,
 		renderApiItemRow: proto.renderApiItemRow,
+		// PR-3: `renderNode` now calls the real `computeEffectiveCollapsed` directly (to decide a
+		// row's `hasBottomZone` for its drop zone) before ever reaching the stubbed
+		// `renderFoldableChildren` below — `filterText` stays "" (unset) everywhere in this file, so
+		// this never touches `subtreeHasMatch`/`apiItemsMatchFilter`, just `node.collapsed`.
+		computeEffectiveCollapsed: proto.computeEffectiveCollapsed,
 		renderFoldableChildren: vi.fn(async (node: unknown, _chevron: unknown, container: HTMLElement, view: unknown, depth: number, ancestors: unknown[]) => {
 			const n = node as ViewNode;
 			if (n.collapsed) return;

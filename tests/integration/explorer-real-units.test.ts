@@ -38,7 +38,11 @@ describe.each(KINDS)("G7 — place/nest/reorder behave identically for $label", 
 		place(vm, view.id, { kind: "file", path: "b.md" }, null);
 		const nodeA = vm.getViews()[0].root[0];
 
-		expect(vm.moveNode(view.id, nodeA.id, null, 1)).toBe(true);
+		// PR-3 (G1/E1): `index` is read against the array as it stood *before* this call removes
+		// the node — i.e. "drop after whichever sibling currently sits at index 1" (b.md), not "end
+		// up at post-removal index 1". Index 1 here would instead resolve to b.md's own top edge,
+		// a no-op (a.md is already immediately before it) — exactly the fix E1 exists for.
+		expect(vm.moveNode(view.id, nodeA.id, null, 2)).toBe(true);
 
 		const order = vm.getViews()[0].root.map((n) => n.ref?.path);
 		expect(order).toEqual(["b.md", "a.md"]);

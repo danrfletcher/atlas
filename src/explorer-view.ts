@@ -12,6 +12,7 @@ import {
 	nodeHasApiRows,
 } from "./views";
 import { resolveOutsidePath } from "./folder-source-outside";
+import { DropZone, resolveDropZone } from "./drop-zones";
 import { resolveUnit } from "./unit-display";
 import { TextPromptModal, ConfirmModal, ConfirmDeleteRowsModal, StatusesModal } from "./modals";
 import { StatusDefinition, pluralizeStatusLabel } from "./statuses";
@@ -111,6 +112,11 @@ const MODULE_HOVER_DWELL_MS = 650;
  * so every existing drop-handling call site only needed to start iterating instead of gaining a
  * second, parallel "batch" code path next to the original single-item one. */
 type DragPayload = { kind: "node"; nodeIds: string[]; viewId: string } | { kind: "inbox"; refs: UnitRef[] };
+
+/** PR-3: a row-level drop target (`"node"`) also carries an edge zone (`DropZone`, from
+ * `drop-zones.ts`); `"bucket-root"`/`"inbox-area"` targets never do — both are empty-space drops
+ * that still always append, unchanged from before this PR. */
+type DropTarget = { kind: "node"; nodeId: string; viewId: string } | { kind: "bucket-root"; viewId: string } | { kind: "inbox-area"; viewId: string };
 
 /** R14: an API item's label is arbitrary upstream data, not a filename Atlas chose — strip path
  * separators and other characters the vault/filesystem reject or reinterpret before using it as
@@ -809,6 +815,11 @@ export class AtlasExplorerView extends ItemView {
 	 * a module icon would otherwise place a ref with no real file behind it into the bucket. */
 	private missingAddedInboxKeys = new Set<string>();
 	private dragPayload: DragPayload | null = null;
+	/** PR-3 (G1): the single shared drop-indicator line element, repositioned (never duplicated)
+	 * across whichever row the pointer is currently hovering an edge zone of. `null` whenever no
+	 * row is currently showing one — cleared on `dragleave`, on `drop`, and by the window-level
+	 * `dragend` backstop below, same three places `dragPayload` itself is cleared. */
+	private dropIndicatorEl: HTMLElement | null = null;
 	/** Review follow-up (retroactive PR 9 finding): cancels whichever module row's dwell timer is
 	 * currently pending, if any — invoked from the window-level `dragend` backstop below. At most
 	 * one dwell timer is ever pending at a time in practice (only one row can be mid-hover during a
@@ -911,6 +922,7 @@ export class AtlasExplorerView extends ItemView {
 		// timer) whenever a drag ends, regardless of how.
 		this.registerDomEvent(window, "dragend", () => {
 			this.dragPayload = null;
+			this.clearDropIndicator(); // PR-3 (G1): same abandoned-drag backstop, for the indicator line.
 			// PR-1.S1 R5: if the drag ends while the row is scrolled out of the window, it's sitting
 			// hidden (`display:none`) in the spacer purely so the browser's drag source survived it
 			// scrolling off-screen (F11/E8) — nothing needs it kept around once the drag itself is over,
@@ -2540,11 +2552,17 @@ export class AtlasExplorerView extends ItemView {
 	 * optimistic-local-state-then-delayed-persist click pattern used everywhere else fold/unfold
 	 * happens in this plugin — extracted here instead of duplicated per node type so the two can't
 	 * drift out of sync with each other the way duplicated logic has caused bugs before in this build. */
-	private async renderFoldableChildren(node: ViewNode, chevron: HTMLElement, container: HTMLElement, view: View, depth: number, ancestors: StatusGovernance[]): Promise<void> {
-		// PR 9 (issue 6): a filter-matching descendant force-reveals this node regardless of its own
-		// collapsed state, so a match is never hidden behind a stale fold. The state from just before
-		// the filter started touching it is remembered (once) so clearing the filter can put it back
-		// exactly, rather than leaving every node the filter happened to open expanded.
+	/** Extracted out of `renderFoldableChildren` in PR-3 so `renderNode` can also read this value
+	 * before `renderFoldableChildren` runs — needed to decide whether this row's own bottom-edge
+	 * drop zone exists at all (G1/Q7, see `resolveDropZone`'s doc comment in `drop-zones.ts`).
+	 * Both call sites now get (and persist the pre-filter snapshot for) the exact same value,
+	 * instead of two independent copies of this filter-reveal logic drifting apart.
+	 *
+	 * PR 9 (issue 6): a filter-matching descendant force-reveals this node regardless of its own
+	 * collapsed state, so a match is never hidden behind a stale fold. The state from just before
+	 * the filter started touching it is remembered (once) so clearing the filter can put it back
+	 * exactly, rather than leaving every node the filter happened to open expanded. */
+	private async computeEffectiveCollapsed(node: ViewNode, view: View): Promise<boolean> {
 		const filterActive = !!this.filterText.trim();
 		let effectiveCollapsed = !!node.collapsed;
 		if (filterActive) {
@@ -2552,6 +2570,18 @@ export class AtlasExplorerView extends ItemView {
 			if (!this.preFilterCollapsedState.has(node.id)) this.preFilterCollapsedState.set(node.id, node.collapsed);
 			if ((await this.subtreeHasMatch(node.children, view)) || this.apiItemsMatchFilter(node)) effectiveCollapsed = false;
 		}
+		return effectiveCollapsed;
+	}
+
+	private async renderFoldableChildren(
+		node: ViewNode,
+		chevron: HTMLElement,
+		container: HTMLElement,
+		view: View,
+		depth: number,
+		ancestors: StatusGovernance[],
+		effectiveCollapsed: boolean
+	): Promise<void> {
 		setIcon(chevron, effectiveCollapsed ? "chevron-right" : "chevron-down");
 
 		// Children always render (regardless of collapsed state) inside a dedicated wrapper, so
@@ -2736,7 +2766,13 @@ export class AtlasExplorerView extends ItemView {
 				this.dragPayload = this.buildNodeDragPayload(node.id, view.id);
 				this.bucketDragRowEl = row;
 			});
-			this.makeDropZone(row, { kind: "node", nodeId: node.id, viewId: view.id });
+			// PR-3 (G1/Q7): a meta row's own bottom-edge drop zone collapses into its nest zone while
+			// it's expanded and already showing real children/API rows immediately underneath it —
+			// `effectiveCollapsed` is computed once here (not inside `renderFoldableChildren`, which
+			// now just takes it as a parameter) so both the drop zone and the fold state below agree.
+			const effectiveCollapsed = await this.computeEffectiveCollapsed(node, view);
+			const metaHasBottomZone = !((node.children.length > 0 || nodeHasApiRows(node)) && !effectiveCollapsed);
+			this.makeDropZone(row, { kind: "node", nodeId: node.id, viewId: view.id }, metaHasBottomZone);
 			row.addEventListener("keydown", (evt) => this.handleRowKeydown(evt, node, view));
 			row.tabIndex = 0;
 			row.addEventListener("contextmenu", (evt) => {
@@ -2744,7 +2780,7 @@ export class AtlasExplorerView extends ItemView {
 				this.showMetaFolderMenu(evt, node, view, ancestors);
 			});
 
-			await this.renderFoldableChildren(node, chevron, container, view, depth, ancestors);
+			await this.renderFoldableChildren(node, chevron, container, view, depth, ancestors, effectiveCollapsed);
 			return;
 		}
 
@@ -2826,12 +2862,20 @@ export class AtlasExplorerView extends ItemView {
 			// instead of doing nothing, which is what clicking an Outside row is supposed to do.
 			if (!consumed && !outsideManaged) void this.openRef(ref);
 		});
+		// PR-1 (G11c): a unit holding a data source draws its rows even with an empty `children` array.
+		const hasFoldableChildren = node.children.length > 0 || nodeHasApiRows(node);
+		// PR-3 (G1/Q7): only bothers computing the real fold state (an async filter-reveal check)
+		// when this row actually has something foldable — a childless/non-sourced unit row never
+		// shows anything below it either way, so its bottom-edge zone is always the plain 25/50/25
+		// split (`hasBottomZone` stays `true`) with no extra work.
+		const unitEffectiveCollapsed = hasFoldableChildren ? await this.computeEffectiveCollapsed(node, view) : true;
+		const unitHasBottomZone = !(hasFoldableChildren && !unitEffectiveCollapsed);
 		if (!outsideManaged) {
 			row.addEventListener("dragstart", () => {
 				this.dragPayload = this.buildNodeDragPayload(node.id, view.id);
 				this.bucketDragRowEl = row;
 			});
-			this.makeDropZone(row, { kind: "node", nodeId: node.id, viewId: view.id });
+			this.makeDropZone(row, { kind: "node", nodeId: node.id, viewId: view.id }, unitHasBottomZone);
 		}
 		row.tabIndex = 0;
 		row.addEventListener("keydown", (evt) => this.handleRowKeydown(evt, node, view));
@@ -2840,8 +2884,7 @@ export class AtlasExplorerView extends ItemView {
 			this.showUnitMenu(evt, ref, view, node, info.text, ancestors, outsideManaged);
 		});
 
-		// PR-1 (G11c): a unit holding a data source draws its rows even with an empty `children` array.
-		if (node.children.length > 0 || nodeHasApiRows(node)) await this.renderFoldableChildren(node, chevron, container, view, depth, ancestors);
+		if (hasFoldableChildren) await this.renderFoldableChildren(node, chevron, container, view, depth, ancestors, unitEffectiveCollapsed);
 	}
 
 	// --- inbox -----------------------------------------------------------------------------------
@@ -3130,33 +3173,118 @@ export class AtlasExplorerView extends ItemView {
 
 	// --- drag and drop -----------------------------------------------------------------------------
 
-	private makeDropZone(
-		el: HTMLElement,
-		target: { kind: "node"; nodeId: string; viewId: string } | { kind: "bucket-root"; viewId: string } | { kind: "inbox-area"; viewId: string }
-	): void {
+	/** PR-3 (G1): row drop zones additionally split into an edge ("before"/"after", a sibling
+	 * insert among the target's own siblings) on top of the pre-existing "nest" (append as the
+	 * target's own last child) — `hasBottomZone` is false for a row that's expanded and already
+	 * showing its own children immediately underneath it (Q7, see `resolveDropZone`'s own doc
+	 * comment in `drop-zones.ts`). The bucket root and the inbox area never pass a third argument
+	 * and never get edge zones — dropping on empty space there is still a plain append, unchanged
+	 * from before this PR. */
+	private makeDropZone(el: HTMLElement, target: DropTarget, hasBottomZone = true): void {
+		if (target.kind !== "node") {
+			// Bucket root / inbox area: unchanged pre-PR-3 behaviour, no edge zones.
+			el.addEventListener("dragover", (evt) => {
+				if (!this.dragPayload) return;
+				evt.preventDefault();
+				el.addClass("atlas-drop-target");
+			});
+			el.addEventListener("dragleave", () => el.removeClass("atlas-drop-target"));
+			el.addEventListener("drop", (evt) => {
+				evt.preventDefault();
+				evt.stopPropagation();
+				el.removeClass("atlas-drop-target");
+				this.handleDrop(target, "nest");
+			});
+			return;
+		}
+
+		let zone: DropZone = "nest";
 		el.addEventListener("dragover", (evt) => {
 			if (!this.dragPayload) return;
 			evt.preventDefault();
-			el.addClass("atlas-drop-target");
+			// E2: a target inside the dragged node's own subtree can never accept an edge drop (its
+			// own parent is itself inside that subtree, so `moveNode`'s cycle guard would refuse it
+			// anyway) — fall back to the plain, pre-PR-3 nest highlight rather than show a line that
+			// promises a move the drop will silently refuse.
+			if (this.isCycleDrop(target.viewId, target.nodeId)) {
+				zone = "nest";
+				this.clearDropIndicator();
+				el.addClass("atlas-drop-target");
+				return;
+			}
+			const rect = el.getBoundingClientRect();
+			zone = resolveDropZone(evt.clientY - rect.top, rect.height, hasBottomZone);
+			if (zone === "nest") {
+				el.addClass("atlas-drop-target");
+				this.clearDropIndicator();
+			} else {
+				el.removeClass("atlas-drop-target");
+				this.showDropIndicator(el, zone);
+			}
 		});
-		el.addEventListener("dragleave", () => el.removeClass("atlas-drop-target"));
+		el.addEventListener("dragleave", () => {
+			el.removeClass("atlas-drop-target");
+			this.clearDropIndicator();
+		});
 		el.addEventListener("drop", (evt) => {
 			evt.preventDefault();
 			evt.stopPropagation();
 			el.removeClass("atlas-drop-target");
-			this.handleDrop(target);
+			this.clearDropIndicator();
+			this.handleDrop(target, zone);
 		});
 	}
 
-	/** PR 12: dropping onto a row now always means "nest as a child of this row" (meta-nesting,
-	 * organizational only) — every node type can be a parent now, not just meta folders (Q3/Q11,
-	 * grilled with Dan directly). The one exception, the real disk-move "add to module" gesture, no
-	 * longer lives here at all — it moved to the module icon's own drop zone in `wireModuleRow`,
-	 * which handles it and calls `stopPropagation()` before a drop event would ever reach this
-	 * row-level handler. This *did* mean giving up "drop onto a row to insert as its sibling," which
-	 * this branch used to do for unit targets — a deliberate simplification Dan chose over a
-	 * right-side/rest-of-row zone split; reordering to a specific position among siblings now needs
-	 * un-nesting to the bucket root or a meta folder first, not a single drag onto a neighbor.
+	/** PR-3 (G1): shows (creating once, then only ever repositioning) the single shared
+	 * drop-indicator line as `row`'s previous or next sibling, matching `row`'s own left
+	 * indentation so it lines up with the row's own text rather than the container's edge. */
+	private showDropIndicator(row: HTMLElement, zone: "before" | "after"): void {
+		const parent = row.parentElement;
+		if (!parent) return;
+		if (!this.dropIndicatorEl) {
+			this.dropIndicatorEl = document.createElement("div");
+			this.dropIndicatorEl.className = "atlas-drop-indicator";
+		}
+		this.dropIndicatorEl.style.marginLeft = row.style.paddingLeft || "";
+		if (zone === "before") parent.insertBefore(this.dropIndicatorEl, row);
+		else parent.insertBefore(this.dropIndicatorEl, row.nextSibling);
+	}
+
+	private clearDropIndicator(): void {
+		this.dropIndicatorEl?.remove();
+		this.dropIndicatorEl = null;
+	}
+
+	/** PR-3 (E2): true when any node in the currently-dragged payload is `nodeId` itself, or an
+	 * ancestor of it — i.e. dropping on `nodeId` (or any edge of it) would require reparenting a
+	 * node into its own descendant, which `moveNode`'s own cycle guard already refuses
+	 * unconditionally. Used only to decide the *visual* feedback during `dragover`; the actual
+	 * refusal happens in `moveNode` regardless of whether this check runs at all. */
+	private isCycleDrop(viewId: string, nodeId: string): boolean {
+		const payload = this.dragPayload;
+		if (!payload || payload.kind !== "node" || payload.viewId !== viewId) return false;
+		const view = this.plugin.viewsManager.getView(viewId);
+		if (!view) return false;
+		return payload.nodeIds.some((draggedId) => {
+			if (draggedId === nodeId) return true;
+			const dragged = this.findNodeAnywhere(view.root, draggedId);
+			return !!dragged && this.nodeContainsDescendant(dragged.node, nodeId);
+		});
+	}
+
+	/** PR 12: dropping onto a row's own "nest" zone means "nest as a child of this row"
+	 * (meta-nesting, organizational only) — every node type can be a parent now, not just meta
+	 * folders (Q3/Q11, grilled with Dan directly). The one exception, the real disk-move "add to
+	 * module" gesture, no longer lives here at all — it moved to the module icon's own drop zone in
+	 * `wireModuleRow`, which handles it and calls `stopPropagation()` before a drop event would
+	 * ever reach this row-level handler.
+	 *
+	 * PR-3 (G1/G2): a row's edge zones ("before"/"after") instead insert the drag as a *sibling* of
+	 * the target, at the target's own position (or one past it) among the target's own parent's
+	 * children — reordering no longer needs un-nesting to the bucket root or a meta folder first,
+	 * the limitation PR 12's own doc comment used to call out here. The bucket root and inbox area
+	 * never carry an edge zone (`zone` is always `"nest"` there, from `makeDropZone`'s non-node
+	 * branch), so they still always append, unchanged.
 	 *
 	 * Also fixes a real, pre-existing bug found while rewriting this for PR 12: for a `payload.kind
 	 * === "node"` drag (an *existing* tree node being reparented, not a fresh ref from the inbox),
@@ -3168,7 +3296,7 @@ export class AtlasExplorerView extends ItemView {
 	 * units can now genuinely have children to lose, and meta-nesting makes "drag one row onto
 	 * another" universal. `moveNode` is the correct operation for an existing node changing parent
 	 * either way — it reparents the real node object in place instead of replacing it. */
-	private handleDrop(target: { kind: "node"; nodeId: string; viewId: string } | { kind: "bucket-root"; viewId: string } | { kind: "inbox-area"; viewId: string }): void {
+	private handleDrop(target: DropTarget, zone: DropZone = "nest"): void {
 		const payload = this.dragPayload;
 		this.dragPayload = null;
 		if (!payload) return;
@@ -3199,10 +3327,22 @@ export class AtlasExplorerView extends ItemView {
 
 		const viewId = target.viewId;
 		let parentId: string | null = null;
+		let position: number | undefined; // undefined => append (nest, bucket-root, inbox-area)
+
 		if (target.kind === "node") {
 			const view = this.plugin.viewsManager.getView(viewId);
-			const found = view && this.findNodeAnywhere(view.root, target.nodeId);
-			if (found) parentId = found.node.id;
+			if (view && zone !== "nest") {
+				// G1/G2: an edge drop never nests into the target — it lands as a sibling in the
+				// target's own parent (the bucket root, if the target is top-level), at the slot the
+				// indicator line showed: right before the target ("before") or right after it ("after").
+				const parentInfo = this.findNodeParent(view.root, target.nodeId, null);
+				if (!parentInfo) return; // target vanished mid-drag — nothing left to drop onto.
+				parentId = parentInfo.parentId;
+				position = zone === "after" ? parentInfo.index + 1 : parentInfo.index;
+			} else {
+				const found = view && this.findNodeAnywhere(view.root, target.nodeId);
+				if (found) parentId = found.node.id;
+			}
 		}
 
 		if (payload.kind === "node") {
@@ -3223,20 +3363,42 @@ export class AtlasExplorerView extends ItemView {
 			});
 			// An existing tree node (meta or unit) is being reparented/reordered — `moveNode` operates
 			// on it directly by id, in place, so its own children/collapsed state travels with it.
-			// Each move appends after the previous one, so the whole selection lands at the
-			// destination in the same relative order it was dragged in.
-			let index = parentId ? (this.findNodeAnywhere(view.root, parentId)?.node.children.length ?? 0) : view.root.length;
+			// PR-3 (G3): for an edge drop, `index` starts at the computed sibling position instead of
+			// always the end, so the whole selection lands together at the destination in the same
+			// relative order it was dragged in.
+			//
+			// R1 fix: the next slot is derived from where the *previous* row actually landed, not
+			// from a flat `index++`. `moveNode`'s `index` param is read against the pre-removal array
+			// (see its own doc comment) and adjusted for a same-parent downward move — so once any
+			// moved row came from above the drop point in the same parent, a naive running counter
+			// drifts one slot too high for every row after it (and mis-handles E1 no-ops the same
+			// way). Re-reading each node's real post-move position with `findNodeParent` and chaining
+			// the next index off *that* keeps the batch landing correctly regardless of which parent
+			// each row started in, or whether a given move turned out to be a no-op.
+			let index = position ?? (parentId ? (this.findNodeAnywhere(view.root, parentId)?.node.children.length ?? 0) : view.root.length);
 			for (const nodeId of toMove) {
-				if (this.plugin.viewsManager.moveNode(viewId, nodeId, parentId, index)) index++;
+				if (this.plugin.viewsManager.moveNode(viewId, nodeId, parentId, index)) {
+					const landed = this.findNodeParent(view.root, nodeId, null);
+					index = landed ? landed.index + 1 : index + 1;
+				}
 			}
 			this.selectedBucketNodeIds.clear();
 			this.queueRender();
 			return;
 		}
 
-		// payload.kind === "inbox": fresh unit refs, not yet placed anywhere in this view — placeUnit
-		// always appends, so calling it in order already preserves the batch's relative order.
-		for (const ref of payload.refs) this.plugin.viewsManager.placeUnit(viewId, ref, parentId);
+		// payload.kind === "inbox": fresh unit refs, not yet placed anywhere in this view.
+		// PR-3 (G1): an edge drop places the batch starting at `position`, in drag order; a nest/
+		// append drop (`position` undefined) keeps the pre-PR-3 behaviour of always appending.
+		if (position === undefined) {
+			for (const ref of payload.refs) this.plugin.viewsManager.placeUnit(viewId, ref, parentId);
+		} else {
+			let pos = position;
+			for (const ref of payload.refs) {
+				this.plugin.viewsManager.placeUnit(viewId, ref, parentId, pos);
+				pos++;
+			}
+		}
 		this.selectedInboxRefKeys.clear();
 		this.queueRender();
 	}
@@ -3246,6 +3408,20 @@ export class AtlasExplorerView extends ItemView {
 			if (child.id === targetId || this.nodeContainsDescendant(child, targetId)) return true;
 		}
 		return false;
+	}
+
+	/** PR-3 (G1/G2): like `findNodeAnywhere`, but returns the target's own parent id and its
+	 * current index among that parent's children, instead of the node itself — what an edge drop
+	 * needs to compute a sibling-insert position. `null` only when `targetId` isn't found at all
+	 * (e.g. the target vanished mid-drag). */
+	private findNodeParent(nodes: ViewNode[], targetId: string, parentId: string | null): { parentId: string | null; index: number } | null {
+		const index = nodes.findIndex((n) => n.id === targetId);
+		if (index !== -1) return { parentId, index };
+		for (const node of nodes) {
+			const found = this.findNodeParent(node.children, targetId, node.id);
+			if (found) return found;
+		}
+		return null;
 	}
 
 	/** Files/blocks are opaque internals to a folder-unit until something links to them — dropping

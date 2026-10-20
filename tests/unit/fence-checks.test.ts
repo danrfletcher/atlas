@@ -252,3 +252,44 @@ describe("PR-2 F8 — Reverse order is disabled for Manual and Manual never carr
 		expect(calls).toEqual([["v1", "f", { sortMode: "manual", sortReverse: false }]]);
 	});
 });
+
+// PR-3 (F3/fence): an edge-drop reorder never touches disk and never edits file content -- no
+// vault rename, move or write of any kind results from `handleDrop`'s sibling-insert branches.
+describe("PR-3 fence — an edge drop never touches disk", () => {
+	it("handleDrop's node-reorder branch has no disk-write call anywhere in its own body", () => {
+		const body = folderSourceSlice("src/explorer-view.ts", "private handleDrop(target: DropTarget", "\n	private nodeContainsDescendant(");
+		expect(body).not.toMatch(DISK_WRITE_CALL);
+	});
+
+	it("driving a real edge-drop move and a real edge-drop inbox-place records no Vault call", () => {
+		const app = new MockApp();
+		app.vault.seedFile("A.md");
+		app.vault.seedFile("B.md");
+		const vm = new ViewsManager(app as unknown as App, [], "", () => {});
+		const view = vm.getViews()[0];
+		vm.placeUnit(view.id, { kind: "file", path: "A.md" }, null);
+		vm.placeUnit(view.id, { kind: "file", path: "B.md" }, null);
+		const a = vm.getViews()[0].root[0];
+
+		// A same-parent reorder (the moveNode fix) and a positioned inbox place (the placeUnit fix) --
+		// both PR-3's own new code paths -- neither one is a disk operation.
+		vm.moveNode(view.id, a.id, null, 2);
+		vm.placeUnit(view.id, { kind: "file", path: "C.md" }, null, 1);
+
+		expect(app.vault.calls).toEqual([]);
+	});
+});
+
+// PR-3 (fence): no new command id is registered by this PR's edge-drop/reorder work -- the
+// registered set is still exactly the same seven as PR-1's own F9 check above.
+describe("PR-3 fence — no new command id from the edge-drop/reorder work", () => {
+	it("the registered command id set still has no sort/reorder/move id of any kind", () => {
+		const ids: string[] = [];
+		const fakePlugin = { addCommand: (cmd: { id: string }) => ids.push(cmd.id) } as unknown as Parameters<typeof registerF10Commands>[0];
+		registerF10Commands(fakePlugin);
+		registerAddBlockCommand(fakePlugin);
+
+		expect(ids).toHaveLength(7);
+		for (const id of ids) expect(id.toLowerCase()).not.toMatch(/sort|reorder|move-up|move-down/);
+	});
+});
