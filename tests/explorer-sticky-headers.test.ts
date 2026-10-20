@@ -54,14 +54,21 @@ describe("rendered headers: no JS transform or scroll-padding (GP2-GP5, E1)", ()
 	it("adds no scroll listener or requestAnimationFrame beyond the inbox virtualisation's own (F5)", async () => {
 		const addSpy = vi.spyOn(HTMLElement.prototype, "addEventListener");
 		const rafSpy = vi.spyOn(window, "requestAnimationFrame");
-		h = makeSectionHarness();
-		await h.render();
-		h.scrollTo(1000);
-		// The inbox's row-virtualisation redraw keeps its own `scroll` listener (unrelated to sticky
-		// headers, see `renderVirtualizedInboxRows`); the sticky-header code adds no listener of its own.
-		const scrollListeners = addSpy.mock.calls.filter((call, i) => call[0] === "scroll" && addSpy.mock.contexts[i] === h!.body());
-		expect(scrollListeners.length).toBe(1);
-		expect(rafSpy).not.toHaveBeenCalled();
+		try {
+			h = makeSectionHarness();
+			await h.render();
+			h.scrollTo(1000);
+			// The inbox's row-virtualisation redraw keeps its own `scroll` listener (unrelated to sticky
+			// headers, see `renderVirtualizedInboxRows`); the sticky-header code adds no listener of its own.
+			const scrollListeners = addSpy.mock.calls.filter((call, i) => call[0] === "scroll" && addSpy.mock.contexts[i] === h!.body());
+			expect(scrollListeners.length).toBe(1);
+			expect(rafSpy).not.toHaveBeenCalled();
+		} finally {
+			// PR-1.B1 R2: both spies sit on shared prototypes (HTMLElement.prototype, window), not on an
+			// instance, so they leak into every later test in the file unless restored here.
+			addSpy.mockRestore();
+			rafSpy.mockRestore();
+		}
 	});
 });
 
@@ -90,13 +97,16 @@ describe("short-panel guard (E2)", () => {
 		h = null;
 	});
 
-	// Fit threshold: bucket header + inbox header + one row = 84px.
+	// Fit threshold: bucket header + inbox header + one row = 84px. PR-1.B1 R1: the guard disables
+	// sticky only strictly below this (84px itself stays sticky, matching origin/main's pre-existing
+	// guard), so the three cases below are 83/84/85px — the boundary itself, one px short of it, and
+	// one px past it — not a repeat of the same height twice.
 	const minFit = HEADER + HEADER + ROW;
 
 	it.each([
-		["exactly fits: sticky stays enabled", minFit, false],
-		["one px short: sticky is disabled", minFit - 1, true],
-		["one px taller than the short case: sticky re-enables", minFit, false],
+		["83px (one px short of the fit threshold): sticky is disabled", minFit - 1, true],
+		["84px (exactly the fit threshold): sticky stays enabled", minFit, false],
+		["85px (one px past the fit threshold): sticky stays enabled", minFit + 1, false],
 	])("%s", async (_label, viewportHeight, expectDisabled) => {
 		h = makeSectionHarness();
 		await h.render();
@@ -180,6 +190,21 @@ describe("collapse leaves the sticky state consistent (E3)", () => {
 		expect(h.body().style.getPropertyValue("--atlas-bucket-label-h")).toBe(before);
 		expect(h.body().classList.contains("atlas-sticky-disabled")).toBe(disabledBefore);
 	});
+
+	// PR-1.B1 R4: the bucket case above exercises the chevron handler that fires
+	// `updateStickyLayout()` on collapse; the inbox chevron runs the same handler and was untested.
+	it("collapsing the inbox while scrolled keeps --atlas-bucket-label-h and the disabled class stable", async () => {
+		h = makeSectionHarness();
+		await h.render();
+		h.scrollTo(1000);
+		const before = h.body().style.getPropertyValue("--atlas-bucket-label-h");
+		const disabledBefore = h.body().classList.contains("atlas-sticky-disabled");
+
+		h.inboxChevron().click();
+
+		expect(h.body().style.getPropertyValue("--atlas-bucket-label-h")).toBe(before);
+		expect(h.body().classList.contains("atlas-sticky-disabled")).toBe(disabledBefore);
+	});
 });
 
 describe("stylesheet: .atlas-section-header is a native sticky rule (F1, F2, F3, E6)", () => {
@@ -219,12 +244,36 @@ describe("stylesheet: .atlas-section-header is a native sticky rule (F1, F2, F3,
 		expect(rule!.body).toMatch(/position\s*:\s*static/);
 	});
 
-	it("only the sticking properties changed on .atlas-section-header: padding, font, colour and height stay as on origin/main", () => {
+	// PR-1.B1 R3: diffs the live rule against the declarations it had on origin/main immediately
+	// before PR-1.B1 (commit d8aec47) changed it, instead of re-asserting a handful of hard-coded
+	// values that would pass trivially even if an unrelated property were added. Property-set
+	// equality (not just value matches for the properties we expect) catches that case, and the
+	// explicit margin/height checks cover the two properties the old version of this test didn't.
+	it("only `position` changed on .atlas-section-header versus origin/main before PR-1.B1; no margin or height was added", () => {
 		const rule = rules.find((r) => r.selectors === ".atlas-section-header")!;
-		expect(rule.body).toMatch(/padding\s*:\s*4px 8px/);
-		expect(rule.body).toMatch(/font-weight\s*:\s*600/);
-		expect(rule.body).toMatch(/color\s*:\s*var\(--text-muted\)/);
-		expect(rule.body).toMatch(/text-transform\s*:\s*uppercase/);
-		expect(rule.body).toMatch(/font-size\s*:\s*var\(--font-ui-smaller\)/);
+		const preStickyBody = `
+			position: relative;
+			z-index: 1;
+			display: flex;
+			align-items: center;
+			gap: 4px;
+			padding: 4px 8px;
+			background: var(--background-primary);
+			font-weight: 600;
+			color: var(--text-muted);
+			text-transform: uppercase;
+			font-size: var(--font-ui-smaller);
+		`;
+		const parseDecls = (body: string) =>
+			new Map(Array.from(body.matchAll(/([\w-]+)\s*:\s*([^;]+);/g), (m) => [m[1].trim(), m[2].trim()]));
+		const before = parseDecls(preStickyBody);
+		const after = parseDecls(rule.body);
+
+		expect(Array.from(after.keys()).sort()).toEqual(Array.from(before.keys()).sort());
+		for (const [prop, beforeValue] of before) {
+			expect(after.get(prop)).toBe(prop === "position" ? "sticky" : beforeValue);
+		}
+		expect(after.has("margin")).toBe(false);
+		expect(after.has("height")).toBe(false);
 	});
 });
