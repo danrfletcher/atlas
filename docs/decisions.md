@@ -18,7 +18,7 @@ Judgement calls made during the build, the alternative considered, and why. Newe
 
 ## PR-2: sort/reorder within a folder and the Bucket root
 
-**Decision:** G12's "Statuses modal toggle" is the pre-existing PR-22 "Sort children by status" toggle inside the Statuses modal — not the "Enable statuses" master toggle. Caught my own first-pass misread (briefly wired `sortMode` writes into "Enable statuses") before committing anything; reverted once I re-read the modal's actual layout and found the PR-22 toggle already satisfies G12/G19's on/off rules (toggle on always sets Status; toggle off is only reachable from an on state, which only happens when the mode is already Status, so "leaves any other mode alone" holds structurally). No production change was needed there at all.
+**Decision:** G12's "Statuses modal toggle" is the pre-existing PR-22 "Sort children by status" toggle inside the Statuses modal — not the "Enable statuses" master toggle. Caught my own first-pass misread (briefly wired `sortMode` writes into "Enable statuses") before committing anything; reverted once I re-read the modal's actual layout and found the PR-22 toggle already satisfies G12/G19's on/off rules (toggle on always sets Status; toggle off is only reachable from an on state, which only happens when the mode is already Status, so "leaves any other mode alone" holds structurally). Superseded in the sort polish PR: turning the toggle on from a reversed A-Z gave Status reversed, so both directions now also reset Reverse (G19), and `tests/unit/statuses-modal-sort-toggle.test.ts` pins every prior mode.
 
 **Decision:** the spec's own suggested test location for G9/E4 (Modified-sort refresh timing), `tests/unit/refresh-modes.test.ts`, is entirely about API data-source refresh modes (append/merge/overwrite) and has nothing to do with explorer render-refresh triggers. Added a dedicated `tests/unit/sort-refresh-gate.test.ts` for the `SortRefreshGate` class itself, plus an integration-level case in `explorer-view-sort.test.ts` exercising the real `resolvedMtimeForSort` caching wrapper through the render path, instead of extending the mismatched file.
 
@@ -522,3 +522,21 @@ As a second, defense-in-depth layer (not a substitute for composite addressing, 
 A hidden row is refused as a target (not found) but its children are still reachable, lifted with the hidden row appended as their *furthest* ancestor (`[...ancestors, hiddenNode]`) — so a closer, still-visible governor keeps winning the way it does on screen, matching `ExplorerView.visibleFolderSourceRows`'s own lift order exactly rather than the walk's previous `[node, ...ancestors]` (nearest-first) order. An unresolved Outside-Vault-managed row drops its entire subtree instead (no lift — it renders as if it doesn't exist on this device). Callers that don't pass a visibility (none remain in production code; some low-level resolver unit tests do, deliberately, to pin the pre-R3 default) get `alwaysVisible`, which treats every row as shown.
 
 **Why:** review R3 found that `walkView`/`summarizeNode` always used `[node, ...ancestors]` and never checked hidden/unresolved state at all, so `list_nodes`/`get_node_status` could report — and `set_node_status` could accept a write against — a row the explorer never renders, and could resolve against a hidden governor's status set when the UI would have resolved against the next visible one (or none). Reusing `ViewsManager.managedRowFilterState` and the Outside-Vault resolution check, rather than re-deriving the rule, keeps the two guaranteed in sync as the explorer's own rule evolves.
+
+## Sort and reorder polish (deferred review findings)
+
+**Outside-Vault Modified (PR-1 R2).** Fixed rather than recorded as a limitation: `outsideChildMtime` (`folder-source-outside.ts`) stats the child at the source's device-local root + the child's root-relative name. A folder child counts as "no time", like a module with no interface note. The mtime cache key is prefixed with the owning source's id so an Outside child can't share a cache slot with a vault file of the same relative name.
+
+**Same-parent `placeUnit` (PR-1 R3, PR-3 R5).** Does not restamp `placedAt` (G10) and now adjusts a positional index for the removal the way `moveNode` does, rather than asserting the precondition away.
+
+**Stale own `status` sort (PR-2 R6).** `activeSortFor` returns `null` for an own `sortMode: "status"` when no governor with a status set reaches the list, because that is what the render pass does (rows stay in manual order). The indicator and menu now agree with the render.
+
+**Overlapping renders and refresh triggers (PR-2 R4/R5/R11).** A render that consumed the Modified refresh and was then superseded hands the allowance to its successor until one finishes as current. A native drag keeps deferring the refresh across every render until `dragend`, `drop` or any pointer event. A focus-regain refresh that arrives between `pointerdown` and the end of the gesture waits for it. The pointer listeners are capture-phase on the document, so they run before Obsidian's own leaf-activating `pointerdown`.
+
+**Reverse on an inherited status sort (PR-2 R12).** Writes the effective mode along with the flipped direction, which pins the sort to that row. "(inherited)" is shown only when the row has no own mode and the reaching governor is sorting by status (PR-2 R9).
+
+**Selection that includes the drop target (PR-3 R2).** Left as it behaves today and pinned by a test: the other selected rows nest into the target and the target itself stays put. The spec's wording could also mean "lands before the target" or "no change"; this is waiting on Dan.
+
+**Sorted-insert outline for hoisted rows (PR-4 R6).** Recorded as a known limitation (see `showSortedDropOutline`): the decision and landing use the real parent, only the highlighted list can be the grandparent's.
+
+**Unit/module rows and the sort indicator (PR-2 R7).** Not changed. G13 says "folder"; whether it covers modules and units with children needs Dan's call before the icon is added to those rows.
