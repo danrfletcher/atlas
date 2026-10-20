@@ -12,6 +12,8 @@ import { DEFAULT_SETTINGS } from "../../src/settings";
 import { AtlasExplorerView, compareInboxRows } from "../../src/explorer-view";
 import type { InboxSortRow } from "../../src/explorer-view";
 import { SORT_MODE_CHOICES } from "../../src/sort";
+import { file, meta, unit } from "../integration/create-from-meta-fixtures";
+import { renderUnitRow } from "./folder-source-outside-children-behavior.test";
 import { callRenderNodeList, makeFakeExplorer, makeStatusesManager, rowOrder, view as sortView } from "./explorer-view-sort-truncate-helpers";
 
 /** F5: "Folder source introduces no new disk-moving behavior beyond the three existing named
@@ -291,5 +293,87 @@ describe("PR-3 fence — no new command id from the edge-drop/reorder work", () 
 
 		expect(ids).toHaveLength(7);
 		for (const id of ids) expect(id.toLowerCase()).not.toMatch(/sort|reorder|move-up|move-down/);
+	});
+});
+
+// PR-4 (fence F7): the sorted-drop gating (resolveDropDecision/assessDrop/sortedFolderNoticeText)
+// lives only in drop-zones.ts/sort.ts/explorer-view.ts's own drag handlers -- it never leaks into
+// the Module Contents modal or any other modal, which has no drag/drop code of its own to gate.
+describe("PR-4 fence F7 — no reorder/sorted-drop code reaches the modals", () => {
+	it("src/modals.ts has no drag/drop or sorted-drop-decision code at all", () => {
+		const body = read("src/modals.ts");
+		expect(body).not.toMatch(/makeDropZone|resolveDropDecision|assessDrop|sortedFolderNoticeText|atlas-sorted-drop-outline|dragover|dragstart|draggable\s*=/);
+	});
+});
+
+// PR-4 (fence): no new disk-write call anywhere in the sorted-drop gating this PR adds -- a
+// refused or allowed sorted-insert drop is exactly as disk-free as every other arrange-only
+// action (per F5's own named three exceptions, none of which this PR touches).
+describe("PR-4 fence — the sorted-drop gating has no disk-write call", () => {
+	it("src/drop-zones.ts (the pure decision function) has no disk-write call anywhere", () => {
+		expect(read("src/drop-zones.ts")).not.toMatch(DISK_WRITE_CALL);
+	});
+
+	it("sortedFolderNoticeText and the sortedParentLabel/showSortedDropRefusedNotice/assessDrop slice of explorer-view.ts have no disk-write call", () => {
+		expect(read("src/sort.ts")).not.toMatch(DISK_WRITE_CALL);
+		const body = folderSourceSlice("src/explorer-view.ts", "private assessDrop(", "\n	private async sortedParentLabel(");
+		expect(body).not.toMatch(DISK_WRITE_CALL);
+		const noticeBody = folderSourceSlice("src/explorer-view.ts", "private async sortedParentLabel(", "\n	private showSortedDropOutline(");
+		expect(noticeBody).not.toMatch(DISK_WRITE_CALL);
+	});
+
+	it("driving a real refused drop and a real sorted-insert drop records no Vault call", async () => {
+		const app = new MockApp();
+		app.vault.seedFile("A.md");
+		app.vault.seedFile("B.md");
+		const vm = new ViewsManager(app as unknown as App, [], "", () => {});
+		const view = vm.getViews()[0];
+		vm.placeUnit(view.id, { kind: "file", path: "A.md" }, null);
+		vm.placeUnit(view.id, { kind: "file", path: "B.md" }, null);
+		const folderNodeId = vm.getViews()[0].root[0].id;
+		vm.getViews()[0].root[0] = { ...vm.getViews()[0].root[0], type: "meta", label: "Folder", sortMode: "alphabetical" };
+
+		// a refused in-folder edge drop
+		vm.moveNode(view.id, folderNodeId, null, 1);
+		// a sorted-insert from elsewhere
+		vm.placeUnit(view.id, { kind: "file", path: "C.md" }, null, 1);
+
+		expect(app.vault.calls).toEqual([]);
+	});
+});
+
+// PR-4 (T3/T7/C32 fix): F10 — a child of an Outside-Vault source folder stays un-draggable (no
+// `draggable` attribute, no `dragstart` wiring), so it never takes part in an edge drop or a
+// batch -- true whether or not this PR's new sorted-drop gating is in play, since the row never
+// gets a drag payload to begin with. Drives the real (unstubbed) `renderNode` the same way
+// `folder-source-outside-children-behavior.test.ts`'s own G8/F7 block does.
+describe("PR-4 fence F10 — a child of an Outside-Vault source folder stays un-draggable", () => {
+	it("an Outside-Vault-managed child renders with no draggable attribute at all, sorted owner or not", async () => {
+		const owner = meta("owner", "Folder", [], {
+			folderSource: { location: "outside", path: "", showFiles: true, showFolders: true },
+			sortMode: "alphabetical",
+		});
+		const childNode = unit("c1", file("/Volumes/External/Notes/a.md"), { folderSourceManaged: true, folderSourceOwnerId: "owner" });
+
+		const { row } = await renderUnitRow(childNode, { ownerNode: owner });
+
+		expect(row.getAttribute("draggable")).toBe("false");
+	});
+
+	it("firing dragstart on an Outside-Vault-managed row never records a drag payload", async () => {
+		const owner = meta("owner", "Folder", [], { folderSource: { location: "outside", path: "", showFiles: true, showFolders: true } });
+		const childNode = unit("c1", file("/Volumes/External/Notes/a.md"), { folderSourceManaged: true, folderSourceOwnerId: "owner" });
+
+		const { row, fake } = await renderUnitRow(childNode, { ownerNode: owner });
+		row.dispatchEvent(new Event("dragstart"));
+
+		expect((fake as { dragPayload: unknown }).dragPayload).toBeNull();
+	});
+
+	it("an ordinary (non-managed) row stays draggable, control case", async () => {
+		const childNode = unit("c2", file("Notes/a.md"));
+		const { row } = await renderUnitRow(childNode);
+
+		expect(row.getAttribute("draggable")).toBe("true");
 	});
 });

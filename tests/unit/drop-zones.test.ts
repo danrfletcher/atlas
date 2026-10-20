@@ -2,7 +2,8 @@
  * split, the expanded-row-with-no-bottom-zone exception, and the boundary/degenerate cases the
  * spec calls out explicitly. */
 import { describe, expect, it } from "vitest";
-import { resolveDropZone } from "../../src/drop-zones";
+import { DropDecision, resolveDropDecision, resolveDropZone } from "../../src/drop-zones";
+import { EffectiveSort } from "../../src/sort";
 
 describe("PR-3 G1/G2 — the plain 25/50/25 split (hasBottomZone: true)", () => {
 	it("below 25% is before", () => {
@@ -83,5 +84,66 @@ describe("PR-3 — a very short row height", () => {
 	it("a zero-height row never throws and resolves deterministically", () => {
 		expect(() => resolveDropZone(0, 0, true)).not.toThrow();
 		expect(resolveDropZone(0, 0, true)).toBe(resolveDropZone(0, 0, true));
+	});
+});
+
+// PR-4 (G4/G5/G22): resolveDropDecision -- the pure function a sorted-folder edge/nest drop
+// reduces to, given the zone, the drag's source parent, the target's parent, and the target
+// list's own effective sort. Covers the spec's own three rules directly, independent of any DOM
+// or ViewsManager plumbing (that end-to-end wiring lives in explorer-view.test.ts instead).
+describe("PR-4 G4/G5/G22 — resolveDropDecision: the pure sorted-drop decision table", () => {
+	const SORTS: EffectiveSort[] = [
+		{ mode: "alphabetical", reverse: false },
+		{ mode: "alphabetical", reverse: true },
+		{ mode: "modified", reverse: false },
+		{ mode: "modified", reverse: true },
+		{ mode: "time-added", reverse: false },
+		{ mode: "time-added", reverse: true },
+		{ mode: "status", reverse: false },
+		{ mode: "status", reverse: true },
+	];
+
+	it("a middle (nest) zone always nests, regardless of sort, source or target parent", () => {
+		for (const sort of [...SORTS, null]) {
+			expect(resolveDropDecision("nest", "a", "a", sort)).toBe<DropDecision>("nest");
+			expect(resolveDropDecision("nest", "a", "b", sort)).toBe<DropDecision>("nest");
+			expect(resolveDropDecision("nest", undefined, null, sort)).toBe<DropDecision>("nest");
+		}
+	});
+
+	it("an effectively-Manual target (null effectiveSort) always reorders on an edge zone, regardless of source parent", () => {
+		expect(resolveDropDecision("before", "folder", "folder", null)).toBe<DropDecision>("reorder");
+		expect(resolveDropDecision("after", "folder", "folder", null)).toBe<DropDecision>("reorder");
+		expect(resolveDropDecision("before", undefined, "folder", null)).toBe<DropDecision>("reorder");
+		expect(resolveDropDecision("before", "other", "folder", null)).toBe<DropDecision>("reorder");
+		expect(resolveDropDecision("before", null, null, null)).toBe<DropDecision>("reorder"); // the Bucket root, Manual
+	});
+
+	it("refuses an edge zone when the source parent equals the target parent, under every sorted mode and direction", () => {
+		for (const sort of SORTS) {
+			expect(resolveDropDecision("before", "folder", "folder", sort)).toBe<DropDecision>("refuse");
+			expect(resolveDropDecision("after", "folder", "folder", sort)).toBe<DropDecision>("refuse");
+		}
+	});
+
+	it("refuses an edge zone at the sorted Bucket root (both parents null) the same way as any sorted Folder", () => {
+		expect(resolveDropDecision("before", null, null, { mode: "alphabetical", reverse: false })).toBe<DropDecision>("refuse");
+	});
+
+	it("gives sorted-insert for an edge zone from any other parent (a different folder, or undefined for the inbox/a mixed batch with no in-folder row), under every sorted mode", () => {
+		for (const sort of SORTS) {
+			expect(resolveDropDecision("before", "elsewhere", "folder", sort)).toBe<DropDecision>("sorted-insert");
+			expect(resolveDropDecision("after", undefined, "folder", sort)).toBe<DropDecision>("sorted-insert"); // e.g. the Inbox
+			expect(resolveDropDecision("before", null, "folder", sort)).toBe<DropDecision>("sorted-insert"); // dragged up out of the Bucket root
+			expect(resolveDropDecision("before", "folder", null, sort)).toBe<DropDecision>("sorted-insert"); // dragged up into the sorted Bucket root
+		}
+	});
+
+	it("explicit Manual (effectiveSort null) always reorders even when dragged within the exact same sorted-looking ids, since the caller never passes a sorted effectiveSort for it", () => {
+		// activeSortFor's own "explicit Manual overrides an inherited status sort" rule (sort.ts)
+		// is what ever produces a null effectiveSort here for a governed folder -- resolveDropDecision
+		// itself only ever sees the already-resolved EffectiveSort, so this just pins that a null
+		// input (whatever produced it) reorders, not refuses.
+		expect(resolveDropDecision("before", "folder", "folder", null)).toBe<DropDecision>("reorder");
 	});
 });

@@ -150,6 +150,14 @@ export function sortModeLabel(mode: SortMode, reverse: boolean): string {
 	}
 }
 
+/** PR-4 (G4/E13): the Notice text shown when an edge drop onto a sorted list's own existing child
+ * is refused — `label` is the target list's own display text (a Folder's label, a unit's resolved
+ * name, or literally "Bucket" for the view root), matching `sortModeLabel`'s own phrasing so this
+ * reads as one sentence rather than restating the mode twice in different words. */
+export function sortedFolderNoticeText(label: string, mode: SortMode, reverse: boolean): string {
+	return `${label} is sorted ${sortModeLabel(mode, reverse)}. Set it to Manual to reorder.`;
+}
+
 /** PR-2 (T12): the A-Z/Z-A icon registered under Atlas's own id, bypassing Obsidian's Lucide
  * lookup entirely. Three straight rounds (T1/T5/T9, see `src/explorer-view.ts`'s git history)
  * tried progressively different id strings for the same built-in Lucide icon — the bare
