@@ -18,6 +18,7 @@ import { ViewsManager } from "./views";
 import { FolderLiveRefresh } from "./folder-live-refresh";
 import { parentFolderPath } from "./folder-source";
 import { ATLAS_VIEW_TYPE, AtlasExplorerView } from "./explorer-view";
+import { registerSortIcons } from "./sort";
 import { registerF10Commands } from "./f10-commands";
 import { closeNameDialog, openNameDialog } from "./name-dialog";
 import { GraduationController } from "./graduation";
@@ -161,6 +162,11 @@ export default class AtlasPlugin extends Plugin {
 		this.freeBlockTextCache.register();
 		registerBlockLinkDisplayPostProcessor(this);
 		this.registerEditorExtension([freeBlockLivePreviewPlugin(this, this.freeBlockTextCache)]);
+
+		// PR-2 (T12): must run before registerView() below registers the view factory, so the
+		// G13 indicator and the "Sort children…" menu item resolve a real icon the very first
+		// time any view renders — see ATLAS_SORT_AZ_ICON_ID's doc comment in sort.ts.
+		registerSortIcons();
 
 		this.registerView(ATLAS_VIEW_TYPE, (leaf) => new AtlasExplorerView(leaf, this));
 

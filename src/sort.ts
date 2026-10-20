@@ -4,6 +4,7 @@
  * file only adds `"alphabetical"` / `"modified"` / `"time-added"`, which — unlike `"status"` — are
  * never inherited past a governor's own direct children (F6), so the render pass reads them
  * straight off the nearest ancestor rather than walking `findSortGovernor`'s inheritance chain. */
+import { addIcon } from "obsidian";
 import { ViewNode, StatusGovernance } from "./types";
 
 /** Every value `StatusGovernance.sortMode` can hold. Kept here (not re-exported from `types.ts`)
@@ -98,4 +99,130 @@ export function currentSortMode(governance: Pick<StatusGovernance, "sortMode">):
 export function displayNameFor(node: ViewNode, resolvedText: string | undefined): string {
 	if (node.type === "meta") return node.label ?? "";
 	return resolvedText ?? "";
+}
+
+/** PR-2: the effective (mode, direction) a list actually renders by, once "absent falls back to
+ * an inherited status sort" (G19) is resolved. `null` means effectively Manual — no icon (G13),
+ * no sort pass. */
+export interface EffectiveSort {
+	mode: SortMode;
+	reverse: boolean;
+}
+
+/** PR-2 (G12/G19/E5): combines a list's own direct governor (`ownGovernance` — a `ViewNode` or the
+ * `View` root; never an inherited one, F6) with the nearest reachable status governor
+ * (`statusGovernor`, from `StatusesManager.findSortGovernor`) into the one effective sort this
+ * list actually renders by. An explicit own `sortMode` — any value, including `"manual"` — always
+ * wins outright; only an *absent* own setting ever falls through to an inherited status sort.
+ * Shared by the render pass's own status-sort activation, the "Sort children…" menu's Status
+ * tick/label and the G13 sort indicator, so the three can't drift apart on what "currently sorted
+ * by status" means. */
+export function activeSortFor(
+	ownGovernance: Pick<StatusGovernance, "sortMode" | "sortReverse">,
+	statusGovernor: Pick<StatusGovernance, "sortMode" | "sortReverse"> | null
+): EffectiveSort | null {
+	const ownMode = ownGovernance.sortMode;
+	if (ownMode !== undefined) {
+		if (ownMode === "manual") return null;
+		return { mode: ownMode, reverse: !!ownGovernance.sortReverse };
+	}
+	if (statusGovernor?.sortMode === "status") {
+		return { mode: "status", reverse: !!statusGovernor.sortReverse };
+	}
+	return null;
+}
+
+/** PR-2 (G13/G21): the mode+direction phrase for the sort indicator's tooltip ("Sorted: <this>").
+ * A-Z's reverse has its own name (Z-A) rather than "A-Z, reversed"; every other mode mirrors the
+ * explicit "Modified, newest/oldest first" wording from the spec's own example strings. */
+export function sortModeLabel(mode: SortMode, reverse: boolean): string {
+	switch (mode) {
+		case "alphabetical":
+			return reverse ? "Z-A" : "A-Z";
+		case "modified":
+			return `Modified, ${reverse ? "oldest" : "newest"} first`;
+		case "time-added":
+			return `Time added, ${reverse ? "oldest" : "newest"} first`;
+		case "status":
+			return reverse ? "Status, reversed" : "Status";
+		default:
+			return "Manual";
+	}
+}
+
+/** PR-2 (T12): the A-Z/Z-A icon registered under Atlas's own id, bypassing Obsidian's Lucide
+ * lookup entirely. Three straight rounds (T1/T5/T9, see `src/explorer-view.ts`'s git history)
+ * tried progressively different id strings for the same built-in Lucide icon — the bare
+ * `"arrow-down-az"`, then the `lucide-`-prefixed `"lucide-arrow-down-az"` — and both left the
+ * indicator and the "Sort children…" menu item as an empty 0x0 element with no `<svg>`, confirmed
+ * live across multiple plugin reloads and full app restarts. The icon's own path data does exist
+ * in the installed Obsidian build's Lucide table (confirmed by grepping `resources/obsidian.asar`
+ * for a bare `"arrow-down-az"` key with real path data), so the failure is specifically in how
+ * Atlas's plugin-facing entry points — the global `setIcon()` and `MenuItem.setIcon()` — resolve
+ * an id at runtime; this one Lucide icon apparently isn't eagerly registered into Obsidian's live
+ * icon cache the way `clock`/`calendar-plus`/`list-ordered` are, and no bare-or-prefixed string
+ * ever reaches it through those two entry points. `addIcon()` sidesteps the lookup altogether by
+ * registering a plugin-owned icon id with its own inline SVG, the same way any plugin ships a
+ * custom icon — `registerSortIcons()` below must run once, before any view renders, so both
+ * `SORT_MODE_ICONS.alphabetical` and the "Sort children…" menu item's `.setIcon()` call
+ * (`src/explorer-view.ts`) always resolve a real icon. */
+export const ATLAS_SORT_AZ_ICON_ID = "atlas-sort-az";
+
+/** Lucide's own `arrow-down-az` path data (5 strokes), wrapped in a `<g>` that scales Lucide's
+ * 24x24 viewBox up to Obsidian's 100x100 `addIcon` convention (100/24 ≈ 4.1667) and carries the
+ * stroke styling Lucide icons expect. Exported only for the registration test below. */
+export const ATLAS_SORT_AZ_ICON_SVG =
+	'<g transform="scale(4.1667)" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m3 16 4 4 4-4"/><path d="M7 20V4"/><path d="M20 8h-5"/><path d="M15 10V6.5a2.5 2.5 0 0 1 5 0V10"/><path d="M15 14h5l-5 6h5"/></g>';
+
+/** PR-2 (T12): registers `ATLAS_SORT_AZ_ICON_ID` with Obsidian via `addIcon()`. Called once from
+ * `AtlasPlugin.onload()`, before `registerView()`, so the id is resolvable the first time any
+ * view renders the G13 indicator or opens the "Sort children…" menu. */
+export function registerSortIcons(): void {
+	addIcon(ATLAS_SORT_AZ_ICON_ID, ATLAS_SORT_AZ_ICON_SVG);
+}
+
+/** PR-2 (G21): the icon per mode for the "Sort children…" item and the G13 sort indicator. No
+ * icon is ever shown for `"manual"` (an effectively-Manual list shows no indicator at all).
+ *
+ * PR-2 (T12): the alphabetical id is Atlas's own `ATLAS_SORT_AZ_ICON_ID`, registered via
+ * `registerSortIcons()` — see that function's doc comment for why a Lucide id string alone (bare
+ * or `lucide-`-prefixed) never resolves through `setIcon()`/`MenuItem.setIcon()` for this
+ * particular icon. The other four modes' ids (`clock`, `calendar-plus`, `list-ordered`, and the
+ * empty Manual string) are already confirmed live to resolve bare through these same entry
+ * points, so only this one needs its own registered icon — don't register the others by analogy
+ * without re-confirming them live first. */
+export const SORT_MODE_ICONS: Record<SortMode, string> = {
+	manual: "",
+	alphabetical: ATLAS_SORT_AZ_ICON_ID,
+	modified: "clock",
+	"time-added": "calendar-plus",
+	status: "list-ordered",
+};
+
+/** PR-2 (G9/E4): governs *when* a Modified-sorted list's file-mtime snapshot may be refreshed —
+ * "the next time the explorer refreshes" means one of four triggers (pane regains focus, view
+ * loads, a sort changes, the tree changes), never a plain autosave/vault `modify`, and never while
+ * a drag is in progress (deferred until the drag ends, per the edge case). Holds no reference to
+ * the mtimes themselves — the caller (`AtlasExplorerView`) owns that cache; this only decides
+ * *when* it's allowed to recompute, so it's testable with no DOM/vault involved at all. Starts
+ * dirty: a view's very first render is itself "the view loads". */
+export class SortRefreshGate {
+	private dirty = true;
+
+	/** Call from any of the four trigger points. Idempotent — marking dirty twice before the next
+	 * `consume()` behaves the same as marking it once. */
+	markDirty(): void {
+		this.dirty = true;
+	}
+
+	/** Call once per render pass. Returns true exactly when this render should recompute
+	 * sort-relevant data (a trigger fired since the last successful refresh) and no drag is
+	 * currently in progress — consuming the pending flag only when it returns true, so a render
+	 * that's skipped only because a drag is active leaves the flag set for the first render after
+	 * the drag ends. */
+	consume(dragging: boolean): boolean {
+		if (dragging || !this.dirty) return false;
+		this.dirty = false;
+		return true;
+	}
 }

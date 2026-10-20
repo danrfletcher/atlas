@@ -50,7 +50,12 @@ describe("PR-3 — explorer-view.ts call sites keep working with the new ApiSour
 			builtMenu = this;
 		});
 		(AtlasExplorerView.prototype as unknown as { showMetaFolderMenu: (...a: unknown[]) => void }).showMetaFolderMenu.call(
-			{ plugin: {}, startCreateFromMeta: vi.fn(), openStatusesModal: vi.fn(), openApiSourceModal: openApiSourceModalSpy },
+			{
+				plugin: { statusesManager: { findSortGovernor: () => null } },
+				startCreateFromMeta: vi.fn(),
+				openStatusesModal: vi.fn(),
+				openApiSourceModal: openApiSourceModalSpy,
+			},
 			new MouseEvent("contextmenu"),
 			node,
 			view

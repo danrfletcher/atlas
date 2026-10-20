@@ -30,7 +30,18 @@ import { apiItemMatchesFilter, formatLocalDateFromIso } from "./api-mapping";
 import { MIN_REFRESH_MINUTES, RefreshEveryTimers } from "./api-refresh-timer";
 import { executeApiCommand } from "./api-command-runner";
 import { resolveArgv, tokenizeCommand } from "./command-argv";
-import { SortKey, compareSortKeys, currentSortMode, isDirectSortMode, SORT_MODE_CHOICES } from "./sort";
+import {
+	SortKey,
+	compareSortKeys,
+	currentSortMode,
+	isDirectSortMode,
+	ATLAS_SORT_AZ_ICON_ID,
+	SORT_MODE_CHOICES,
+	activeSortFor,
+	sortModeLabel,
+	SORT_MODE_ICONS,
+	SortRefreshGate,
+} from "./sort";
 
 export const ATLAS_VIEW_TYPE = "atlas-explorer";
 
@@ -470,25 +481,54 @@ function addSwapItems(menu: Menu, host: SwapMenuHost, view: View, node: ViewNode
 function addSortMenuItem(
 	menu: Menu,
 	evt: Pick<MouseEvent, "clientX" | "clientY">,
-	governance: Pick<StatusGovernance, "sortMode" | "sortReverse">,
+	governance: Pick<StatusGovernance, "sortMode" | "sortReverse" | "statusEnabled" | "statusSetId">,
+	statusGovernor: StatusGovernance | null,
 	onChange: (patch: Partial<StatusGovernance>) => void
 ): void {
 	menu.addItem((item) =>
 		item
 			.setTitle("Sort children…")
-			.setIcon("arrow-down-a-z")
+			// PR-2 (T12): neither a bare nor a lucide-prefixed Lucide id ever resolved here —
+			// see ATLAS_SORT_AZ_ICON_ID's doc comment in sort.ts. Use Atlas's own registered icon,
+			// same as the G13 indicator's setIcon() call below.
+			.setIcon(ATLAS_SORT_AZ_ICON_ID)
 			.onClick(() => {
 				const chooser = new Menu();
-				const mode = currentSortMode(governance);
+				// PR-2 (R1/G19/E5): the ticks and the Reverse-disabled state are derived from
+				// `activeSortFor` — the *effective* sort this list actually renders by — never from
+				// the literal `currentSortMode(governance)`. An absent own setting under an
+				// inheriting status governor is effectively sorted by status, not Manual: ticking
+				// Manual there as well as Status (inherited) would claim two contradictory sorts are
+				// both active, and leaving Reverse disabled would block reversing a sort that *is*
+				// running. `active === null` means effectively Manual (either an explicit own
+				// "manual", or no own setting and no inherited status sort).
+				const active = activeSortFor(governance, statusGovernor);
 				for (const { mode: choice, label } of SORT_MODE_CHOICES) {
-					chooser.addItem((entry) => entry.setTitle(label).setChecked(mode === choice).onClick(() => onChange({ sortMode: choice, sortReverse: false })));
+					const checked = choice === "manual" ? active === null : active?.mode === choice;
+					chooser.addItem((entry) => entry.setTitle(label).setChecked(checked).onClick(() => onChange({ sortMode: choice, sortReverse: false })));
+				}
+				// PR-2 (G12/G19/F4): Status is offered only when this row or a reaching ancestor
+				// governs a status set (`statusGovernor`, the same `findSortGovernor` lookup the
+				// render pass's own status sort uses) — never unconditionally, unlike the four modes
+				// above. Labeled "(inherited)" whenever the governing status set belongs to an
+				// ancestor rather than this row itself (E5). The tick uses `activeSortFor` so an
+				// absent own setting that's currently following an inherited status sort shows ticked
+				// here too.
+				if (statusGovernor) {
+					const isOwnGovernor = !!governance.statusEnabled && !!governance.statusSetId;
+					chooser.addItem((entry) =>
+						entry
+							.setTitle(isOwnGovernor ? "Status" : "Status (inherited)")
+							.setChecked(active?.mode === "status")
+							.onClick(() => onChange({ sortMode: "status", sortReverse: false }))
+					);
 				}
 				chooser.addSeparator();
 				chooser.addItem((entry) =>
 					entry
 						.setTitle("Reverse order")
-						.setChecked(mode !== "manual" && !!governance.sortReverse)
-						.setDisabled(mode === "manual")
+						.setChecked(active !== null && !!active.reverse)
+						.setDisabled(active === null)
 						.onClick(() => onChange({ sortReverse: !governance.sortReverse }))
 				);
 				chooser.showAtPosition({ x: evt.clientX, y: evt.clientY });
@@ -728,6 +768,23 @@ export class AtlasExplorerView extends ItemView {
 	/** PR 20: which view's ids the current bucket selection belongs to — see `render()`'s own use of
 	 * this (clears the bucket selection on a view switch; inbox selection is unaffected). */
 	private lastRenderedViewId: string | null = null;
+	/** PR-2 (G9): governs when a Modified-sorted list's cached file mtimes may be refreshed — see
+	 * `SortRefreshGate`'s own doc comment for the exact trigger list. Marked dirty from the three
+	 * trigger points that aren't already "the very first render" (which `SortRefreshGate` starts
+	 * dirty for on its own): `viewLoadTrigger`'s pane-regains-focus/view-opens transition, this
+	 * view's own internal view-switch branch below in `render()`, and `viewsManager.onChange`
+	 * (covers both "a sort changes" and "the tree changes" — both go through the same `save()`). */
+	private sortRefreshGate = new SortRefreshGate();
+	/** PR-2 (G9): per-ref file-mtime snapshot `resolvedMtimeForSort` serves from when the gate
+	 * above says this render isn't allowed to recompute. Keyed by `unitRefKey`, same convention as
+	 * `unitsByRefKey`. Never cleared outright — a stale entry for a ref no longer being sorted by
+	 * Modified is just dead weight, not a correctness problem, and clearing it on every refresh
+	 * trigger would defeat the point of caching across renders that don't refresh. */
+	private modifiedMtimeCache = new Map<string, number | null>();
+	/** PR-2 (G9): whether *this* render pass is allowed to recompute Modified mtimes — decided once
+	 * per `render()` call (via `sortRefreshGate.consume()`), not per list, so every Modified-sorted
+	 * list in the same pass refreshes together or not at all. */
+	private sortRefreshAllowedForThisRender = false;
 	/** The last row clicked (in either scope) — where a following shift-click's range starts from.
 	 * Cleared implicitly by scope: a shift-click only extends a range if the anchor's own scope
 	 * matches the row just clicked, so a stray shift-click in the *other* list can't try to build a
@@ -804,18 +861,42 @@ export class AtlasExplorerView extends ItemView {
 
 	async onOpen(): Promise<void> {
 		this.unsubscribers.push(this.plugin.unitIndex.onChange(() => this.queueRender()));
-		this.unsubscribers.push(this.plugin.viewsManager.onChange(() => this.queueRender()));
+		this.unsubscribers.push(
+			this.plugin.viewsManager.onChange((persisted) => {
+				// PR-2 (R3/G9): "the tree changes" means a real, persisted structural/sort change —
+				// `persisted` is true only for a call that went through `ViewsManager.save()`, never
+				// for a bare `notifyChange()` (a note edit's metadata resolve, a no-op data-source
+				// refresh, anything "render this again" that didn't actually change the tree). Marking
+				// the gate dirty on every notification re-sorted Modified rows at a plain autosave,
+				// which G9/E4 forbid; `queueRender()` below still runs for both, so a render-only
+				// notification still repaints.
+				if (persisted) this.sortRefreshGate.markDirty();
+				this.queueRender();
+			})
+		);
 		this.registerEvent(
 			this.plugin.app.workspace.on("active-leaf-change", (leaf) => {
 				this.updateActiveHighlight();
 				if (leaf === this.leaf) {
-					if (this.viewLoadTrigger.activate()) this.refreshApiSourcesOnViewLoad();
+					if (this.viewLoadTrigger.activate()) {
+						this.refreshApiSourcesOnViewLoad();
+						this.sortRefreshGate.markDirty(); // PR-2 (G9): "pane regains focus".
+						// PR-2 (R2/G9): marking the gate dirty alone does nothing until some other
+						// trigger renders next — in a view with no data sources nothing else was
+						// going to, so the Modified re-sort was deferred to whatever render happened
+						// to come along later (typically the next autosave), which is exactly the
+						// timing G9/E4 forbid. Queue the refresh this trigger itself promised.
+						this.queueRender();
+					}
 				} else {
 					this.viewLoadTrigger.deactivate();
 				}
 			})
 		);
-		if (this.viewLoadTrigger.activate()) this.refreshApiSourcesOnViewLoad();
+		if (this.viewLoadTrigger.activate()) {
+			this.refreshApiSourcesOnViewLoad();
+			this.sortRefreshGate.markDirty(); // PR-2 (G9): the pane's very first open.
+		}
 		this.registerEvent(this.plugin.app.workspace.on("file-open", () => this.updateActiveHighlight()));
 		// G11/F10: Outside-Vault connection/children recheck on focus-regain — fires only from this
 		// real browser event, never a self-scheduling timer/interval/poll (F10's own fence).
@@ -1401,6 +1482,20 @@ export class AtlasExplorerView extends ItemView {
 		return file instanceof TFile ? file.stat.mtime : null;
 	}
 
+	/** PR-2 (G9): the Modified-sort-only wrapper around `modifiedTimeForRef` — serves the cached
+	 * value from `modifiedMtimeCache` unless `sortRefreshAllowedForThisRender` says this render
+	 * pass may recompute, or there's no cached value yet (a ref sorted by Modified for the first
+	 * time always resolves its real mtime, trigger or not). */
+	private resolvedMtimeForSort(ref: UnitRef): number | null {
+		const key = unitRefKey(ref);
+		if (this.sortRefreshAllowedForThisRender || !this.modifiedMtimeCache.has(key)) {
+			const value = this.modifiedTimeForRef(ref);
+			this.modifiedMtimeCache.set(key, value);
+			return value;
+		}
+		return this.modifiedMtimeCache.get(key) ?? null;
+	}
+
 	private async resolveRef(ref: UnitRef): Promise<RowInfo> {
 		const unit = this.unitsByRefKey.get(unitRefKey(ref));
 		if (unit) {
@@ -1489,6 +1584,13 @@ export class AtlasExplorerView extends ItemView {
 		const container = this.containerEl.children[1] as HTMLElement;
 		const renderId = ++this.renderSeq;
 		const isCurrent = () => renderId === this.renderSeq;
+		// PR-2 (G9): captured here, before anything below clears `dragPayload`/`inboxDragRowEl`/
+		// `bucketDragRowEl` (the R4-hardening block right after this) — a render that fires *while*
+		// a drag is still live must still see that correctly, not the already-cleared state those
+		// lines are about to leave behind. Consumed into `sortRefreshAllowedForThisRender` further
+		// down, after the view-switch branch's own `markDirty()` call below so a trigger that fires
+		// in *this* render pass (a genuine view switch) is already reflected in this same render.
+		const dragInProgress = !!(this.dragPayload || this.inboxDragRowEl || this.bucketDragRowEl);
 		// PR-1.S1: the bucket and inbox share one scroll body (`.atlas-explorer-scroll`) under a
 		// fixed toolbar. Capturing its scrollTop here means a click-driven re-render (multi-select,
 		// status change, drag drop) doesn't snap the panel back to the top; it's restored after the
@@ -1560,6 +1662,7 @@ export class AtlasExplorerView extends ItemView {
 				// on `lastRenderedViewId !== null` so this is a genuine switch, not the view's very first
 				// render (which `onOpen`'s own `activate()` call already covers).
 				if (this.lastRenderedViewId !== null) this.refreshApiSourcesOnViewLoad();
+				this.sortRefreshGate.markDirty(); // PR-2 (G9): "view loads" — covers the very first render too.
 				this.lastRenderedViewId = view.id;
 				this.selectedBucketNodeIds.clear();
 				if (this.selectionAnchorScope === "bucket") {
@@ -1567,6 +1670,9 @@ export class AtlasExplorerView extends ItemView {
 					this.selectionAnchorScope = null;
 				}
 			}
+			// PR-2 (G9): consumed here, after the view-switch branch above has had its chance to
+			// `markDirty()` for this same render pass — see `dragInProgress`'s own comment for why.
+			this.sortRefreshAllowedForThisRender = this.sortRefreshGate.consume(dragInProgress);
 
 			this.renderToolbar(container, view);
 			if (filterHadFocus && this.filterInputEl) {
@@ -1821,7 +1927,7 @@ export class AtlasExplorerView extends ItemView {
 		toolbar.createDiv({ cls: "atlas-toolbar-sep" });
 
 		// --- section 3: view controls ------------------------------------------------------------
-		this.toolbarButton(toolbar, this.sortMode === "manual" ? "arrow-up-down" : "arrow-down-a-z", "Sort: manual / A–Z", () => {
+		this.toolbarButton(toolbar, this.sortMode === "manual" ? "arrow-up-down" : "arrow-down-az", "Sort: manual / A–Z", () => {
 			this.sortMode = this.sortMode === "manual" ? "alphabetical" : "manual";
 			void this.render();
 		});
@@ -1928,6 +2034,8 @@ export class AtlasExplorerView extends ItemView {
 		const chevron = header.createDiv({ cls: "atlas-chevron" });
 		setIcon(chevron, this.bucketCollapsed ? "chevron-right" : "chevron-down");
 		const title = header.createSpan({ cls: "atlas-section-title", text: "Bucket" });
+		// PR-2 (G13): the Bucket header shows the icon when the view root itself is sorted.
+		this.renderSortIndicator(header, view, this.plugin.statusesManager?.findSortGovernor([view]) ?? null);
 
 		// PR 11: the whole section's content used to only render at all when expanded (`if
 		// (this.bucketCollapsed) return`), so there was never a DOM node for the CSS transition to
@@ -1967,7 +2075,8 @@ export class AtlasExplorerView extends ItemView {
 
 	private showBucketHeaderMenu(evt: MouseEvent, view: View): void {
 		const menu = new Menu();
-		addSortMenuItem(menu, evt, view, (patch) => this.plugin.viewsManager.updateStatusGovernance(view.id, null, patch));
+		const statusGovernor = this.plugin.statusesManager?.findSortGovernor([view]) ?? null;
+		addSortMenuItem(menu, evt, view, statusGovernor, (patch) => this.plugin.viewsManager.updateStatusGovernance(view.id, null, patch));
 		menu.showAtMouseEvent(evt);
 	}
 
@@ -2082,8 +2191,17 @@ export class AtlasExplorerView extends ItemView {
 		// group's placeholder land at its status's rank position once sort-by-status is on — it
 		// naturally becomes "whichever grouped member is now first in iteration order," with no
 		// separate positioning logic required.
+		// PR-2 (G19/E5 fix): `activeSortFor` is what actually decides whether this list's own
+		// direct parent (`ancestors[0]`) is itself explicitly sorted, explicitly Manual, or absent
+		// and following an inherited status sort — the old code here only checked whether the
+		// *governor that happened to resolve* (`sortGovernor`) had `sortMode: "status"`, which
+		// wrongly kept applying an inherited status sort even after this list's own direct parent
+		// was switched to an explicit non-status mode (or explicit Manual), since neither of those
+		// ever clears `sortGovernor` itself — only `activeSortFor`'s own-setting-wins rule does.
+		const directGovernor = ancestors[0];
 		const sortGovernor = sm.findSortGovernor(ancestors);
-		if (sortGovernor?.sortMode === "status" && sortGovernor.statusSetId) {
+		const activeStatusSort = activeSortFor(directGovernor ?? {}, sortGovernor);
+		if (activeStatusSort?.mode === "status" && sortGovernor?.statusSetId) {
 			const setId = sortGovernor.statusSetId;
 			const rankOf = (r: Resolved): number => {
 				if (!r.status) return Number.POSITIVE_INFINITY;
@@ -2094,17 +2212,19 @@ export class AtlasExplorerView extends ItemView {
 			// a real comparator contract).
 			const compareRank = (x: number, y: number): number => (x === y ? 0 : x - y);
 			resolved.sort((a, b) =>
-				sortGovernor.sortReverse ? compareRank(rankOf(b), rankOf(a)) : compareRank(rankOf(a), rankOf(b))
+				activeStatusSort.reverse ? compareRank(rankOf(b), rankOf(a)) : compareRank(rankOf(a), rankOf(b))
 			);
 		}
 
 		// PR-1 (G6/F6): A-Z/Modified/Time added are read straight off *this list's own direct
 		// parent* (ancestors[0] — the view root itself at the top level), never inherited past it
 		// the way `"status"` above is — `findSortGovernor`'s ancestor walk is never consulted for
-		// these three. Running before hide/truncate, same as the status sort above, is what makes a
-		// truncated group's placeholder land at its first member's sorted position for these modes
-		// too, with no separate positioning logic.
-		const directGovernor = ancestors[0];
+		// these three. `currentSortMode` here defaults an absent own setting to "manual", which is
+		// exactly right for these three (they have no inherited fallback of their own, F6); the
+		// status case above already handled "absent, but follows an inherited status sort" on its
+		// own terms via `activeSortFor`. Running before hide/truncate, same as the status sort
+		// above, is what makes a truncated group's placeholder land at its first member's sorted
+		// position for these modes too, with no separate positioning logic.
 		const directMode = currentSortMode(directGovernor ?? {});
 		if (isDirectSortMode(directMode)) {
 			const sortKeyFor = async (r: Resolved): Promise<SortKey> => {
@@ -2113,7 +2233,7 @@ export class AtlasExplorerView extends ItemView {
 				const placedAt = node.placedAt ?? null;
 				if (node.type === "meta" || !node.ref) return { name: node.label ?? "", mtime: null, placedAt };
 				if (directMode === "time-added") return { name: "", mtime: null, placedAt };
-				const mtime = directMode === "modified" ? this.modifiedTimeForRef(node.ref) : null;
+				const mtime = directMode === "modified" ? this.resolvedMtimeForSort(node.ref) : null;
 				const name = directMode === "alphabetical" ? (await this.resolveRef(node.ref)).text : "";
 				return { name, mtime, placedAt };
 			};
@@ -2549,6 +2669,23 @@ export class AtlasExplorerView extends ItemView {
 		});
 	}
 
+	/** PR-2 (G13): a small icon + tooltip on a Folder row (or the Bucket header, via
+	 * `renderBucketSection`) whose own children are actually sorted by something other than
+	 * Manual. Built on `activeSortFor` — the same helper the render pass's own status-sort
+	 * activation and the "Sort children…" menu's Status tick use — so this can never show an
+	 * icon for a sort the render pass wouldn't actually apply, or vice versa. */
+	private renderSortIndicator(
+		container: HTMLElement,
+		ownGovernance: Pick<StatusGovernance, "sortMode" | "sortReverse">,
+		statusGovernor: StatusGovernance | null
+	): void {
+		const active = activeSortFor(ownGovernance, statusGovernor);
+		if (!active) return;
+		const icon = container.createDiv({ cls: "atlas-sort-indicator" });
+		setIcon(icon, SORT_MODE_ICONS[active.mode]);
+		setTooltip(icon, `Sorted: ${sortModeLabel(active.mode, active.reverse)}`);
+	}
+
 	/** PR-1 R4: the API/CSV/markdown-table and Outside-path connection dots, shared by a meta folder's
 	 * row and a unit's row — a unit can hold the exact same kinds of data source (after Create or
 	 * Swap), and needs the same ok/grey/red/amber signal, not just a meta folder's `renderNode` branch. */
@@ -2586,6 +2723,10 @@ export class AtlasExplorerView extends ItemView {
 			this.renderRowIcon(iconEl, view, node, ancestors, "layers");
 			row.createSpan({ cls: "atlas-row-text", text: node.label ?? "" });
 			this.renderConnectionDots(row, node);
+			// PR-2 (G13): shows only when this Folder's own children are actually sorted
+			// (`findSortGovernor` with `node` prepended — same convention `renderNodeList` itself
+			// uses when it recurses into `node.children` below).
+			this.renderSortIndicator(row, node, this.plugin.statusesManager?.findSortGovernor([node, ...ancestors]) ?? null);
 
 			// PR 20: a meta row's plain click never did anything before this (no open target) — safe
 			// to bind unconditionally, since the previous behavior ("nothing happens") is preserved
@@ -2600,7 +2741,7 @@ export class AtlasExplorerView extends ItemView {
 			row.tabIndex = 0;
 			row.addEventListener("contextmenu", (evt) => {
 				evt.preventDefault();
-				this.showMetaFolderMenu(evt, node, view);
+				this.showMetaFolderMenu(evt, node, view, ancestors);
 			});
 
 			await this.renderFoldableChildren(node, chevron, container, view, depth, ancestors);
@@ -2696,7 +2837,7 @@ export class AtlasExplorerView extends ItemView {
 		row.addEventListener("keydown", (evt) => this.handleRowKeydown(evt, node, view));
 		row.addEventListener("contextmenu", (evt) => {
 			evt.preventDefault();
-			this.showUnitMenu(evt, ref, view, node, info.text, outsideManaged);
+			this.showUnitMenu(evt, ref, view, node, info.text, ancestors, outsideManaged);
 		});
 
 		// PR-1 (G11c): a unit holding a data source draws its rows even with an empty `children` array.
@@ -3192,7 +3333,7 @@ export class AtlasExplorerView extends ItemView {
 
 	// --- context menus -----------------------------------------------------------------------------
 
-	private showUnitMenu(evt: MouseEvent, ref: UnitRef, view: View, node: ViewNode, displayName: string, outsideManaged = false): void {
+	private showUnitMenu(evt: MouseEvent, ref: UnitRef, view: View, node: ViewNode, displayName: string, ancestors: StatusGovernance[] = [], outsideManaged = false): void {
 		const menu = new Menu();
 		// PR-5 (R6 fix): `openRef`/`revealInNativeExplorer` only ever look up vault paths, so for an
 		// Outside-Vault-managed row (whose `ref.path` is root-relative to its external source, not a
@@ -3219,7 +3360,8 @@ export class AtlasExplorerView extends ItemView {
 		// The separator above is already in place, so tell the helper not to double it up.
 		// PR-1 (G6): "Sort children…" on every bucket row that can hold children — a unit row too,
 		// not just a Folder, since any row can be nested under (F6).
-		addSortMenuItem(menu, evt, node, (patch) => this.plugin.viewsManager.updateStatusGovernance(view.id, node.id, patch));
+		const unitStatusGovernor = this.plugin.statusesManager?.findSortGovernor([node, ...ancestors]) ?? null;
+		addSortMenuItem(menu, evt, node, unitStatusGovernor, (patch) => this.plugin.viewsManager.updateStatusGovernance(view.id, node.id, patch));
 		addSourceAndStatusItems(menu, this.plugin, this, view, node, true);
 		menu.addSeparator();
 		// PR 13: clones this row (and its whole meta-nested subtree, if it has one) as a new sibling
@@ -3502,7 +3644,7 @@ export class AtlasExplorerView extends ItemView {
 		new ConfirmModal(this.plugin.app, message, "Remove", removeAll).open();
 	}
 
-	private showMetaFolderMenu(evt: MouseEvent, node: ViewNode, view: View): void {
+	private showMetaFolderMenu(evt: MouseEvent, node: ViewNode, view: View, ancestors: StatusGovernance[] = []): void {
 		const menu = new Menu();
 		// PR 13: same clone-as-sibling action as a unit row's context menu — a meta folder has no
 		// disk identity to begin with, so "duplicating" it just clones the organizational label and
@@ -3525,7 +3667,8 @@ export class AtlasExplorerView extends ItemView {
 		// PR-2 (G3): on an Atlas folder, right after "Create". Only "Swap with…" applies here (G4).
 		addSwapItems(menu, this, view, node, node.label ?? "");
 		// PR-1 (G6): "Sort children…" on every Folder, any depth, whether it has children yet or not.
-		addSortMenuItem(menu, evt, node, (patch) => this.plugin.viewsManager.updateStatusGovernance(view.id, node.id, patch));
+		const folderStatusGovernor = this.plugin.statusesManager?.findSortGovernor([node, ...ancestors]) ?? null;
+		addSortMenuItem(menu, evt, node, folderStatusGovernor, (patch) => this.plugin.viewsManager.updateStatusGovernance(view.id, node.id, patch));
 		addSourceAndStatusItems(menu, this.plugin, this, view, node);
 		menu.addSeparator();
 		menu.addItem((item) =>

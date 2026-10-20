@@ -575,7 +575,7 @@ type ManagedMatch = { list: ViewNode[]; parent: ViewNode | undefined; index: num
 export class ViewsManager {
 	private views: View[];
 	private activeViewId: string;
-	private changeListeners = new Set<() => void>();
+	private changeListeners = new Set<(persisted: boolean) => void>();
 	/** PR-1.S1 (E10): false until `metadataCache` has resolved, seeded in the constructor (T1). */
 	private metadataResolved: boolean;
 	/** PR-1.F2 R2 fix: bumped on every change notification, so `getFolderSourceOwners`'s cache knows
@@ -593,21 +593,28 @@ export class ViewsManager {
 		this.metadataResolved = metadataCacheIdle(app);
 	}
 
-	onChange(cb: () => void): () => void {
+	/** PR-2 (R3): `persisted` is `true` only for a call that came through `save()` — a real,
+	 * persisted structural/sort change — and `false` for a bare `notifyChange()`, which just
+	 * nudges a re-render for something only visible on screen (a note edit's metadata resolve, a
+	 * no-op data-source refresh) without anything in the tree actually changing. A listener that
+	 * must fire only on "the tree changes" (G9's Modified-sort refresh gate) reads this flag
+	 * instead of treating every notification as a tree change. */
+	onChange(cb: (persisted: boolean) => void): () => void {
 		this.changeListeners.add(cb);
 		return () => this.changeListeners.delete(cb);
 	}
 
 	private save(): void {
 		this.persist();
-		this.notifyChange();
+		this.notifyChange(true);
 	}
 
 	/** Re-renders listeners without persisting anything — for a change that is only visible on screen
-	 * (e.g. an Outside-Vault source's unresolved/reconnected state), which `save` alone would skip. */
-	notifyChange(): void {
+	 * (e.g. an Outside-Vault source's unresolved/reconnected state), which `save` alone would skip.
+	 * `persisted` defaults to `false` here; only `save()` ever passes `true` (see `onChange`). */
+	notifyChange(persisted = false): void {
 		this.folderSourceOwnersVersion++;
-		for (const cb of this.changeListeners) cb();
+		for (const cb of this.changeListeners) cb(persisted);
 	}
 
 	/** PR-1.F2 R2 fix: one id→`FolderSourceConfig` map for `viewId`'s managed-row owners, built with a

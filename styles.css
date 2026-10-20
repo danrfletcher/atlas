@@ -604,6 +604,15 @@ input.atlas-yaml-key-invalid[type="text"]:not(:disabled) {
 	color: var(--text-normal);
 }
 
+/* PR-2 (G13): the sort indicator on a Folder row or the Bucket header — non-interactive (no
+ * hover/click target of its own), so no `:hover` rule the way `.atlas-row-action` has one. */
+.atlas-sort-indicator {
+	margin-left: auto;
+	display: flex;
+	flex-shrink: 0;
+	color: var(--text-faint);
+}
+
 .atlas-row-internal {
 	color: var(--text-muted);
 }
