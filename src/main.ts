@@ -1,4 +1,4 @@
-import { Debouncer, Notice, Platform, Plugin, TAbstractFile, TFile, TFolder, WorkspaceLeaf, debounce } from "obsidian";
+import { Debouncer, FileSystemAdapter, Notice, Platform, Plugin, TAbstractFile, TFile, TFolder, WorkspaceLeaf, debounce } from "obsidian";
 import {
 	AtlasSettingTab,
 	AtlasSettings,
@@ -33,6 +33,12 @@ import { ApiSourceController } from "./api-source-controller";
 import { CsvSourceController } from "./csv-source-controller";
 import { MarkdownTableSourceController } from "./markdown-table-source-controller";
 import { ExternalMoveDetector } from "./external-move";
+import { McpTokenStore } from "./mcp-token-store";
+import { McpServer, shouldAutoStartMcpServer } from "./mcp-server";
+import { createAtlasStatusTool } from "./mcp-tools";
+import { McpTool } from "./mcp-protocol";
+import { createGetNodeStatusTool, createListNodesTool, createListStatusSetsTool, createListViewsTool, createSetNodeStatusTool } from "./mcp-status-tools";
+import { createAddNodeTool, createCreateFolderTool, createMoveNodeTool, createRemoveNodeTool, createRenameFolderTool } from "./mcp-arrange-tools";
 
 interface AtlasData {
 	settings: AtlasSettings;
@@ -96,6 +102,12 @@ export default class AtlasPlugin extends Plugin {
 	/** PR-1.S1 (T1): pairs a `delete` with a later `create` of the same name/kind as an external move
 	 * (e.g. a shell `mv`), which Obsidian reports as delete+create rather than `rename`. */
 	private externalMoveDetector = new ExternalMoveDetector();
+	/** PR-1.S1 (Q1/G1/F6): device-local storage for the embedded MCP server's port and bearer
+	 * token — never synced, same pattern as `apiHeadersStore`/`folderSourcePathStore`. */
+	mcpTokenStore: McpTokenStore;
+	/** PR-1.S1 (F5): only ever constructed on desktop — `null` on mobile, where there is no
+	 * listener, port or token work at all. */
+	mcpServer: McpServer | null = null;
 
 	async onload() {
 		const data = (await this.loadData()) as AtlasData | null;
@@ -196,7 +208,89 @@ export default class AtlasPlugin extends Plugin {
 		registerAddBlockCommand(this);
 		registerF10Commands(this);
 
+		// PR-1.S1 (F5): the MCP server (its listener, port and token work) is constructed only on
+		// desktop — `mcpServer` stays `null` on mobile, so nothing in this block ever runs there.
+		void this.initMcpServer();
+
 		if (__ATLAS_TEST__) this.register(registerTestHarness(this));
+	}
+
+	/** PR-1.S1 (F5/G1/R4): constructs the device-local token store and, on desktop only, the MCP
+	 * server itself, then auto-starts it when `mcpServerEnabled` is on — the single place this
+	 * gating runs, so a test can drive exactly this method instead of re-implementing the
+	 * `if (!Platform.isMobile) {...}` check inline (and so it actually proves what `onload` does). */
+	private async initMcpServer(): Promise<void> {
+		this.mcpTokenStore = new McpTokenStore(this.app);
+		if (Platform.isMobile) return; // F5: no listener, port or token work at all on mobile
+		this.mcpServer = this.createMcpServer();
+		if (shouldAutoStartMcpServer(this.settings.mcpServerEnabled, Platform.isMobile)) {
+			await this.mcpServer.start();
+		}
+	}
+
+	/** PR-1.S1 (G8): builds the server with the one tool this PR ships — `atlas_status`. Later PRs
+	 * (PR-2.F1/PR-3.F1) register their own tools on this same map, not a new server instance. */
+	private createMcpServer(): McpServer {
+		const tools = new Map<string, McpTool>();
+		tools.set(
+			"atlas_status",
+			createAtlasStatusTool({
+				getVaultName: () => this.app.vault.getName(),
+				getVaultPath: () => this.getVaultBasePath(),
+				getPluginVersion: () => this.manifest.version,
+				getToolNames: () => Array.from(tools.keys()),
+			})
+		);
+		// PR-2.F1 (G2/G3/G7): the read and status-write tools, registered on this same map — they
+		// inherit the bearer-token check and JSON-RPC transport `atlas_status` already has for free,
+		// since both go through the one `McpServer.handleRequest` path.
+		const statusToolsContext = {
+			getViewsManager: () => this.viewsManager,
+			getStatusesManager: () => this.statusesManager,
+			getVaultName: () => this.app.vault.getName(),
+			getVaultPath: () => this.getVaultBasePath(),
+			getFolderSourcePath: (nodeId: string) => this.folderSourcePathStore.get(nodeId),
+		};
+		tools.set("list_views", createListViewsTool(statusToolsContext));
+		tools.set("list_nodes", createListNodesTool(statusToolsContext));
+		tools.set("list_status_sets", createListStatusSetsTool(statusToolsContext));
+		tools.set("get_node_status", createGetNodeStatusTool(statusToolsContext));
+		tools.set("set_node_status", createSetNodeStatusTool(statusToolsContext));
+		// PR-3.F1 (G4/G5/G6): the five arranging tools, registered on this same map — they share
+		// the status tools' own vault identity and never touch the filesystem (F2/F3).
+		const arrangeToolsContext = {
+			getViewsManager: () => this.viewsManager,
+			getVaultName: () => this.app.vault.getName(),
+			getVaultPath: () => this.getVaultBasePath(),
+			getVault: () => this.app.vault,
+			getUnitIndex: () => this.unitIndex,
+			getMetadataCache: () => this.app.metadataCache,
+			promoteUnit: (ref: UnitRef) => {
+				this.unitIndex.addManualPromotion(ref);
+				void this.saveManualPromotions();
+			},
+			forgetDeviceLocalSourceState: (nodeId: string) => this.forgetDeviceLocalSourceState(nodeId),
+		};
+		tools.set("add_node", createAddNodeTool(arrangeToolsContext));
+		tools.set("move_node", createMoveNodeTool(arrangeToolsContext));
+		tools.set("remove_node", createRemoveNodeTool(arrangeToolsContext));
+		tools.set("create_folder", createCreateFolderTool(arrangeToolsContext));
+		tools.set("rename_folder", createRenameFolderTool(arrangeToolsContext));
+		return new McpServer({
+			getToken: () => this.mcpTokenStore.get().token,
+			getPort: () => this.mcpTokenStore.get().port,
+			tools,
+			getServerInfo: () => ({ name: this.manifest.id, version: this.manifest.version }),
+			notify: (message) => void new Notice(message),
+			logError: (message, err) => console.error(message, err),
+		});
+	}
+
+	/** The vault's absolute filesystem path (desktop only — mobile's adapter isn't a
+	 * `FileSystemAdapter`, and the MCP server never runs there anyway). */
+	private getVaultBasePath(): string {
+		const adapter = this.app.vault.adapter;
+		return adapter instanceof FileSystemAdapter ? adapter.getBasePath() : "";
 	}
 
 	/** A vault `modify` event. PR-1 (G5): deliberately never queues a folder refresh — a child's content
@@ -311,6 +405,7 @@ export default class AtlasPlugin extends Plugin {
 	onunload() {
 		this.folderLiveRefresh.cancelAll(); // PR-1 (G5): nothing fires after the plugin is gone
 		this.externalMoveDetector?.cancelAll(); // PR-1.S1 (T1): same — no stray pairing after unload
+		void this.mcpServer?.stop(); // PR-1.S1 (G1): stops the listener; any in-flight response still completes
 		this.outsideFolderWatchers?.closeAll(); // PR-2 (G9): every watcher closes with the plugin
 		this.graduation?.dispose(); // before closing the dialog, so a dismissed one doesn't revert or move anything
 		closeNameDialog();
@@ -439,6 +534,15 @@ export default class AtlasPlugin extends Plugin {
 
 	async saveManualPromotions(): Promise<void> {
 		await this.persistNow();
+	}
+
+	/** PR-1 (G15e), shared by the explorer's own "Remove from view" and PR-3.F1's `remove_node` MCP
+	 * tool: drops a node's device-local source state — its headers (`ApiHeadersStore`) and its
+	 * Outside-Vault path (`FolderSourcePathStore`). Both are keyed by node id and never synced. One
+	 * place, so no caller that deletes a sourced node can forget one of the two. */
+	forgetDeviceLocalSourceState(nodeId: string): void {
+		this.apiHeadersStore.delete(nodeId);
+		this.folderSourcePathStore.delete(nodeId);
 	}
 
 	/** F1 AC: changing the pool folder re-indexes; free blocks left behind in the old folder are

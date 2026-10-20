@@ -57,6 +57,10 @@ function harness() {
 		apiHeadersStore,
 		folderSourcePathStore,
 		unitIndex: { getUnits: () => [] },
+		forgetDeviceLocalSourceState(nodeId: string): void {
+			apiHeadersStore.delete(nodeId);
+			folderSourcePathStore.delete(nodeId);
+		},
 	};
 	const fake = {
 		plugin,

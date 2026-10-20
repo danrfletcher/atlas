@@ -743,6 +743,29 @@ export class ViewsManager {
 		return !!view && this.findUnitNode(view.root, ref) !== null;
 	}
 
+	/** PR-3.F1 (R2 review): the node id `ref` is currently placed under in `viewId`, or `null` if it
+	 * isn't placed there at all — a thin public accessor over the same `findUnitNode` walk
+	 * `isPlaced`/`placeUnit` already use. No longer used to recover the id `placeUnit` itself just
+	 * created or moved (R2: a duplicated ref makes that a divergent, possibly-wrong walk) — `placeUnit`
+	 * now returns that node directly. Kept as a general "is this ref already here, and where" query. */
+	getNodeIdForRef(viewId: string, ref: UnitRef): string | null {
+		const view = this.getView(viewId);
+		if (!view) return null;
+		return this.findUnitNode(view.root, ref)?.node.id ?? null;
+	}
+
+	/** PR-3.F1 (R5 review): the same Outside-Vault-managed-row check the explorer's own drag-and-drop
+	 * guard applies (never drag one of these rows, never accept a drop onto one) — exposed here so a
+	 * non-UI caller (the MCP arranging tools) can refuse the same cases without duplicating the
+	 * owner-lookup `isOutsideOwned` already implements. `false` for an unknown view or node, same as
+	 * every other node-shaped query on this class. */
+	isOutsideManagedNode(viewId: string, nodeId: string): boolean {
+		const view = this.getView(viewId);
+		if (!view) return false;
+		const node = this.findNode(view.root, nodeId)?.node;
+		return !!node && this.isOutsideOwned(view.root, node);
+	}
+
 	/** PR-1.F1 R3: built on `placedRefKeys`'s walk rather than its own `findUnitNode` pass, so the
 	 * "+" picker's placed-set and this check can never disagree about what counts as placed (the
 	 * Outside-owned skip rule lives in one place). */
@@ -808,8 +831,20 @@ export class ViewsManager {
 	 * placement per ref per view was ever possible), now reachable: "Place in view…" onto a ref that
 	 * has meta-nested children silently dropped the subtree. Fixed the same way `handleDrop`'s
 	 * reparent path and `unplaceUnit` already were — move the real node in place instead of
-	 * discarding and recreating it, so its id/children travel with it. */
-	/** PR-1 (G10/G15): also stamps `placedAt` — fresh on both branches, since placing a unit
+	 * discarding and recreating it, so its id/children travel with it.
+	 *
+	 * PR-3.F1 (R1 review): refuses when `ref` is already placed as some node X and `parentId` is X
+	 * itself or one of X's descendants — the same cycle `moveNode` already refuses via
+	 * `isSameOrDescendant`. Before this, placing X under its own descendant spliced X out of the tree
+	 * and pushed it into its own subtree, which silently dropped X (and everything under it) out of
+	 * `view.root` entirely. Returns `null` on that refusal, same as `moveNode` returning `false`.
+	 *
+	 * PR-3.F1 (R2 review): returns the node that was actually moved or created, rather than leaving
+	 * the caller to re-find it via `getNodeIdForRef` — a second `findUnitNode` walk after a duplicated
+	 * ref (PR 13) has more than one placement can resolve to the *other* copy, not the one this call
+	 * just moved.
+	 *
+	 * PR-1 (G10/G15): also stamps `placedAt` — fresh on both branches, since placing a unit
 	 * always means "into its current parent right now," whether that's a brand-new node or one
 	 * moved here from wherever it was placed before (a drag-reorder within the same parent goes
 	 * through `moveNode` instead, which only restamps on an actual parent change).
@@ -821,15 +856,12 @@ export class ViewsManager {
 	 * unit. Unlike `moveNode`, this never needs the same-parent downward-index adjustment: a unit
 	 * coming from the inbox is by definition not already placed anywhere in this view, so the
 	 * "already placed" branch below only ever fires for a *different* prior parent, never this
-	 * same `targetChildren` array.
-	 *
-	 * PR-3.F1: returns the placed (or moved) node — `null` only if the view itself is gone — so a
-	 * caller like Add under > Block can select and expand onto it without a second lookup; every
-	 * existing caller still ignores the return value, so this is not a behaviour change for them. */
+	 * same `targetChildren` array. */
 	placeUnit(viewId: string, ref: UnitRef, parentId: string | null, position?: number): ViewNode | null {
 		const view = this.getView(viewId);
 		if (!view) return null;
 		const existing = this.findUnitNode(view.root, ref);
+		if (existing && parentId && this.isSameOrDescendant(existing.node, parentId)) return null;
 		const parent = parentId ? this.findNode(view.root, parentId) : null;
 		const targetChildren = parent ? parent.node.children : view.root;
 		let node: ViewNode;

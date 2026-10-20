@@ -170,7 +170,17 @@ function harness() {
 	const viewId = vm.getViews()[0].id;
 	const apiHeadersStore = { delete: vi.fn() };
 	const folderSourcePathStore = { delete: vi.fn() };
-	const plugin = { app, viewsManager: vm, apiHeadersStore, folderSourcePathStore, statusesManager: { findSortGovernor: () => null } };
+	const plugin = {
+		app,
+		viewsManager: vm,
+		apiHeadersStore,
+		folderSourcePathStore,
+		statusesManager: { findSortGovernor: () => null },
+		forgetDeviceLocalSourceState(nodeId: string): void {
+			apiHeadersStore.delete(nodeId);
+			folderSourcePathStore.delete(nodeId);
+		},
+	};
 	const fake = {
 		plugin,
 		holdsLiveDataSource: explorer.holdsLiveDataSource,
