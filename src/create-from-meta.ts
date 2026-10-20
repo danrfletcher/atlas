@@ -68,8 +68,7 @@ export async function createFromMeta(deps: CreateFromMetaDeps, kind: CreateKind,
 	};
 
 	// The dialog may have been open a while: the folder must still be there, and the name still free.
-	const node = deps.getNode(viewId, nodeId);
-	if (!node || node.type !== "meta") return fail("the folder no longer exists");
+	if (!parentExists(deps, viewId, nodeId) || deps.getNode(viewId, nodeId)?.type !== "meta") return fail("the folder no longer exists");
 	const validation = validateName(name, {
 		mode: kind === "block" ? "non-empty" : "full",
 		root: kind === "block" ? [] : collectRootEntries(vault),
@@ -114,7 +113,7 @@ export async function startCreateFromMeta(deps: CreateFromMetaFlowDeps, kind: Cr
 	const release = acquireParentLock(viewId, nodeId, false);
 	if (!release) return;
 	try {
-		const node = deps.getNode(viewId, nodeId);
+		const node = parentExists(deps, viewId, nodeId) ? deps.getNode(viewId, nodeId) : null;
 		if (!node || node.type !== "meta") return;
 		const name = await openNameDialog(deps.app, {
 			title: createDialogTitle(kind),
