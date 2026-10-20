@@ -12,6 +12,7 @@ import {
 	nodeHasApiRows,
 } from "./views";
 import { resolveOutsidePath } from "./folder-source-outside";
+import { DropDecision, DropZone, resolveDropDecision, resolveDropZone } from "./drop-zones";
 import { resolveUnit } from "./unit-display";
 import { TextPromptModal, ConfirmModal, ConfirmDeleteRowsModal, StatusesModal } from "./modals";
 import { StatusDefinition, pluralizeStatusLabel } from "./statuses";
@@ -20,9 +21,15 @@ import { createInterfaceNote, findInterfaceNote } from "./interface-notes";
 import { addBlock } from "./commands";
 import { addCreateModuleItem, startCreateModule, unitForRef } from "./create-module";
 import { CreateKind, addCreateItem, startCreateFromMeta } from "./create-from-meta";
+import { AddUnderKind, addAddUnderItem, canAddUnder, startAddUnder } from "./add-under";
+import { AddUnderFolderDeps, startAddUnderFolder } from "./add-under-folder";
+import { AddUnderBlockDeps, startAddUnderBlock } from "./add-under-block";
+import { AddUnderFileDeps, startAddUnderFile } from "./add-under-file";
+import { AddUnderModuleDeps, startAddUnderModule } from "./add-under-module";
+import { AddUnderHiddenNoticeSignals, noticeIfAddedRowHidden } from "./add-under-hidden-notice";
 import { SwapCandidate, SwapPickerModal, SwapSourceBlock, buildSwapCandidates, canSwapForAtlasFolder, canSwapNode } from "./swap";
 import { noticeIfLinksNotUpdated } from "./links-notice";
-import { generateBlockId } from "./display-text";
+import { generateBlockId, getFreeBlockDisplayTextFromContent } from "./display-text";
 import { ApiSourceModal } from "./api-source-modal";
 import { ViewLoadTrigger, dotStateFor, dotTooltip } from "./api-source-controller";
 import { obsidianRequestImpl } from "./api-request-obsidian";
@@ -30,6 +37,20 @@ import { apiItemMatchesFilter, formatLocalDateFromIso } from "./api-mapping";
 import { MIN_REFRESH_MINUTES, RefreshEveryTimers } from "./api-refresh-timer";
 import { executeApiCommand } from "./api-command-runner";
 import { resolveArgv, tokenizeCommand } from "./command-argv";
+import {
+	SortKey,
+	compareSortKeys,
+	currentSortMode,
+	isDirectSortMode,
+	ATLAS_SORT_AZ_ICON_ID,
+	SORT_MODE_CHOICES,
+	activeSortFor,
+	sortModeLabel,
+	sortedFolderNoticeText,
+	SORT_MODE_ICONS,
+	SortRefreshGate,
+	EffectiveSort,
+} from "./sort";
 
 export const ATLAS_VIEW_TYPE = "atlas-explorer";
 
@@ -99,6 +120,11 @@ const MODULE_HOVER_DWELL_MS = 650;
  * so every existing drop-handling call site only needed to start iterating instead of gaining a
  * second, parallel "batch" code path next to the original single-item one. */
 type DragPayload = { kind: "node"; nodeIds: string[]; viewId: string } | { kind: "inbox"; refs: UnitRef[] };
+
+/** PR-3: a row-level drop target (`"node"`) also carries an edge zone (`DropZone`, from
+ * `drop-zones.ts`); `"bucket-root"`/`"inbox-area"` targets never do — both are empty-space drops
+ * that still always append, unchanged from before this PR. */
+type DropTarget = { kind: "node"; nodeId: string; viewId: string } | { kind: "bucket-root"; viewId: string } | { kind: "inbox-area"; viewId: string };
 
 /** R14: an API item's label is arbitrary upstream data, not a filename Atlas chose — strip path
  * separators and other characters the vault/filesystem reject or reinterpret before using it as
@@ -457,6 +483,73 @@ function addSwapItems(menu: Menu, host: SwapMenuHost, view: View, node: ViewNode
 	}
 }
 
+/** PR-1 (G6/G7): the "Sort children…" item + its submenu — same two-click shim as "Place in
+ * view ▸" above (`placeInViewFlow`'s own comment: Obsidian's public Menu API has no real
+ * submenu). Shared by the Atlas-folder menu, the unit menu and the Bucket header's own menu
+ * (`showBucketHeaderMenu`), so the four choices, their order, the ticked current mode and the
+ * Reverse-disabled-for-Manual rule (G11/F8) can't drift between call sites. `governance` is read
+ * live, right when the submenu opens (not captured once at the outer menu's build time), so the
+ * ticked mode and Reverse's checked/disabled state can never go stale between the two clicks.
+ * G19: picking any mode here always resets Reverse to off; the Reverse item itself only ever
+ * flips `sortReverse`, never the mode. Adds no separator — the caller owns it. */
+function addSortMenuItem(
+	menu: Menu,
+	evt: Pick<MouseEvent, "clientX" | "clientY">,
+	governance: Pick<StatusGovernance, "sortMode" | "sortReverse" | "statusEnabled" | "statusSetId">,
+	statusGovernor: StatusGovernance | null,
+	onChange: (patch: Partial<StatusGovernance>) => void
+): void {
+	menu.addItem((item) =>
+		item
+			.setTitle("Sort children…")
+			// PR-2 (T12): neither a bare nor a lucide-prefixed Lucide id ever resolved here —
+			// see ATLAS_SORT_AZ_ICON_ID's doc comment in sort.ts. Use Atlas's own registered icon,
+			// same as the G13 indicator's setIcon() call below.
+			.setIcon(ATLAS_SORT_AZ_ICON_ID)
+			.onClick(() => {
+				const chooser = new Menu();
+				// PR-2 (R1/G19/E5): the ticks and the Reverse-disabled state are derived from
+				// `activeSortFor` — the *effective* sort this list actually renders by — never from
+				// the literal `currentSortMode(governance)`. An absent own setting under an
+				// inheriting status governor is effectively sorted by status, not Manual: ticking
+				// Manual there as well as Status (inherited) would claim two contradictory sorts are
+				// both active, and leaving Reverse disabled would block reversing a sort that *is*
+				// running. `active === null` means effectively Manual (either an explicit own
+				// "manual", or no own setting and no inherited status sort).
+				const active = activeSortFor(governance, statusGovernor);
+				for (const { mode: choice, label } of SORT_MODE_CHOICES) {
+					const checked = choice === "manual" ? active === null : active?.mode === choice;
+					chooser.addItem((entry) => entry.setTitle(label).setChecked(checked).onClick(() => onChange({ sortMode: choice, sortReverse: false })));
+				}
+				// PR-2 (G12/G19/F4): Status is offered only when this row or a reaching ancestor
+				// governs a status set (`statusGovernor`, the same `findSortGovernor` lookup the
+				// render pass's own status sort uses) — never unconditionally, unlike the four modes
+				// above. Labeled "(inherited)" whenever the governing status set belongs to an
+				// ancestor rather than this row itself (E5). The tick uses `activeSortFor` so an
+				// absent own setting that's currently following an inherited status sort shows ticked
+				// here too.
+				if (statusGovernor) {
+					const isOwnGovernor = !!governance.statusEnabled && !!governance.statusSetId;
+					chooser.addItem((entry) =>
+						entry
+							.setTitle(isOwnGovernor ? "Status" : "Status (inherited)")
+							.setChecked(active?.mode === "status")
+							.onClick(() => onChange({ sortMode: "status", sortReverse: false }))
+					);
+				}
+				chooser.addSeparator();
+				chooser.addItem((entry) =>
+					entry
+						.setTitle("Reverse order")
+						.setChecked(active !== null && !!active.reverse)
+						.setDisabled(active === null)
+						.onClick(() => onChange({ sortReverse: !governance.sortReverse }))
+				);
+				chooser.showAtPosition({ x: evt.clientX, y: evt.clientY });
+			})
+	);
+}
+
 /** PR-1 (G11e): the Statuses, Data source…, Refresh now and Remove data source items, shared by the
  * Atlas-folder menu and the unit menu so a sourced unit offers exactly what a sourced folder does.
  * Statuses shows when the node has children or source rows; Refresh now and Remove data source
@@ -538,7 +631,14 @@ function addSourceAndStatusItems(
 						plugin.app,
 						`Remove the data source from "${node.label ?? unitBasename(node)}"? Its current children stay in place as plain units — it just stops refreshing.`,
 						"Remove",
-						() => plugin.viewsManager.setFolderSource(view.id, node.id, undefined)
+						() => {
+							plugin.viewsManager.setFolderSource(view.id, node.id, undefined);
+							// PR-5 R5: an Outside-Vault source's absolute path lives in
+							// FolderSourcePathStore (device-local, keyed by node id, never synced) — same
+							// reason Remove already drops an API source's headers above. Without this a
+							// stale absolute path piles up in localStorage once the source is removed.
+							plugin.folderSourcePathStore.delete(node.id);
+						}
 					).open();
 				})
 		);
@@ -638,6 +738,13 @@ export class AtlasExplorerView extends ItemView {
 	 * superseded (its container was emptied by the newer one) and must stop after each await rather
 	 * than register its redraw/observer against the newer render's DOM. */
 	private renderSeq = 0;
+	/** PR-5 (R10 fix): one `resolveOutsidePath` (fs.statSync) result per Outside-Vault source owner,
+	 * reused by every managed child row within a single render pass instead of re-stat'ing the same
+	 * path once per row. Cleared at the top of every `render()`, so a stale result never survives
+	 * past the pass that computed it — the indicator dot (which must stay live on every render, per
+	 * its own doc comment) deliberately keeps calling `resolveOutsidePath` directly and does not read
+	 * this cache. */
+	private outsideResolvedCache = new Map<string, boolean>();
 	/** PR-5 (G7/G8): whether dismissed inbox rows render inline, tagged "hidden". Mirrors
 	 * `inboxCollapsed` — a single instance field rather than per-view, matching this view's existing
 	 * convention that transient section-header UI state is shared across view switches within the
@@ -675,6 +782,23 @@ export class AtlasExplorerView extends ItemView {
 	/** PR 20: which view's ids the current bucket selection belongs to — see `render()`'s own use of
 	 * this (clears the bucket selection on a view switch; inbox selection is unaffected). */
 	private lastRenderedViewId: string | null = null;
+	/** PR-2 (G9): governs when a Modified-sorted list's cached file mtimes may be refreshed — see
+	 * `SortRefreshGate`'s own doc comment for the exact trigger list. Marked dirty from the three
+	 * trigger points that aren't already "the very first render" (which `SortRefreshGate` starts
+	 * dirty for on its own): `viewLoadTrigger`'s pane-regains-focus/view-opens transition, this
+	 * view's own internal view-switch branch below in `render()`, and `viewsManager.onChange`
+	 * (covers both "a sort changes" and "the tree changes" — both go through the same `save()`). */
+	private sortRefreshGate = new SortRefreshGate();
+	/** PR-2 (G9): per-ref file-mtime snapshot `resolvedMtimeForSort` serves from when the gate
+	 * above says this render isn't allowed to recompute. Keyed by `unitRefKey`, same convention as
+	 * `unitsByRefKey`. Never cleared outright — a stale entry for a ref no longer being sorted by
+	 * Modified is just dead weight, not a correctness problem, and clearing it on every refresh
+	 * trigger would defeat the point of caching across renders that don't refresh. */
+	private modifiedMtimeCache = new Map<string, number | null>();
+	/** PR-2 (G9): whether *this* render pass is allowed to recompute Modified mtimes — decided once
+	 * per `render()` call (via `sortRefreshGate.consume()`), not per list, so every Modified-sorted
+	 * list in the same pass refreshes together or not at all. */
+	private sortRefreshAllowedForThisRender = false;
 	/** The last row clicked (in either scope) — where a following shift-click's range starts from.
 	 * Cleared implicitly by scope: a shift-click only extends a range if the anchor's own scope
 	 * matches the row just clicked, so a stray shift-click in the *other* list can't try to build a
@@ -699,6 +823,16 @@ export class AtlasExplorerView extends ItemView {
 	 * a module icon would otherwise place a ref with no real file behind it into the bucket. */
 	private missingAddedInboxKeys = new Set<string>();
 	private dragPayload: DragPayload | null = null;
+	/** PR-3 (G1): the single shared drop-indicator line element, repositioned (never duplicated)
+	 * across whichever row the pointer is currently hovering an edge zone of. `null` whenever no
+	 * row is currently showing one — cleared on `dragleave`, on `drop`, and by the window-level
+	 * `dragend` backstop below, same three places `dragPayload` itself is cleared. */
+	private dropIndicatorEl: HTMLElement | null = null;
+	/** PR-4 (G5): the single shared "this whole list is a sorted-insert target" outline element —
+	 * same one-at-a-time convention as `dropIndicatorEl` above, just applied to a row's *parent*
+	 * list element instead of as a sibling of the row. `null` whenever no list currently shows it —
+	 * cleared on `dragleave`, on `drop`, and by the window-level `dragend` backstop below. */
+	private sortedDropOutlineEl: HTMLElement | null = null;
 	/** Review follow-up (retroactive PR 9 finding): cancels whichever module row's dwell timer is
 	 * currently pending, if any — invoked from the window-level `dragend` backstop below. At most
 	 * one dwell timer is ever pending at a time in practice (only one row can be mid-hover during a
@@ -726,6 +860,13 @@ export class AtlasExplorerView extends ItemView {
 	 * dismissed by ... view close counts as unanswered on an automatic refresh"). */
 	private openConfirmDeleteModals: ConfirmDeleteRowsModal[] = [];
 	private renderQueued = false;
+	/** PR-2.F2 R2: every call to `render()` (direct or via `queueRender`'s timeout) overwrites this
+	 * with its own promise before any `await` inside it can yield, so this always names the most
+	 * recently *started* render even if a later call supersedes an earlier one still in flight
+	 * (`renderSeq`'s `isCurrent()` check only tells a superseded render to bail early — it says
+	 * nothing about whether the one that superseded it has itself finished building the DOM yet).
+	 * `awaitRenderSettled()` polls this to know when the dust has actually settled. */
+	private latestRenderPromise: Promise<void> | null = null;
 	/** F11: rebuilt once per render from the flat unit list, so resolving a ref is O(1) instead of
 	 * an O(n) `find` per row — at thousands of units the naive scan-per-row was O(n^2) per render. */
 	private unitsByRefKey = new Map<string, Unit>();
@@ -751,18 +892,42 @@ export class AtlasExplorerView extends ItemView {
 
 	async onOpen(): Promise<void> {
 		this.unsubscribers.push(this.plugin.unitIndex.onChange(() => this.queueRender()));
-		this.unsubscribers.push(this.plugin.viewsManager.onChange(() => this.queueRender()));
+		this.unsubscribers.push(
+			this.plugin.viewsManager.onChange((persisted) => {
+				// PR-2 (R3/G9): "the tree changes" means a real, persisted structural/sort change —
+				// `persisted` is true only for a call that went through `ViewsManager.save()`, never
+				// for a bare `notifyChange()` (a note edit's metadata resolve, a no-op data-source
+				// refresh, anything "render this again" that didn't actually change the tree). Marking
+				// the gate dirty on every notification re-sorted Modified rows at a plain autosave,
+				// which G9/E4 forbid; `queueRender()` below still runs for both, so a render-only
+				// notification still repaints.
+				if (persisted) this.sortRefreshGate.markDirty();
+				this.queueRender();
+			})
+		);
 		this.registerEvent(
 			this.plugin.app.workspace.on("active-leaf-change", (leaf) => {
 				this.updateActiveHighlight();
 				if (leaf === this.leaf) {
-					if (this.viewLoadTrigger.activate()) this.refreshApiSourcesOnViewLoad();
+					if (this.viewLoadTrigger.activate()) {
+						this.refreshApiSourcesOnViewLoad();
+						this.sortRefreshGate.markDirty(); // PR-2 (G9): "pane regains focus".
+						// PR-2 (R2/G9): marking the gate dirty alone does nothing until some other
+						// trigger renders next — in a view with no data sources nothing else was
+						// going to, so the Modified re-sort was deferred to whatever render happened
+						// to come along later (typically the next autosave), which is exactly the
+						// timing G9/E4 forbid. Queue the refresh this trigger itself promised.
+						this.queueRender();
+					}
 				} else {
 					this.viewLoadTrigger.deactivate();
 				}
 			})
 		);
-		if (this.viewLoadTrigger.activate()) this.refreshApiSourcesOnViewLoad();
+		if (this.viewLoadTrigger.activate()) {
+			this.refreshApiSourcesOnViewLoad();
+			this.sortRefreshGate.markDirty(); // PR-2 (G9): the pane's very first open.
+		}
 		this.registerEvent(this.plugin.app.workspace.on("file-open", () => this.updateActiveHighlight()));
 		// G11/F10: Outside-Vault connection/children recheck on focus-regain — fires only from this
 		// real browser event, never a self-scheduling timer/interval/poll (F10's own fence).
@@ -777,6 +942,8 @@ export class AtlasExplorerView extends ItemView {
 		// timer) whenever a drag ends, regardless of how.
 		this.registerDomEvent(window, "dragend", () => {
 			this.dragPayload = null;
+			this.clearDropIndicator(); // PR-3 (G1): same abandoned-drag backstop, for the indicator line.
+			this.clearSortedDropOutline(); // PR-4 (G5): same abandoned-drag backstop, for the sorted-insert outline.
 			// PR-1.S1 R5: if the drag ends while the row is scrolled out of the window, it's sitting
 			// hidden (`display:none`) in the spacer purely so the browser's drag source survived it
 			// scrolling off-screen (F11/E8) — nothing needs it kept around once the drag itself is over,
@@ -1059,7 +1226,13 @@ export class AtlasExplorerView extends ItemView {
 			headers,
 			(result) => {
 				if (result.type === "folder") {
+					// PR-4 R3 fix: same device-local-headers cleanup as the CSV/Markdown Table branches
+					// below, for switching away from API into Folder (setFolderSource's own mutual-
+					// exclusion fix clears the synced apiSource, but the device-local headers entry is
+					// this view's own store to clean up, same as every other switch-away-from-API path).
+					const hadApiSource = node.apiSource !== undefined;
 					this.plugin.viewsManager.setFolderSource(view.id, node.id, result.source);
+					if (hadApiSource) this.plugin.apiHeadersStore.delete(node.id);
 					// G6/acceptance: Inside<->Outside toggling (or clearing the field outright) clears
 					// the previously stored path rather than leaving a stale device-local entry behind.
 					if (result.source.location === "outside" && result.outsidePath) {
@@ -1076,8 +1249,12 @@ export class AtlasExplorerView extends ItemView {
 					// otherwise they linger in ApiHeadersStore and silently pre-fill the next time the
 					// user switches back to API, same as "Remove data source" already does for them.
 					const hadApiSource = node.apiSource !== undefined;
+					// PR-4 R3 fix: same idea for a Folder source's own device-local entry, now that
+					// setCsvSource also clears folderSource.
+					const hadOutsideFolderSource = node.folderSource?.location === "outside";
 					this.plugin.viewsManager.setCsvSource(view.id, node.id, result.source);
 					if (hadApiSource) this.plugin.apiHeadersStore.delete(node.id);
+					if (hadOutsideFolderSource) this.plugin.folderSourcePathStore.delete(node.id);
 					this.refreshCsvSource(view, node, "manual");
 					return;
 				}
@@ -1085,13 +1262,19 @@ export class AtlasExplorerView extends ItemView {
 					// PR-8: same device-local-headers cleanup as the CSV branch above, for switching away
 					// from API into Markdown Table.
 					const hadApiSource = node.apiSource !== undefined;
+					const hadOutsideFolderSource = node.folderSource?.location === "outside";
 					this.plugin.viewsManager.setMarkdownTableSource(view.id, node.id, result.source);
 					if (hadApiSource) this.plugin.apiHeadersStore.delete(node.id);
+					if (hadOutsideFolderSource) this.plugin.folderSourcePathStore.delete(node.id);
 					this.refreshMarkdownTableSource(view, node, "manual");
 					return;
 				}
+				// PR-4 R3 fix: switching into "api" from an Outside-Vault Folder source likewise drops
+				// that source's now-orphaned device-local path entry.
+				const hadOutsideFolderSource = node.folderSource?.location === "outside";
 				this.plugin.apiHeadersStore.set(node.id, result.headers);
 				this.plugin.viewsManager.setApiSource(view.id, node.id, result.source);
+				if (hadOutsideFolderSource) this.plugin.folderSourcePathStore.delete(node.id);
 				this.refreshApiSource(view, node, "manual");
 			},
 			node.folderSource ?? null,
@@ -1316,6 +1499,36 @@ export class AtlasExplorerView extends ItemView {
 
 	// --- ref resolution (shared by bucket + inbox rendering) -------------------------------------
 
+	/** PR-1 (G9): a file/block's own file mtime; a module's *interface note's* mtime, since a bare
+	 * folder has no meaningful modified time of its own in Obsidian; `null` ("no time" — sorts
+	 * last under `"modified"`, G9) for a folder with no interface note yet, or any ref that no
+	 * longer resolves to a real vault file. Synchronous — `TFile.stat` is already in memory via
+	 * the vault index; no disk read needed, unlike `resolveRef`'s free-block text lookups. */
+	private modifiedTimeForRef(ref: UnitRef): number | null {
+		if (ref.kind === "folder") {
+			const folder = this.plugin.app.vault.getAbstractFileByPath(ref.path);
+			if (!(folder instanceof TFolder)) return null;
+			const note = findInterfaceNote(this.plugin.app, folder, this.plugin.settings);
+			return note ? note.stat.mtime : null;
+		}
+		const file = this.plugin.app.vault.getAbstractFileByPath(ref.path);
+		return file instanceof TFile ? file.stat.mtime : null;
+	}
+
+	/** PR-2 (G9): the Modified-sort-only wrapper around `modifiedTimeForRef` — serves the cached
+	 * value from `modifiedMtimeCache` unless `sortRefreshAllowedForThisRender` says this render
+	 * pass may recompute, or there's no cached value yet (a ref sorted by Modified for the first
+	 * time always resolves its real mtime, trigger or not). */
+	private resolvedMtimeForSort(ref: UnitRef): number | null {
+		const key = unitRefKey(ref);
+		if (this.sortRefreshAllowedForThisRender || !this.modifiedMtimeCache.has(key)) {
+			const value = this.modifiedTimeForRef(ref);
+			this.modifiedMtimeCache.set(key, value);
+			return value;
+		}
+		return this.modifiedMtimeCache.get(key) ?? null;
+	}
+
 	private async resolveRef(ref: UnitRef): Promise<RowInfo> {
 		const unit = this.unitsByRefKey.get(unitRefKey(ref));
 		if (unit) {
@@ -1375,7 +1588,17 @@ export class AtlasExplorerView extends ItemView {
 		if (!node.folderSourceManaged || !node.folderSourceOwnerId) return false;
 		const owner = this.plugin.viewsManager.getNode(view.id, node.folderSourceOwnerId);
 		if (owner?.folderSource?.location !== "outside") return false;
-		return !resolveOutsidePath(this.plugin.folderSourcePathStore.get(owner.id));
+		// PR-5 (R10 fix): one stat per owner per render pass, not one per managed child row. Lazily
+		// created here too — a caller that reaches this method without going through a real `render()`
+		// (e.g. a test driving `renderNodeList` directly against a bare fake `this`) still gets a
+		// working, if per-call, cache rather than a crash.
+		if (!this.outsideResolvedCache) this.outsideResolvedCache = new Map();
+		let resolved = this.outsideResolvedCache.get(owner.id);
+		if (resolved === undefined) {
+			resolved = resolveOutsidePath(this.plugin.folderSourcePathStore.get(owner.id));
+			this.outsideResolvedCache.set(owner.id, resolved);
+		}
+		return !resolved;
 	}
 
 	/** PR-5 (R3 fix): true for any node (not just the one the caller already has in hand) that an
@@ -1390,10 +1613,42 @@ export class AtlasExplorerView extends ItemView {
 
 	// --- top-level render --------------------------------------------------------------------------
 
-	private async render(): Promise<void> {
+	/** PR-2.F2 R2: thin wrapper around `renderNow()` so every call site (direct `await`/`void`, and
+	 * `queueRender`'s own deferred call) records its promise in `latestRenderPromise` before
+	 * returning — synchronously, so no macrotask or microtask can slip in between a call starting
+	 * and this being set. See `awaitRenderSettled()`. */
+	private render(): Promise<void> {
+		const promise = this.renderNow();
+		this.latestRenderPromise = promise;
+		return promise;
+	}
+
+	/** PR-2.F2 R2: waits not just for "a" render to finish, but for whichever render turns out to be
+	 * the most recently *started* one by the time the dust settles — including one that starts only
+	 * after this call begins waiting (the overlapping-render race `render()`'s own `isCurrent()` guard
+	 * describes: a render superseded mid-flight returns early without the newer render necessarily
+	 * having finished building the DOM yet). Any caller that needs to inspect the rendered DOM right
+	 * after triggering a mutation that may itself queue a render (e.g. via `ViewsManager.onChange`)
+	 * should call this instead of trusting a single `await this.render()`. */
+	private async awaitRenderSettled(): Promise<void> {
+		let prev: Promise<void> | null = null;
+		while (this.latestRenderPromise !== prev) {
+			prev = this.latestRenderPromise;
+			await prev;
+		}
+	}
+
+	private async renderNow(): Promise<void> {
 		const container = this.containerEl.children[1] as HTMLElement;
 		const renderId = ++this.renderSeq;
 		const isCurrent = () => renderId === this.renderSeq;
+		// PR-2 (G9): captured here, before anything below clears `dragPayload`/`inboxDragRowEl`/
+		// `bucketDragRowEl` (the R4-hardening block right after this) — a render that fires *while*
+		// a drag is still live must still see that correctly, not the already-cleared state those
+		// lines are about to leave behind. Consumed into `sortRefreshAllowedForThisRender` further
+		// down, after the view-switch branch's own `markDirty()` call below so a trigger that fires
+		// in *this* render pass (a genuine view switch) is already reflected in this same render.
+		const dragInProgress = !!(this.dragPayload || this.inboxDragRowEl || this.bucketDragRowEl);
 		// PR-1.S1: the bucket and inbox share one scroll body (`.atlas-explorer-scroll`) under a
 		// fixed toolbar. Capturing its scrollTop here means a click-driven re-render (multi-select,
 		// status change, drag drop) doesn't snap the panel back to the top; it's restored after the
@@ -1438,6 +1693,7 @@ export class AtlasExplorerView extends ItemView {
 		// just above/below: capture before `container.empty()`, restore after rebuild.
 		const activeRowKey = activeEl instanceof HTMLElement && activeEl.dataset.selectKey ? activeEl.dataset.selectKey : null;
 
+		this.outsideResolvedCache.clear();
 		container.empty();
 		container.addClass("atlas-explorer");
 
@@ -1464,6 +1720,7 @@ export class AtlasExplorerView extends ItemView {
 				// on `lastRenderedViewId !== null` so this is a genuine switch, not the view's very first
 				// render (which `onOpen`'s own `activate()` call already covers).
 				if (this.lastRenderedViewId !== null) this.refreshApiSourcesOnViewLoad();
+				this.sortRefreshGate.markDirty(); // PR-2 (G9): "view loads" — covers the very first render too.
 				this.lastRenderedViewId = view.id;
 				this.selectedBucketNodeIds.clear();
 				if (this.selectionAnchorScope === "bucket") {
@@ -1471,6 +1728,9 @@ export class AtlasExplorerView extends ItemView {
 					this.selectionAnchorScope = null;
 				}
 			}
+			// PR-2 (G9): consumed here, after the view-switch branch above has had its chance to
+			// `markDirty()` for this same render pass — see `dragInProgress`'s own comment for why.
+			this.sortRefreshAllowedForThisRender = this.sortRefreshGate.consume(dragInProgress);
 
 			this.renderToolbar(container, view);
 			if (filterHadFocus && this.filterInputEl) {
@@ -1725,7 +1985,7 @@ export class AtlasExplorerView extends ItemView {
 		toolbar.createDiv({ cls: "atlas-toolbar-sep" });
 
 		// --- section 3: view controls ------------------------------------------------------------
-		this.toolbarButton(toolbar, this.sortMode === "manual" ? "arrow-up-down" : "arrow-down-a-z", "Sort: manual / A–Z", () => {
+		this.toolbarButton(toolbar, this.sortMode === "manual" ? "arrow-up-down" : "arrow-down-az", "Sort: manual / A–Z", () => {
 			this.sortMode = this.sortMode === "manual" ? "alphabetical" : "manual";
 			void this.render();
 		});
@@ -1832,6 +2092,8 @@ export class AtlasExplorerView extends ItemView {
 		const chevron = header.createDiv({ cls: "atlas-chevron" });
 		setIcon(chevron, this.bucketCollapsed ? "chevron-right" : "chevron-down");
 		const title = header.createSpan({ cls: "atlas-section-title", text: "Bucket" });
+		// PR-2 (G13): the Bucket header shows the icon when the view root itself is sorted.
+		this.renderSortIndicator(header, view, this.plugin.statusesManager?.findSortGovernor([view]) ?? null);
 
 		// PR 11: the whole section's content used to only render at all when expanded (`if
 		// (this.bucketCollapsed) return`), so there was never a DOM node for the CSS transition to
@@ -1860,6 +2122,20 @@ export class AtlasExplorerView extends ItemView {
 		const parts: SectionParts = { section: container, wrap: sectionWrap, chevron };
 		chevron.addEventListener("click", () => this.onSectionChevronClick("bucket", parts));
 		title.addEventListener("click", () => this.onSectionTitleClick("bucket", parts));
+		// PR-1 (G7): right-clicking the Bucket header offers the same "Sort children…" submenu as
+		// any row, writing through the view itself (nodeId: null) — the same root-governor
+		// mechanism the top-level render call just above already resolves status against.
+		header.addEventListener("contextmenu", (evt) => {
+			evt.preventDefault();
+			this.showBucketHeaderMenu(evt, view);
+		});
+	}
+
+	private showBucketHeaderMenu(evt: MouseEvent, view: View): void {
+		const menu = new Menu();
+		const statusGovernor = this.plugin.statusesManager?.findSortGovernor([view]) ?? null;
+		addSortMenuItem(menu, evt, view, statusGovernor, (patch) => this.plugin.viewsManager.updateStatusGovernance(view.id, null, patch));
+		menu.showAtMouseEvent(evt);
 	}
 
 	/** PR 19: wires PR 17's hide-completed/hide-cancelled/truncate-statuses settings (captured but
@@ -1944,10 +2220,22 @@ export class AtlasExplorerView extends ItemView {
 					trailing.push(entry);
 				}
 			}
-			// Insert highest position first: splice(p, 0, x) only shifts indices >= p, so a later
-			// (lower-position) insertion's target index is never disturbed by an earlier one.
-			positioned.sort((a, b) => b.position - a.position);
-			for (const { entry, position } of positioned) resolved.splice(position, 0, entry);
+			// `position` is an index into the ORIGINAL (pre-deletion) child list, so inserting
+			// highest-first was backwards: a later (lower-position) insertion's splice target can
+			// still be disturbed by an earlier (higher-position) one landing ahead of it. Sort
+			// ascending instead, splicing into the array as it grows — `splice` naturally resolves
+			// each subsequent target against the already-widened array. Two rows recorded at the
+			// same position (e.g. deleted one after another, so each saw the other still in the
+			// list) would still land in reverse order via plain ascending splice, since the second
+			// splice at an unchanged index lands ahead of the first — track how many have already
+			// landed at each position and offset by that count so ties come out in apiItemOrder.
+			positioned.sort((a, b) => a.position - b.position);
+			const insertedAtPosition = new Map<number, number>();
+			for (const { entry, position } of positioned) {
+				const already = insertedAtPosition.get(position) ?? 0;
+				resolved.splice(position + already, 0, entry);
+				insertedAtPosition.set(position, already + 1);
+			}
 			resolved.push(...trailing);
 		}
 
@@ -1961,14 +2249,56 @@ export class AtlasExplorerView extends ItemView {
 		// group's placeholder land at its status's rank position once sort-by-status is on — it
 		// naturally becomes "whichever grouped member is now first in iteration order," with no
 		// separate positioning logic required.
+		// PR-2 (G19/E5 fix): `activeSortFor` is what actually decides whether this list's own
+		// direct parent (`ancestors[0]`) is itself explicitly sorted, explicitly Manual, or absent
+		// and following an inherited status sort — the old code here only checked whether the
+		// *governor that happened to resolve* (`sortGovernor`) had `sortMode: "status"`, which
+		// wrongly kept applying an inherited status sort even after this list's own direct parent
+		// was switched to an explicit non-status mode (or explicit Manual), since neither of those
+		// ever clears `sortGovernor` itself — only `activeSortFor`'s own-setting-wins rule does.
+		const directGovernor = ancestors[0];
 		const sortGovernor = sm.findSortGovernor(ancestors);
-		if (sortGovernor?.sortMode === "status" && sortGovernor.statusSetId) {
+		const activeStatusSort = activeSortFor(directGovernor ?? {}, sortGovernor);
+		if (activeStatusSort?.mode === "status" && sortGovernor?.statusSetId) {
 			const setId = sortGovernor.statusSetId;
 			const rankOf = (r: Resolved): number => {
 				if (!r.status) return Number.POSITIVE_INFINITY;
 				return sm.rankOf(setId, r.status.id) ?? Number.POSITIVE_INFINITY;
 			};
-			resolved.sort((a, b) => (sortGovernor.sortReverse ? rankOf(b) - rankOf(a) : rankOf(a) - rankOf(b)));
+			// Two unranked rows both rank POSITIVE_INFINITY; subtracting them is NaN, so compare
+			// explicitly instead of relying on `Infinity - Infinity` (stable in V8 by accident, but not
+			// a real comparator contract).
+			const compareRank = (x: number, y: number): number => (x === y ? 0 : x - y);
+			resolved.sort((a, b) =>
+				activeStatusSort.reverse ? compareRank(rankOf(b), rankOf(a)) : compareRank(rankOf(a), rankOf(b))
+			);
+		}
+
+		// PR-1 (G6/F6): A-Z/Modified/Time added are read straight off *this list's own direct
+		// parent* (ancestors[0] — the view root itself at the top level), never inherited past it
+		// the way `"status"` above is — `findSortGovernor`'s ancestor walk is never consulted for
+		// these three. `currentSortMode` here defaults an absent own setting to "manual", which is
+		// exactly right for these three (they have no inherited fallback of their own, F6); the
+		// status case above already handled "absent, but follows an inherited status sort" on its
+		// own terms via `activeSortFor`. Running before hide/truncate, same as the status sort
+		// above, is what makes a truncated group's placeholder land at its first member's sorted
+		// position for these modes too, with no separate positioning logic.
+		const directMode = currentSortMode(directGovernor ?? {});
+		if (isDirectSortMode(directMode)) {
+			const sortKeyFor = async (r: Resolved): Promise<SortKey> => {
+				if (r.apiItem) return { name: r.apiItem.label, mtime: null, placedAt: null };
+				const { node } = r;
+				const placedAt = node.placedAt ?? null;
+				if (node.type === "meta" || !node.ref) return { name: node.label ?? "", mtime: null, placedAt };
+				if (directMode === "time-added") return { name: "", mtime: null, placedAt };
+				const mtime = directMode === "modified" ? this.resolvedMtimeForSort(node.ref) : null;
+				const name = directMode === "alphabetical" ? (await this.resolveRef(node.ref)).text : "";
+				return { name, mtime, placedAt };
+			};
+			const keyed = await Promise.all(resolved.map(async (r) => ({ r, key: await sortKeyFor(r) })));
+			keyed.sort((a, b) => compareSortKeys(directMode, !!directGovernor?.sortReverse, a.key, b.key));
+			resolved.length = 0;
+			resolved.push(...keyed.map((k) => k.r));
 		}
 
 		const isHidden = (status: StatusDefinition, governor: StatusGovernance): boolean =>
@@ -2268,11 +2598,17 @@ export class AtlasExplorerView extends ItemView {
 	 * optimistic-local-state-then-delayed-persist click pattern used everywhere else fold/unfold
 	 * happens in this plugin — extracted here instead of duplicated per node type so the two can't
 	 * drift out of sync with each other the way duplicated logic has caused bugs before in this build. */
-	private async renderFoldableChildren(node: ViewNode, chevron: HTMLElement, container: HTMLElement, view: View, depth: number, ancestors: StatusGovernance[]): Promise<void> {
-		// PR 9 (issue 6): a filter-matching descendant force-reveals this node regardless of its own
-		// collapsed state, so a match is never hidden behind a stale fold. The state from just before
-		// the filter started touching it is remembered (once) so clearing the filter can put it back
-		// exactly, rather than leaving every node the filter happened to open expanded.
+	/** Extracted out of `renderFoldableChildren` in PR-3 so `renderNode` can also read this value
+	 * before `renderFoldableChildren` runs — needed to decide whether this row's own bottom-edge
+	 * drop zone exists at all (G1/Q7, see `resolveDropZone`'s doc comment in `drop-zones.ts`).
+	 * Both call sites now get (and persist the pre-filter snapshot for) the exact same value,
+	 * instead of two independent copies of this filter-reveal logic drifting apart.
+	 *
+	 * PR 9 (issue 6): a filter-matching descendant force-reveals this node regardless of its own
+	 * collapsed state, so a match is never hidden behind a stale fold. The state from just before
+	 * the filter started touching it is remembered (once) so clearing the filter can put it back
+	 * exactly, rather than leaving every node the filter happened to open expanded. */
+	private async computeEffectiveCollapsed(node: ViewNode, view: View): Promise<boolean> {
 		const filterActive = !!this.filterText.trim();
 		let effectiveCollapsed = !!node.collapsed;
 		if (filterActive) {
@@ -2280,6 +2616,18 @@ export class AtlasExplorerView extends ItemView {
 			if (!this.preFilterCollapsedState.has(node.id)) this.preFilterCollapsedState.set(node.id, node.collapsed);
 			if ((await this.subtreeHasMatch(node.children, view)) || this.apiItemsMatchFilter(node)) effectiveCollapsed = false;
 		}
+		return effectiveCollapsed;
+	}
+
+	private async renderFoldableChildren(
+		node: ViewNode,
+		chevron: HTMLElement,
+		container: HTMLElement,
+		view: View,
+		depth: number,
+		ancestors: StatusGovernance[],
+		effectiveCollapsed: boolean
+	): Promise<void> {
 		setIcon(chevron, effectiveCollapsed ? "chevron-right" : "chevron-down");
 
 		// Children always render (regardless of collapsed state) inside a dedicated wrapper, so
@@ -2397,6 +2745,23 @@ export class AtlasExplorerView extends ItemView {
 		});
 	}
 
+	/** PR-2 (G13): a small icon + tooltip on a Folder row (or the Bucket header, via
+	 * `renderBucketSection`) whose own children are actually sorted by something other than
+	 * Manual. Built on `activeSortFor` — the same helper the render pass's own status-sort
+	 * activation and the "Sort children…" menu's Status tick use — so this can never show an
+	 * icon for a sort the render pass wouldn't actually apply, or vice versa. */
+	private renderSortIndicator(
+		container: HTMLElement,
+		ownGovernance: Pick<StatusGovernance, "sortMode" | "sortReverse">,
+		statusGovernor: StatusGovernance | null
+	): void {
+		const active = activeSortFor(ownGovernance, statusGovernor);
+		if (!active) return;
+		const icon = container.createDiv({ cls: "atlas-sort-indicator" });
+		setIcon(icon, SORT_MODE_ICONS[active.mode]);
+		setTooltip(icon, `Sorted: ${sortModeLabel(active.mode, active.reverse)}`);
+	}
+
 	/** PR-1 R4: the API/CSV/markdown-table and Outside-path connection dots, shared by a meta folder's
 	 * row and a unit's row — a unit can hold the exact same kinds of data source (after Create or
 	 * Swap), and needs the same ok/grey/red/amber signal, not just a meta folder's `renderNode` branch. */
@@ -2434,6 +2799,10 @@ export class AtlasExplorerView extends ItemView {
 			this.renderRowIcon(iconEl, view, node, ancestors, "layers");
 			row.createSpan({ cls: "atlas-row-text", text: node.label ?? "" });
 			this.renderConnectionDots(row, node);
+			// PR-2 (G13): shows only when this Folder's own children are actually sorted
+			// (`findSortGovernor` with `node` prepended — same convention `renderNodeList` itself
+			// uses when it recurses into `node.children` below).
+			this.renderSortIndicator(row, node, this.plugin.statusesManager?.findSortGovernor([node, ...ancestors]) ?? null);
 
 			// PR 20: a meta row's plain click never did anything before this (no open target) — safe
 			// to bind unconditionally, since the previous behavior ("nothing happens") is preserved
@@ -2443,15 +2812,21 @@ export class AtlasExplorerView extends ItemView {
 				this.dragPayload = this.buildNodeDragPayload(node.id, view.id);
 				this.bucketDragRowEl = row;
 			});
-			this.makeDropZone(row, { kind: "node", nodeId: node.id, viewId: view.id });
+			// PR-3 (G1/Q7): a meta row's own bottom-edge drop zone collapses into its nest zone while
+			// it's expanded and already showing real children/API rows immediately underneath it —
+			// `effectiveCollapsed` is computed once here (not inside `renderFoldableChildren`, which
+			// now just takes it as a parameter) so both the drop zone and the fold state below agree.
+			const effectiveCollapsed = await this.computeEffectiveCollapsed(node, view);
+			const metaHasBottomZone = !((node.children.length > 0 || nodeHasApiRows(node)) && !effectiveCollapsed);
+			this.makeDropZone(row, { kind: "node", nodeId: node.id, viewId: view.id }, metaHasBottomZone);
 			row.addEventListener("keydown", (evt) => this.handleRowKeydown(evt, node, view));
 			row.tabIndex = 0;
 			row.addEventListener("contextmenu", (evt) => {
 				evt.preventDefault();
-				this.showMetaFolderMenu(evt, node, view);
+				this.showMetaFolderMenu(evt, node, view, ancestors);
 			});
 
-			await this.renderFoldableChildren(node, chevron, container, view, depth, ancestors);
+			await this.renderFoldableChildren(node, chevron, container, view, depth, ancestors, effectiveCollapsed);
 			return;
 		}
 
@@ -2469,7 +2844,11 @@ export class AtlasExplorerView extends ItemView {
 		const row = container.createDiv({ cls: "atlas-row atlas-row-unit" });
 		if (info.missing) row.addClass("atlas-missing");
 		row.toggleClass("atlas-filtered-out", filteredOut);
-		row.dataset.refKey = unitRefKey(ref);
+		// PR-5 (R11 fix): an Outside-Vault-managed child's `ref.path` is root-relative, not a vault
+		// path, so its `unitRefKey` can collide with a same-named vault-root unit's. Leaving the
+		// attribute unset here means `updateActiveHighlight`'s `[data-ref-key=...]` query can never
+		// match this row for an unrelated vault file going active.
+		if (!outsideManaged) row.dataset.refKey = unitRefKey(ref);
 		row.dataset.selectKey = node.id;
 		// PR-1.F1 (F6): `data-ref-key` above is still this ref's own key regardless — the rest of the
 		// explorer (drag, "Place here", the drop zone...) keys off it unconditionally — but an
@@ -2518,7 +2897,10 @@ export class AtlasExplorerView extends ItemView {
 		// absolute external path, which is exactly the "rename affordance" the spec requires absent.
 		if (!info.missing && !outsideManaged && ref.kind === "folder") this.wireModuleRow(row, iconEl, ref.path);
 
-		this.setPlacementTooltip(row, ref);
+		// PR-5 (R11 fix): `getPlacements` keys by `unitRefKey`, which is meaningless for an
+		// Outside-Vault-managed row's root-relative `ref.path` — it would otherwise list the
+		// placements of a same-named vault-root unit instead. Cosmetic only; nothing persists.
+		if (!outsideManaged) this.setPlacementTooltip(row, ref);
 		row.addEventListener("click", (evt) => {
 			const consumed = this.handleSelectionClick(evt, node.id, "bucket", this.bucketVisibleOrder());
 			// R9(c): `ref.path` here is a bare name relative to the Outside source's root, never a vault
@@ -2526,22 +2908,29 @@ export class AtlasExplorerView extends ItemView {
 			// instead of doing nothing, which is what clicking an Outside row is supposed to do.
 			if (!consumed && !outsideManaged) void this.openRef(ref);
 		});
+		// PR-1 (G11c): a unit holding a data source draws its rows even with an empty `children` array.
+		const hasFoldableChildren = node.children.length > 0 || nodeHasApiRows(node);
+		// PR-3 (G1/Q7): only bothers computing the real fold state (an async filter-reveal check)
+		// when this row actually has something foldable — a childless/non-sourced unit row never
+		// shows anything below it either way, so its bottom-edge zone is always the plain 25/50/25
+		// split (`hasBottomZone` stays `true`) with no extra work.
+		const unitEffectiveCollapsed = hasFoldableChildren ? await this.computeEffectiveCollapsed(node, view) : true;
+		const unitHasBottomZone = !(hasFoldableChildren && !unitEffectiveCollapsed);
 		if (!outsideManaged) {
 			row.addEventListener("dragstart", () => {
 				this.dragPayload = this.buildNodeDragPayload(node.id, view.id);
 				this.bucketDragRowEl = row;
 			});
-			this.makeDropZone(row, { kind: "node", nodeId: node.id, viewId: view.id });
+			this.makeDropZone(row, { kind: "node", nodeId: node.id, viewId: view.id }, unitHasBottomZone);
 		}
 		row.tabIndex = 0;
 		row.addEventListener("keydown", (evt) => this.handleRowKeydown(evt, node, view));
 		row.addEventListener("contextmenu", (evt) => {
 			evt.preventDefault();
-			this.showUnitMenu(evt, ref, view, node, info.text);
+			this.showUnitMenu(evt, ref, view, node, info.text, ancestors, outsideManaged);
 		});
 
-		// PR-1 (G11c): a unit holding a data source draws its rows even with an empty `children` array.
-		if (node.children.length > 0 || nodeHasApiRows(node)) await this.renderFoldableChildren(node, chevron, container, view, depth, ancestors);
+		if (hasFoldableChildren) await this.renderFoldableChildren(node, chevron, container, view, depth, ancestors, unitEffectiveCollapsed);
 	}
 
 	// --- inbox -----------------------------------------------------------------------------------
@@ -2830,33 +3219,131 @@ export class AtlasExplorerView extends ItemView {
 
 	// --- drag and drop -----------------------------------------------------------------------------
 
-	private makeDropZone(
-		el: HTMLElement,
-		target: { kind: "node"; nodeId: string; viewId: string } | { kind: "bucket-root"; viewId: string } | { kind: "inbox-area"; viewId: string }
-	): void {
+	/** PR-3 (G1): row drop zones additionally split into an edge ("before"/"after", a sibling
+	 * insert among the target's own siblings) on top of the pre-existing "nest" (append as the
+	 * target's own last child) — `hasBottomZone` is false for a row that's expanded and already
+	 * showing its own children immediately underneath it (Q7, see `resolveDropZone`'s own doc
+	 * comment in `drop-zones.ts`). The bucket root and the inbox area never pass a third argument
+	 * and never get edge zones — dropping on empty space there is still a plain append, unchanged
+	 * from before this PR. */
+	private makeDropZone(el: HTMLElement, target: DropTarget, hasBottomZone = true): void {
+		if (target.kind !== "node") {
+			// Bucket root / inbox area: unchanged pre-PR-3 behaviour, no edge zones.
+			el.addEventListener("dragover", (evt) => {
+				if (!this.dragPayload) return;
+				evt.preventDefault();
+				el.addClass("atlas-drop-target");
+			});
+			el.addEventListener("dragleave", () => el.removeClass("atlas-drop-target"));
+			el.addEventListener("drop", (evt) => {
+				evt.preventDefault();
+				evt.stopPropagation();
+				el.removeClass("atlas-drop-target");
+				this.handleDrop(target, "nest");
+			});
+			return;
+		}
+
+		let zone: DropZone = "nest";
 		el.addEventListener("dragover", (evt) => {
 			if (!this.dragPayload) return;
 			evt.preventDefault();
-			el.addClass("atlas-drop-target");
+			// E2: a target inside the dragged node's own subtree can never accept an edge drop (its
+			// own parent is itself inside that subtree, so `moveNode`'s cycle guard would refuse it
+			// anyway) — fall back to the plain, pre-PR-3 nest highlight rather than show a line that
+			// promises a move the drop will silently refuse.
+			if (this.isCycleDrop(target.viewId, target.nodeId)) {
+				zone = "nest";
+				this.clearDropIndicator();
+				this.clearSortedDropOutline();
+				el.addClass("atlas-drop-target");
+				return;
+			}
+			const rect = el.getBoundingClientRect();
+			zone = resolveDropZone(evt.clientY - rect.top, rect.height, hasBottomZone);
+			// PR-4 (G4/G5/G22): a plain edge-vs-nest zone no longer decides line-vs-nest on its own —
+			// `assessDrop` additionally weighs the target list's own effective sort and whether the
+			// drag is one of that list's own existing children (G4, refuse) or from elsewhere (G5,
+			// sorted-insert outline instead of a line).
+			const assessment = this.assessDrop(target, zone, this.dragPayload);
+			const decision: DropDecision = assessment?.decision ?? (zone === "nest" ? "nest" : "reorder");
+			this.clearDropIndicator();
+			el.removeClass("atlas-drop-target");
+			this.clearSortedDropOutline();
+			if (decision === "nest") {
+				el.addClass("atlas-drop-target");
+			} else if (decision === "reorder") {
+				this.showDropIndicator(el, zone as "before" | "after");
+			} else if (decision === "sorted-insert") {
+				this.showSortedDropOutline(el);
+			}
+			// "refuse": no line, no outline, no nest highlight — `handleDrop` shows the Notice.
 		});
-		el.addEventListener("dragleave", () => el.removeClass("atlas-drop-target"));
+		el.addEventListener("dragleave", () => {
+			el.removeClass("atlas-drop-target");
+			this.clearDropIndicator();
+			this.clearSortedDropOutline();
+		});
 		el.addEventListener("drop", (evt) => {
 			evt.preventDefault();
 			evt.stopPropagation();
 			el.removeClass("atlas-drop-target");
-			this.handleDrop(target);
+			this.clearDropIndicator();
+			this.clearSortedDropOutline();
+			this.handleDrop(target, zone);
 		});
 	}
 
-	/** PR 12: dropping onto a row now always means "nest as a child of this row" (meta-nesting,
-	 * organizational only) — every node type can be a parent now, not just meta folders (Q3/Q11,
-	 * grilled with Dan directly). The one exception, the real disk-move "add to module" gesture, no
-	 * longer lives here at all — it moved to the module icon's own drop zone in `wireModuleRow`,
-	 * which handles it and calls `stopPropagation()` before a drop event would ever reach this
-	 * row-level handler. This *did* mean giving up "drop onto a row to insert as its sibling," which
-	 * this branch used to do for unit targets — a deliberate simplification Dan chose over a
-	 * right-side/rest-of-row zone split; reordering to a specific position among siblings now needs
-	 * un-nesting to the bucket root or a meta folder first, not a single drag onto a neighbor.
+	/** PR-3 (G1): shows (creating once, then only ever repositioning) the single shared
+	 * drop-indicator line as `row`'s previous or next sibling, matching `row`'s own left
+	 * indentation so it lines up with the row's own text rather than the container's edge. */
+	private showDropIndicator(row: HTMLElement, zone: "before" | "after"): void {
+		const parent = row.parentElement;
+		if (!parent) return;
+		if (!this.dropIndicatorEl) {
+			this.dropIndicatorEl = document.createElement("div");
+			this.dropIndicatorEl.className = "atlas-drop-indicator";
+		}
+		this.dropIndicatorEl.style.marginLeft = row.style.paddingLeft || "";
+		if (zone === "before") parent.insertBefore(this.dropIndicatorEl, row);
+		else parent.insertBefore(this.dropIndicatorEl, row.nextSibling);
+	}
+
+	private clearDropIndicator(): void {
+		this.dropIndicatorEl?.remove();
+		this.dropIndicatorEl = null;
+	}
+
+	/** PR-3 (E2): true when any node in the currently-dragged payload is `nodeId` itself, or an
+	 * ancestor of it — i.e. dropping on `nodeId` (or any edge of it) would require reparenting a
+	 * node into its own descendant, which `moveNode`'s own cycle guard already refuses
+	 * unconditionally. Used only to decide the *visual* feedback during `dragover`; the actual
+	 * refusal happens in `moveNode` regardless of whether this check runs at all. */
+	private isCycleDrop(viewId: string, nodeId: string): boolean {
+		const payload = this.dragPayload;
+		if (!payload || payload.kind !== "node" || payload.viewId !== viewId) return false;
+		const view = this.plugin.viewsManager.getView(viewId);
+		if (!view) return false;
+		return payload.nodeIds.some((draggedId) => {
+			if (draggedId === nodeId) return true;
+			const dragged = this.findNodeAnywhere(view.root, draggedId);
+			return !!dragged && this.nodeContainsDescendant(dragged.node, nodeId);
+		});
+	}
+
+	/** PR 12: dropping onto a row's own "nest" zone means "nest as a child of this row"
+	 * (meta-nesting, organizational only) — every node type can be a parent now, not just meta
+	 * folders (Q3/Q11, grilled with Dan directly). The one exception, the real disk-move "add to
+	 * module" gesture, no longer lives here at all — it moved to the module icon's own drop zone in
+	 * `wireModuleRow`, which handles it and calls `stopPropagation()` before a drop event would
+	 * ever reach this row-level handler.
+	 *
+	 * PR-3 (G1/G2): a row's edge zones ("before"/"after") instead insert the drag as a *sibling* of
+	 * the target, at the target's own position (or one past it) among the target's own parent's
+	 * children — reordering no longer needs un-nesting to the bucket root or a meta folder first,
+	 * the limitation PR 12's own doc comment used to call out here. The bucket root and inbox area
+	 * never carry an edge zone (`zone` is always `"nest"` there, from `makeDropZone`'s non-node
+	 * branch), so they still always append, unchanged.
 	 *
 	 * Also fixes a real, pre-existing bug found while rewriting this for PR 12: for a `payload.kind
 	 * === "node"` drag (an *existing* tree node being reparented, not a fresh ref from the inbox),
@@ -2868,7 +3355,7 @@ export class AtlasExplorerView extends ItemView {
 	 * units can now genuinely have children to lose, and meta-nesting makes "drag one row onto
 	 * another" universal. `moveNode` is the correct operation for an existing node changing parent
 	 * either way — it reparents the real node object in place instead of replacing it. */
-	private handleDrop(target: { kind: "node"; nodeId: string; viewId: string } | { kind: "bucket-root"; viewId: string } | { kind: "inbox-area"; viewId: string }): void {
+	private handleDrop(target: DropTarget, zone: DropZone = "nest"): void {
 		const payload = this.dragPayload;
 		this.dragPayload = null;
 		if (!payload) return;
@@ -2899,10 +3386,31 @@ export class AtlasExplorerView extends ItemView {
 
 		const viewId = target.viewId;
 		let parentId: string | null = null;
+		let position: number | undefined; // undefined => append (nest, bucket-root, inbox-area)
+
 		if (target.kind === "node") {
 			const view = this.plugin.viewsManager.getView(viewId);
-			const found = view && this.findNodeAnywhere(view.root, target.nodeId);
-			if (found) parentId = found.node.id;
+			if (view && zone !== "nest") {
+				// G1/G2: an edge drop never nests into the target — it lands as a sibling in the
+				// target's own parent (the bucket root, if the target is top-level), at the slot the
+				// indicator line showed: right before the target ("before") or right after it ("after").
+				//
+				// PR-4 (G4/E13): but only once the target's own parent list's effective sort agrees —
+				// `assessDrop` re-derives the same decision `makeDropZone`'s dragover handler showed,
+				// from the live `payload` (not the batch-representative visual shortcut) so a sorted
+				// list's own child is refused outright here too, whole-batch, with the Notice.
+				const assessment = this.assessDrop(target, zone, payload);
+				if (!assessment) return; // target vanished mid-drag — nothing left to drop onto.
+				if (assessment.decision === "refuse") {
+					if (assessment.effectiveSort) void this.showSortedDropRefusedNotice(view, assessment.parentId, assessment.effectiveSort);
+					return;
+				}
+				parentId = assessment.parentId;
+				position = zone === "after" ? assessment.index + 1 : assessment.index;
+			} else {
+				const found = view && this.findNodeAnywhere(view.root, target.nodeId);
+				if (found) parentId = found.node.id;
+			}
 		}
 
 		if (payload.kind === "node") {
@@ -2923,20 +3431,42 @@ export class AtlasExplorerView extends ItemView {
 			});
 			// An existing tree node (meta or unit) is being reparented/reordered — `moveNode` operates
 			// on it directly by id, in place, so its own children/collapsed state travels with it.
-			// Each move appends after the previous one, so the whole selection lands at the
-			// destination in the same relative order it was dragged in.
-			let index = parentId ? (this.findNodeAnywhere(view.root, parentId)?.node.children.length ?? 0) : view.root.length;
+			// PR-3 (G3): for an edge drop, `index` starts at the computed sibling position instead of
+			// always the end, so the whole selection lands together at the destination in the same
+			// relative order it was dragged in.
+			//
+			// R1 fix: the next slot is derived from where the *previous* row actually landed, not
+			// from a flat `index++`. `moveNode`'s `index` param is read against the pre-removal array
+			// (see its own doc comment) and adjusted for a same-parent downward move — so once any
+			// moved row came from above the drop point in the same parent, a naive running counter
+			// drifts one slot too high for every row after it (and mis-handles E1 no-ops the same
+			// way). Re-reading each node's real post-move position with `findNodeParent` and chaining
+			// the next index off *that* keeps the batch landing correctly regardless of which parent
+			// each row started in, or whether a given move turned out to be a no-op.
+			let index = position ?? (parentId ? (this.findNodeAnywhere(view.root, parentId)?.node.children.length ?? 0) : view.root.length);
 			for (const nodeId of toMove) {
-				if (this.plugin.viewsManager.moveNode(viewId, nodeId, parentId, index)) index++;
+				if (this.plugin.viewsManager.moveNode(viewId, nodeId, parentId, index)) {
+					const landed = this.findNodeParent(view.root, nodeId, null);
+					index = landed ? landed.index + 1 : index + 1;
+				}
 			}
 			this.selectedBucketNodeIds.clear();
 			this.queueRender();
 			return;
 		}
 
-		// payload.kind === "inbox": fresh unit refs, not yet placed anywhere in this view — placeUnit
-		// always appends, so calling it in order already preserves the batch's relative order.
-		for (const ref of payload.refs) this.plugin.viewsManager.placeUnit(viewId, ref, parentId);
+		// payload.kind === "inbox": fresh unit refs, not yet placed anywhere in this view.
+		// PR-3 (G1): an edge drop places the batch starting at `position`, in drag order; a nest/
+		// append drop (`position` undefined) keeps the pre-PR-3 behaviour of always appending.
+		if (position === undefined) {
+			for (const ref of payload.refs) this.plugin.viewsManager.placeUnit(viewId, ref, parentId);
+		} else {
+			let pos = position;
+			for (const ref of payload.refs) {
+				this.plugin.viewsManager.placeUnit(viewId, ref, parentId, pos);
+				pos++;
+			}
+		}
 		this.selectedInboxRefKeys.clear();
 		this.queueRender();
 	}
@@ -2946,6 +3476,128 @@ export class AtlasExplorerView extends ItemView {
 			if (child.id === targetId || this.nodeContainsDescendant(child, targetId)) return true;
 		}
 		return false;
+	}
+
+	/** PR-3 (G1/G2): like `findNodeAnywhere`, but returns the target's own parent id and its
+	 * current index among that parent's children, instead of the node itself — what an edge drop
+	 * needs to compute a sibling-insert position. `null` only when `targetId` isn't found at all
+	 * (e.g. the target vanished mid-drag). */
+	private findNodeParent(nodes: ViewNode[], targetId: string, parentId: string | null): { parentId: string | null; index: number } | null {
+		const index = nodes.findIndex((n) => n.id === targetId);
+		if (index !== -1) return { parentId, index };
+		for (const node of nodes) {
+			const found = this.findNodeParent(node.children, targetId, node.id);
+			if (found) return found;
+		}
+		return null;
+	}
+
+	/** PR-4 (G4/G5/G20/G22): builds the same `ancestors` array shape `renderNodeList`'s own
+	 * recursion builds for `targetId`'s children list — `[targetId's node, ...its own ancestors,
+	 * ..., view]`, nearest first — by walking the *real* `ViewNode` tree (never DOM nesting), so a
+	 * folder-source-hoisted row (rendered in its grandparent's list, G20) still resolves to its
+	 * real parent here regardless of where its row sits on screen. `null` only when `targetId`
+	 * isn't found at all (the target vanished mid-drag). */
+	private ancestorChainFor(nodes: ViewNode[], targetId: string, aboveChain: StatusGovernance[]): StatusGovernance[] | null {
+		for (const node of nodes) {
+			if (node.id === targetId) return [node, ...aboveChain];
+			const found = this.ancestorChainFor(node.children, targetId, [node, ...aboveChain]);
+			if (found) return found;
+		}
+		return null;
+	}
+
+	/** PR-4 (G4/G5): the one effective sort a `parentId` list (or the Bucket root, for `null`)
+	 * actually renders by right now — same `activeSortFor`/`findSortGovernor` combination the
+	 * render pass's own status-sort activation and G13 sort indicator use (`renderNodeList`,
+	 * `renderSortIndicator`), so "is this list sorted" can never disagree between what's displayed
+	 * and what a drop onto it does. `null` means effectively Manual. */
+	private effectiveSortForParent(view: View, parentId: string | null): EffectiveSort | null {
+		const ancestors = parentId === null ? [view] : (this.ancestorChainFor(view.root, parentId, [view]) ?? [view]);
+		const sm = this.plugin.statusesManager;
+		const sortGovernor = sm ? sm.findSortGovernor(ancestors) : null;
+		return activeSortFor(ancestors[0] ?? {}, sortGovernor);
+	}
+
+	/** PR-4 (G22): the drop's effective target list is an Outside-Vault source Folder's own
+	 * children — its rows never carry an edge zone in the first place (G20), so this guards the
+	 * (currently unreachable in practice, but spec-mandated) case of a manually-added child row
+	 * still living in that list: the sort-gating added by this PR never applies there, keeping the
+	 * drop "exactly as it does today" regardless of any `sortMode` configured on the folder. */
+	private isOutsideSourceFolder(view: View, parentId: string | null): boolean {
+		if (parentId === null) return false;
+		const found = this.findNodeAnywhere(view.root, parentId);
+		return !!found && found.node.folderSource?.location === "outside";
+	}
+
+	/** PR-4 (G22): true when any node in `payload` (a live drag) is currently a child of
+	 * `targetParentId`'s list — a batch needs only one such row to refuse the whole drop (E13); an
+	 * inbox payload (never a bucket node) is always false. */
+	private batchHasInFolderRow(view: View, payload: DragPayload, targetParentId: string | null): boolean {
+		if (payload.kind !== "node" || payload.viewId !== view.id) return false;
+		return payload.nodeIds.some((id) => (this.findNodeParent(view.root, id, null)?.parentId ?? null) === targetParentId);
+	}
+
+	/** PR-4 (G4/G5/G20/G22): the single source of truth both `makeDropZone`'s dragover visual and
+	 * `handleDrop`'s authoritative decision call — computing it in exactly one place guarantees the
+	 * line/outline/highlight a drag shows always matches what dropping there actually does. `null`
+	 * only when `target.nodeId` itself has vanished mid-drag (`payload` may be null, since
+	 * `makeDropZone`'s dragover guards `!this.dragPayload` before ever reaching this). */
+	private assessDrop(
+		target: DropTarget,
+		zone: DropZone,
+		payload: DragPayload | null
+	): { decision: DropDecision; parentId: string | null; index: number; effectiveSort: EffectiveSort | null } | null {
+		if (target.kind !== "node") return null;
+		const view = this.plugin.viewsManager.getView(target.viewId);
+		if (!view) return null;
+		const parentInfo = this.findNodeParent(view.root, target.nodeId, null);
+		if (!parentInfo) return null;
+		const effectiveSort = this.isOutsideSourceFolder(view, parentInfo.parentId) ? null : this.effectiveSortForParent(view, parentInfo.parentId);
+		const anyInFolder = !!payload && this.batchHasInFolderRow(view, payload, parentInfo.parentId);
+		const decision = resolveDropDecision(zone, anyInFolder ? parentInfo.parentId : undefined, parentInfo.parentId, effectiveSort);
+		return { decision, parentId: parentInfo.parentId, index: parentInfo.index, effectiveSort };
+	}
+
+	/** PR-4 (G4): the target list's own display text for the refusal Notice — "Bucket" for the
+	 * view root, a Folder's label, or a unit's resolved display text (title/first-line/file name),
+	 * same text the row itself shows. */
+	private async sortedParentLabel(view: View, parentId: string | null): Promise<string> {
+		if (parentId === null) return "Bucket";
+		const found = this.findNodeAnywhere(view.root, parentId);
+		if (!found) return "Folder";
+		const node = found.node;
+		if (node.type === "meta") return node.label ?? "Folder";
+		if (!node.ref) return "Folder";
+		const info = await this.resolveRef(node.ref);
+		return info.text;
+	}
+
+	/** PR-4 (G4/E13/E14): shows the exact "<Folder> is sorted <mode>. Set it to Manual to
+	 * reorder." Notice a refused in-folder edge drop asks for. */
+	private async showSortedDropRefusedNotice(view: View, parentId: string | null, effectiveSort: EffectiveSort): Promise<void> {
+		const label = await this.sortedParentLabel(view, parentId);
+		new Notice(sortedFolderNoticeText(label, effectiveSort.mode, effectiveSort.reverse));
+	}
+
+	/** PR-4 (G5): outlines the hovered row's own containing list — never the row itself — since
+	 * the dragged item will land in that list's sorted place, not at the hovered row's position (no
+	 * line is ever drawn alongside this). `el.parentElement` is always that list: `renderNode`/
+	 * `renderApiItemRow`/`renderTruncationGroupHeader` all create a row as a direct child of
+	 * whichever list element `renderNodeList` was handed (`listEl` at the bucket root,
+	 * `childrenInner` for a nested Folder/unit) — never any other wrapper layer at the row's own
+	 * depth. Same one-at-a-time convention as `showDropIndicator`/`dropIndicatorEl`. */
+	private showSortedDropOutline(el: HTMLElement): void {
+		const list = el.parentElement;
+		if (!list) return;
+		if (this.sortedDropOutlineEl && this.sortedDropOutlineEl !== list) this.sortedDropOutlineEl.removeClass("atlas-sorted-drop-outline");
+		list.addClass("atlas-sorted-drop-outline");
+		this.sortedDropOutlineEl = list;
+	}
+
+	private clearSortedDropOutline(): void {
+		this.sortedDropOutlineEl?.removeClass("atlas-sorted-drop-outline");
+		this.sortedDropOutlineEl = null;
 	}
 
 	/** Files/blocks are opaque internals to a folder-unit until something links to them — dropping
@@ -3033,11 +3685,16 @@ export class AtlasExplorerView extends ItemView {
 
 	// --- context menus -----------------------------------------------------------------------------
 
-	private showUnitMenu(evt: MouseEvent, ref: UnitRef, view: View, node: ViewNode, displayName: string): void {
+	private showUnitMenu(evt: MouseEvent, ref: UnitRef, view: View, node: ViewNode, displayName: string, ancestors: StatusGovernance[] = [], outsideManaged = false): void {
 		const menu = new Menu();
-		menu.addItem((item) => item.setTitle("Open").setIcon("file").onClick(() => void this.openRef(ref)));
-		menu.addItem((item) => item.setTitle("Open in new tab").setIcon("file-plus").onClick(() => void this.openRef(ref, true)));
-		if (ref.kind === "file" || ref.kind === "folder") {
+		// PR-5 (R6 fix): `openRef`/`revealInNativeExplorer` only ever look up vault paths, so for an
+		// Outside-Vault-managed row (whose `ref.path` is root-relative to its external source, not a
+		// vault path) both silently do nothing. Hidden here rather than left to no-op.
+		if (!outsideManaged) {
+			menu.addItem((item) => item.setTitle("Open").setIcon("file").onClick(() => void this.openRef(ref)));
+			menu.addItem((item) => item.setTitle("Open in new tab").setIcon("file-plus").onClick(() => void this.openRef(ref, true)));
+		}
+		if (!outsideManaged && (ref.kind === "file" || ref.kind === "folder")) {
 			menu.addItem((item) => item.setTitle("Reveal in native explorer").setIcon("folder-open").onClick(() => this.revealInNativeExplorer(ref.path)));
 		}
 		// PR 16 (grilled): always offered for modules, not just governed ones — a governed module's
@@ -3053,8 +3710,23 @@ export class AtlasExplorerView extends ItemView {
 		// entirely rather than offered and doing nothing when toggled.
 		// PR-1 (G11e): same Statuses / Data source… / Refresh now / Remove data source items as an Atlas folder.
 		// The separator above is already in place, so tell the helper not to double it up.
+		// PR-1 (G6): "Sort children…" on every bucket row that can hold children — a unit row too,
+		// not just a Folder, since any row can be nested under (F6).
+		const unitStatusGovernor = this.plugin.statusesManager?.findSortGovernor([node, ...ancestors]) ?? null;
+		addSortMenuItem(menu, evt, node, unitStatusGovernor, (patch) => this.plugin.viewsManager.updateStatusGovernance(view.id, node.id, patch));
 		addSourceAndStatusItems(menu, this.plugin, this, view, node, true);
 		menu.addSeparator();
+		// PR-2.F1 (G6/G7): "Add under…" sits directly above "Duplicate (Meta)". Eligibility is judged
+		// fresh here from the live node, never from render-time state — `missing`/`filteredOut` may
+		// have changed since the row was last drawn (e.g. a data source was just added).
+		if (
+			canAddUnder({ getNode: (viewId, nodeId) => this.plugin.viewsManager?.getNode(viewId, nodeId) ?? null }, view.id, node, {
+				missing: !unitForRef(this.plugin.unitIndex.getUnits(), ref),
+				filteredOut: this.plugin.viewsManager?.managedRowFilterState?.(view.id, node) === "filteredOut",
+			})
+		) {
+			addAddUnderItem(menu, evt, (kind) => this.startAddUnder(kind, view, node));
+		}
 		// PR 13: clones this row (and its whole meta-nested subtree, if it has one) as a new sibling
 		// right after it — same underlying unit, no disk duplicate, no naming scheme (two rows with
 		// the same label is expected — see duplicateNode's own doc comment for why).
@@ -3069,7 +3741,12 @@ export class AtlasExplorerView extends ItemView {
 				// placed elsewhere in this view. PR-1 (G15a): a sourced unit confirms first.
 				.onClick(() => this.removeUnitsFromView(view.id, [node]))
 		);
-		menu.addItem((item) => item.setTitle("Place in view…").setIcon("arrow-right-left").onClick(() => this.placeInViewFlow(ref)));
+		// PR-5 (R6 fix): `placeInViewFlow` would put this row's absolute-path ref into another
+		// view, where no `UnitIndex` lookup can ever resolve it — it shows there as permanently
+		// missing. Hidden for Outside-Vault-managed rows rather than left to produce that.
+		if (!outsideManaged) {
+			menu.addItem((item) => item.setTitle("Place in view…").setIcon("arrow-right-left").onClick(() => this.placeInViewFlow(ref)));
+		}
 		// Create Module: only on a placed row for a root-level .md file (not inbox rows, not free
 		// blocks, nested or promoted files, interface notes, or non-notes).
 		addCreateModuleItem(menu, this.plugin.app.vault, unitForRef(this.plugin.unitIndex.getUnits(), ref), (file) => this.startCreateModule(file));
@@ -3089,6 +3766,284 @@ export class AtlasExplorerView extends ItemView {
 			},
 			file
 		);
+	}
+
+	/** PR-2.F1: the seam every "Add under" choice calls. PR-2.F2: Folder gets its real create-and-nest
+	 * flow here. PR-3.F1: Block does too. PR-3.F2: File does too. PR-3.F3: Module does too — every
+	 * kind now has a real flow, so the no-op in `add-under.ts` is unreachable from here (kept only
+	 * as the shared type/menu-building module). */
+	private startAddUnder(kind: AddUnderKind, view: View, node: ViewNode): void {
+		if (kind === "folder") {
+			void this.runAddUnderFolder(view, node);
+			return;
+		}
+		if (kind === "block") {
+			void this.runAddUnderBlock(view, node);
+			return;
+		}
+		if (kind === "file") {
+			void this.runAddUnderFile(view, node);
+			return;
+		}
+		if (kind === "module") {
+			void this.runAddUnderModule(view, node);
+			return;
+		}
+		startAddUnder(kind, view, node);
+	}
+
+	/** PR-2.F2 (G4) / PR-2.F3 (G10): runs the Folder add-under flow against the real `ViewsManager`
+	 * and this view's own selection state, then — once the view has re-rendered with the new row
+	 * selected and its parent expanded — hands off to the shared `noticeIfAddedRowHidden` helper
+	 * (`add-under-hidden-notice.ts`), which checks whether the new row actually has a rendered
+	 * element and, if not, names the reason (G10); the node, selection and expansion are unaffected
+	 * either way. PR-3.F1-F3 (Block/File/Module) call the same helper unchanged. */
+	private async runAddUnderFolder(view: View, node: ViewNode): Promise<void> {
+		const created = await startAddUnderFolder(this.addUnderFolderDeps(), view.id, node.id);
+		if (!created) return;
+		const signals = this.addUnderHiddenSignals(view, node, created);
+		// R2 fix: `addMetaFolder`/`setNodeCollapsed` above each already went through `save()` and so
+		// `ViewsManager.onChange` → `queueRender()` before we ever get here, which can leave a render
+		// queued via `setTimeout(0)`. A plain `await this.render()` only guarantees *this* call's own
+		// render finished — if the queued one fires mid-flight (crossing a real macrotask, e.g. a
+		// promoted block's disk read in `resolveUnit`) and supersedes it, `render()`'s own
+		// `isCurrent()` guard makes the superseded call return early while the superseding one may
+		// still be mid-build, so `this.bucketListEl` could be the newer render's list with the new
+		// row not appended yet. `noticeIfAddedRowHidden`'s own `render` step is `awaitRenderSettled()`
+		// — it follows `latestRenderPromise` until it stops changing, so the DOM check inside it
+		// always runs against a render that has actually finished.
+		void this.render();
+		await noticeIfAddedRowHidden(created.id, created.label ?? "New folder", node.label ?? unitBasename(node), {
+			render: () => this.awaitRenderSettled(),
+			getBucketListEl: () => this.bucketListEl,
+			...signals,
+		});
+	}
+
+	/** PR-3.F1 (G1) / PR-2.F3 (G10): runs the Block add-under flow against the real `ViewsManager`,
+	 * unit index and workspace — `startAddUnderBlock` itself creates the file, nests it, expands the
+	 * parent, selects the new row and opens it in the editor (G1) — then, once the view has
+	 * re-rendered with the new row selected and expanded, hands off to the shared
+	 * `noticeIfAddedRowHidden` helper the same way `runAddUnderFolder` does. The new block is opened
+	 * regardless of whether its row ends up visible in the bucket; the hidden-row check only ever
+	 * affects the Notice, never the editor. */
+	private async runAddUnderBlock(view: View, node: ViewNode): Promise<void> {
+		const created = await startAddUnderBlock(this.addUnderBlockDeps(), view.id, node.id);
+		if (!created) return;
+		const label = getFreeBlockDisplayTextFromContent("", this.plugin.settings.blockDisplayLength);
+		const signals = this.addUnderHiddenSignals(view, node, created, label);
+		void this.render();
+		await noticeIfAddedRowHidden(created.id, label, node.label ?? unitBasename(node), {
+			render: () => this.awaitRenderSettled(),
+			getBucketListEl: () => this.bucketListEl,
+			...signals,
+		});
+	}
+
+	/** PR-3.F2 (G2) / PR-2.F3 (G10): runs the File add-under flow against the real `ViewsManager`
+	 * and this view's own selection state — `startAddUnderFile` creates the note, nests it, expands
+	 * the parent and selects the new row (never opens it) — then hands off to the shared
+	 * `noticeIfAddedRowHidden` helper the same way `runAddUnderBlock`/`runAddUnderFolder` do. The new
+	 * file's display text (its basename, same as a plain note's row) is what the filter-as-cause
+	 * check in `addUnderHiddenSignals` matches against — never Block's "(empty block)" fallback. */
+	private async runAddUnderFile(view: View, node: ViewNode): Promise<void> {
+		const created = await startAddUnderFile(this.addUnderFileDeps(), view.id, node.id);
+		if (!created) return;
+		const label = unitBasename(created).replace(/\.md$/, "");
+		const signals = this.addUnderHiddenSignals(view, node, created, label);
+		void this.render();
+		await noticeIfAddedRowHidden(created.id, label, node.label ?? unitBasename(node), {
+			render: () => this.awaitRenderSettled(),
+			getBucketListEl: () => this.bucketListEl,
+			...signals,
+		});
+	}
+
+	private addUnderFileDeps(): AddUnderFileDeps {
+		const { plugin } = this;
+		return {
+			app: plugin.app,
+			getPoolFolder: () => plugin.settings.poolFolder,
+			getExcludedFolders: () => plugin.settings.excludedFolders,
+			holdUnit: (path) => plugin.unitIndex.holdUnit(path),
+			getNode: (viewId, nodeId) => plugin.viewsManager.getNode(viewId, nodeId),
+			// The same label a live row currently shows: a Folder's own label, or the resolved text
+			// `resolveRef`/`resolveOutsideManagedRowInfo` already compute for a unit row (basename, or
+			// a free block's title/first line) — never a stale value captured at the row's last render.
+			getParentLabel: async (viewId, parentId) => {
+				const parentNode = plugin.viewsManager.getNode(viewId, parentId);
+				if (!parentNode) return "";
+				if (parentNode.type === "meta") return parentNode.label ?? "";
+				const view = plugin.viewsManager.getViews().find((v) => v.id === viewId);
+				if (!view) return parentNode.ref ? unitBasename(parentNode) : "";
+				const info = this.isOutsideManagedUnit(view, parentNode) ? this.resolveOutsideManagedRowInfo(parentNode.ref!) : await this.resolveRef(parentNode.ref!);
+				return info.text;
+			},
+			placeNewUnit: (viewId, ref, parentId) => plugin.viewsManager.placeNewUnit(viewId, ref, parentId),
+			expandParent: (viewId, parentId) => plugin.viewsManager.setNodeCollapsed(viewId, parentId, false),
+			// Same selection/anchor handling as Block and Folder (E5).
+			selectOnly: (nodeId) => {
+				this.selectedInboxRefKeys.clear();
+				this.selectedBucketNodeIds.clear();
+				this.selectedBucketNodeIds.add(nodeId);
+				this.selectionAnchor = nodeId;
+				this.selectionAnchorScope = "bucket";
+			},
+		};
+	}
+
+	/** PR-3.F3 (G3) / PR-2.F3 (G10): runs the Module add-under flow against the real `ViewsManager`
+	 * and this view's own selection state — `startAddUnderModule` creates the folder-plus-note,
+	 * nests it, expands the parent and selects the new row (never opens it) — then hands off to
+	 * the shared `noticeIfAddedRowHidden` helper the same way `runAddUnderFile` does. The new
+	 * module's display text is its own basename (its ref's `path`, which for a `folder` ref is
+	 * already the plain module name with no extension to strip, unlike File's `.md`). */
+	private async runAddUnderModule(view: View, node: ViewNode): Promise<void> {
+		const created = await startAddUnderModule(this.addUnderModuleDeps(), view.id, node.id);
+		if (!created) return;
+		const label = unitBasename(created);
+		const signals = this.addUnderHiddenSignals(view, node, created, label);
+		void this.render();
+		await noticeIfAddedRowHidden(created.id, label, node.label ?? unitBasename(node), {
+			render: () => this.awaitRenderSettled(),
+			getBucketListEl: () => this.bucketListEl,
+			...signals,
+		});
+	}
+
+	private addUnderModuleDeps(): AddUnderModuleDeps {
+		const { plugin } = this;
+		return {
+			app: plugin.app,
+			getPoolFolder: () => plugin.settings.poolFolder,
+			getExcludedFolders: () => plugin.settings.excludedFolders,
+			holdUnit: (path) => plugin.unitIndex.holdUnit(path),
+			getNode: (viewId, nodeId) => plugin.viewsManager.getNode(viewId, nodeId),
+			// Same live-label resolver as File's own deps (see its doc comment above).
+			getParentLabel: async (viewId, parentId) => {
+				const parentNode = plugin.viewsManager.getNode(viewId, parentId);
+				if (!parentNode) return "";
+				if (parentNode.type === "meta") return parentNode.label ?? "";
+				const view = plugin.viewsManager.getViews().find((v) => v.id === viewId);
+				if (!view) return parentNode.ref ? unitBasename(parentNode) : "";
+				const info = this.isOutsideManagedUnit(view, parentNode) ? this.resolveOutsideManagedRowInfo(parentNode.ref!) : await this.resolveRef(parentNode.ref!);
+				return info.text;
+			},
+			placeNewUnit: (viewId, ref, parentId) => plugin.viewsManager.placeNewUnit(viewId, ref, parentId),
+			expandParent: (viewId, parentId) => plugin.viewsManager.setNodeCollapsed(viewId, parentId, false),
+			// Same selection/anchor handling as File, Block and Folder (E5).
+			selectOnly: (nodeId) => {
+				this.selectedInboxRefKeys.clear();
+				this.selectedBucketNodeIds.clear();
+				this.selectedBucketNodeIds.add(nodeId);
+				this.selectionAnchor = nodeId;
+				this.selectionAnchorScope = "bucket";
+			},
+			// R1: a flushed, awaited save — same as `startCreateFromMeta`'s own `save` dep — so a
+			// rejection surfaces as a "created but not saved" Notice instead of vanishing into the
+			// debounced persist's fire-and-forget write.
+			save: () => plugin.flushSave(),
+		};
+	}
+
+	private addUnderBlockDeps(): AddUnderBlockDeps {
+		const { plugin } = this;
+		return {
+			app: plugin.app,
+			getPoolFolder: () => plugin.settings.poolFolder,
+			holdUnit: (path) => plugin.unitIndex.holdUnit(path),
+			getNode: (viewId, nodeId) => plugin.viewsManager.getNode(viewId, nodeId),
+			placeUnit: (viewId, ref, parentId) => plugin.viewsManager.placeUnit(viewId, ref, parentId),
+			expandParent: (viewId, parentId) => plugin.viewsManager.setNodeCollapsed(viewId, parentId, false),
+			// R1 fix (same as Folder): clears a prior inbox selection too (E5 — bucket and inbox
+			// selections are mutually exclusive) and sets the anchor to the new row, so a later
+			// shift-click extends from it rather than a stale pre-add anchor.
+			selectOnly: (nodeId) => {
+				this.selectedInboxRefKeys.clear();
+				this.selectedBucketNodeIds.clear();
+				this.selectedBucketNodeIds.add(nodeId);
+				this.selectionAnchor = nodeId;
+				this.selectionAnchorScope = "bucket";
+			},
+		};
+	}
+
+	/** PR-2.F3 (G10): the real-governance signals `noticeIfAddedRowHidden` classifies into a reason,
+	 * computed fresh against the live tree right after the add — `parentNode` is whatever the caller
+	 * captured at menu-build time, possibly stale by now, so this re-reads the live parent and child
+	 * by id before resolving status. Filter/truncation/hidden-status are read-only lookups; nothing
+	 * here writes `filterText`, `truncatedStatuses` or `expandedTruncationGroups` (fence).
+	 *
+	 * R1 fix: `renderNode`'s meta branch (src/explorer-view.ts) renders a Folder row unconditionally
+	 * — only a unit row returns early on `!matchesFilter`. So an active filter can never be why a new
+	 * Folder's own row fails to render; naming it anyway broke G10's "whichever applies" whenever a
+	 * filter happened to be active while adding a Folder (the row always shows regardless).
+	 *
+	 * PR-3.F1: a unit-kind row (so far Block and File, via `runAddUnderBlock`/`runAddUnderFile`) is
+	 * different — the filter *can* be the cause, but only when that new row's own display text
+	 * itself fails `matchesFilter`, since a matching row bypasses hide and truncate the same way it
+	 * does today (never a blanket "any filter active" check). The caller computes that display text
+	 * itself (Block: always `getFreeBlockDisplayTextFromContent`'s empty-content fallback,
+	 * `"(empty block)"`; File: the new note's own basename; Module, PR-3.F3: the new module's own
+	 * basename, its ref's `path`) and passes it in as `displayText`. Folder's own call site never
+	 * needs a real value here, since its `newNode.type` is always `"meta"`. */
+	private addUnderHiddenSignals(view: View, parentNode: ViewNode, newNode: ViewNode, displayText = ""): AddUnderHiddenNoticeSignals {
+		const filterActive = newNode.type === "unit" && !this.matchesFilter(displayText);
+		const liveParent = this.plugin.viewsManager.getNode(view.id, parentNode.id);
+		if (!liveParent) return { filterActive };
+		const liveNode = liveParent.children.find((c) => c.id === newNode.id) ?? newNode;
+		const ancestors: StatusGovernance[] = [liveParent, ...this.ancestorsForNode(view, liveParent.id)];
+		const sm = this.plugin.statusesManager;
+		const governor = sm.findGoverningAncestor(ancestors, liveNode);
+		const status = governor ? sm.resolveNodeStatus(ancestors, liveNode) : null;
+		if (!status || !governor) return { filterActive };
+		const hiddenBySortOrGrouping = (!!status.isCompleted && !!governor.hideCompleted) || (!!status.isCancelled && !!governor.hideCancelled);
+		if (hiddenBySortOrGrouping) return { filterActive, hiddenBySortOrGrouping };
+		const config = governor.truncatedStatuses?.[status.id];
+		if (!config?.enabled) return { filterActive };
+		const sameStatusSiblings = liveParent.children.filter((sibling) => sm.resolveNodeStatus(ancestors, sibling)?.id === status.id).length;
+		if (sameStatusSiblings < 2) return { filterActive };
+		const key = (governor === view ? `view:${view.id}` : `node:${(governor as ViewNode).id}`) + `:${status.id}`;
+		if (this.expandedTruncationGroups.has(key)) return { filterActive };
+		return { filterActive, truncatedGroupLabel: config.label?.trim() || status.label };
+	}
+
+	/** The ancestors chain (nearest first, ending with `view`) for `targetId`'s own parent — the
+	 * same shape `renderNodeList` would pass as `ancestors` for `targetId` itself, not including
+	 * `targetId`. There's no stored parent pointer on `ViewNode`, so this walks the live tree fresh;
+	 * cheap enough for the one-off post-add check above, not meant for the render hot path. */
+	private ancestorsForNode(view: View, targetId: string): StatusGovernance[] {
+		const walk = (nodes: ViewNode[], chain: StatusGovernance[]): StatusGovernance[] | null => {
+			for (const candidate of nodes) {
+				if (candidate.id === targetId) return chain;
+				const found = walk(candidate.children, [candidate, ...chain]);
+				if (found) return found;
+			}
+			return null;
+		};
+		return walk(view.root, [view]) ?? [view];
+	}
+
+	private addUnderFolderDeps(): AddUnderFolderDeps {
+		const { plugin } = this;
+		return {
+			app: plugin.app,
+			getNode: (viewId, nodeId) => plugin.viewsManager.getNode(viewId, nodeId),
+			addMetaFolder: (viewId, parentId, label) => plugin.viewsManager.addMetaFolder(viewId, parentId, label),
+			expandParent: (viewId, parentId) => plugin.viewsManager.setNodeCollapsed(viewId, parentId, false),
+			// R1 fix: bucket and inbox selections are mutually exclusive (E5) — right-clicking a
+			// bucket row doesn't itself change the selection, so a prior inbox selection could still
+			// be live when this runs. Clear it too, and set the anchor the same way
+			// `buildNodeDragPayload` does (src/explorer-view.ts), so a later shift-click extends from
+			// the new row rather than a stale anchor left over from before the add.
+			selectOnly: (nodeId) => {
+				this.selectedInboxRefKeys.clear();
+				this.selectedBucketNodeIds.clear();
+				this.selectedBucketNodeIds.add(nodeId);
+				this.selectionAnchor = nodeId;
+				this.selectionAnchorScope = "bucket";
+			},
+		};
 	}
 
 	private startCreateFromMeta(kind: CreateKind, view: View, node: ViewNode): void {
@@ -3332,7 +4287,7 @@ export class AtlasExplorerView extends ItemView {
 		new ConfirmModal(this.plugin.app, message, "Remove", removeAll).open();
 	}
 
-	private showMetaFolderMenu(evt: MouseEvent, node: ViewNode, view: View): void {
+	private showMetaFolderMenu(evt: MouseEvent, node: ViewNode, view: View, ancestors: StatusGovernance[] = []): void {
 		const menu = new Menu();
 		// PR 13: same clone-as-sibling action as a unit row's context menu — a meta folder has no
 		// disk identity to begin with, so "duplicating" it just clones the organizational label and
@@ -3348,12 +4303,20 @@ export class AtlasExplorerView extends ItemView {
 					}).open();
 				})
 		);
-		// Create: turns this meta folder into a real block, file or module (one item on disk, the row
-		// keeps its place, settings and children). Offered on every meta folder, whatever its children,
-		// depth or fold state; ignores any multi-selection, so it only ever acts on this one row.
+		// PR-2.F1 (G6): "Add under…" sits directly above "Replace with…", i.e. after "Rename folder".
+		if (canAddUnder({ getNode: (viewId, nodeId) => this.plugin.viewsManager?.getNode(viewId, nodeId) ?? null }, view.id, node)) {
+			addAddUnderItem(menu, evt, (kind) => this.startAddUnder(kind, view, node));
+		}
+		// Replace with… (PR-1.F1: renamed from "Create" to sit beside "Swap with…"): turns this meta
+		// folder into a real block, file or module (one item on disk, the row keeps its place, settings
+		// and children). Offered on every meta folder, whatever its children, depth or fold state;
+		// ignores any multi-selection, so it only ever acts on this one row.
 		addCreateItem(menu, evt, (kind) => this.startCreateFromMeta(kind, view, node));
-		// PR-2 (G3): on an Atlas folder, right after "Create". Only "Swap with…" applies here (G4).
+		// PR-2 (G3): on an Atlas folder, right after "Replace with…". Only "Swap with…" applies here (G4).
 		addSwapItems(menu, this, view, node, node.label ?? "");
+		// PR-1 (G6): "Sort children…" on every Folder, any depth, whether it has children yet or not.
+		const folderStatusGovernor = this.plugin.statusesManager?.findSortGovernor([node, ...ancestors]) ?? null;
+		addSortMenuItem(menu, evt, node, folderStatusGovernor, (patch) => this.plugin.viewsManager.updateStatusGovernance(view.id, node.id, patch));
 		addSourceAndStatusItems(menu, this.plugin, this, view, node);
 		menu.addSeparator();
 		menu.addItem((item) =>

@@ -105,6 +105,14 @@ When enabled, the governed children each show a colored dot for the set's status
 
 **Clicking a status dot directly** opens a small popup listing every status in the governing set, with its own color swatch — pick one to change that specific item's status (e.g. Triage → Complete), independent of its siblings. The item's own row click (open) and right-click (full menu) are unaffected — only the dot itself has this behavior. For a module whose icon is currently a status dot, viewing its contents moves to the right-click menu ("View module contents") instead of the plain click, which now means "change status" like everywhere else.
 
+## Sorting
+
+Any folder's or unit's right-click menu, and the Bucket root's own header menu, offer a **Sort children…** submenu for arranging what's directly underneath it: **Manual** (the default — drag-and-drop order), **A-Z**, **Modified**, **Time added**, and **Status** (only offered when this item, or an ancestor reaching down to it, governs a status set — see Statuses above). A-Z, Modified and Time added apply to this item's direct children only, never to its subfolders' own children; Status is the one mode that keeps applying as you go deeper, following the same governor an explicit setting further down doesn't override. **Reverse order** flips the current mode's direction — Z-A, oldest-first, oldest-added-first, or reversed rank — and is disabled (greyed out) while the mode is Manual, since Manual has no direction to flip. Choosing any mode resets Reverse back off. Ties (equal rank, same mtime, and so on) keep their existing manual order among themselves, in either direction; Folders, API rows and anything else with no file time of its own always sort after everything that has one.
+
+A folder or unit that's actually sorted by anything other than Manual shows a small icon next to its name (and the Bucket root shows the same icon in its own header) — hover it for a tooltip naming the mode and direction. Sorting is purely about render order: it never moves, renames or touches any file, and never rewrites the stored manual order underneath — switch back to Manual at any time and the original arrangement is exactly as it was.
+
+Modified-sort's file-time snapshot only refreshes when the explorer actually has a reason to — the pane regaining focus, switching to that view, or something about the tree or a sort setting changing — not on every autosave keystroke, and never mid-drag (a trigger that fires while you're dragging an item is deferred until the drag ends).
+
 ## Commands
 
 | Command | What it does |

@@ -385,6 +385,8 @@ export class ItemView {}
 export class MenuItem {
 	title = "";
 	icon = "";
+	checked = false;
+	disabled = false;
 	clickHandler: (() => void) | null = null;
 	setTitle(title: string): this {
 		this.title = title;
@@ -392,6 +394,14 @@ export class MenuItem {
 	}
 	setIcon(icon: string): this {
 		this.icon = icon;
+		return this;
+	}
+	setChecked(checked: boolean): this {
+		this.checked = checked;
+		return this;
+	}
+	setDisabled(disabled: boolean): this {
+		this.disabled = disabled;
 		return this;
 	}
 	onClick(cb: () => void): this {
@@ -450,6 +460,15 @@ export const Platform = { isMobile: false, isDesktop: true };
 
 export function setIcon(_el: HTMLElement, _icon: string): void {}
 export function setTooltip(_el: HTMLElement, _tip: string): void {}
+
+/** PR-2 (T12): records every `addIcon()` call so tests can assert the plugin registers its own
+ * sort-az icon id at load time. `addIconCalls.length = 0` between tests, not a fresh array —
+ * matches `Menu.shownAtPosition`'s own pattern just above, which other suites already reset the
+ * same way. */
+export const addIconCalls: { iconId: string; svgContent: string }[] = [];
+export function addIcon(iconId: string, svgContent: string): void {
+	addIconCalls.push({ iconId, svgContent });
+}
 
 export function debounce<A extends unknown[]>(fn: (...args: A) => void, wait = 0, resetTimer = false) {
 	let timer: ReturnType<typeof setTimeout> | undefined;

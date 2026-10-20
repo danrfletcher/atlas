@@ -146,6 +146,10 @@ function sanitizeApiFields(node: ViewNode): void {
 				rawAction === "none" || rawAction === "run-command" || rawAction === "open-attachment" ? rawAction : undefined;
 			const command = typeof raw.command === "string" ? raw.command : undefined;
 			node.apiSource = {
+				// PR-3 R1 fix: stamp the discriminant on every load, not only when the modal builds a
+				// fresh config — without it, every API source had `type === undefined` after a reload,
+				// which narrows to DataSourceConfig's `else` branch instead of `type === "api"`.
+				type: "api",
 				url: raw.url,
 				method: "GET",
 				mapping: {
@@ -216,6 +220,35 @@ function sanitizeApiFields(node: ViewNode): void {
 	sanitizeFolderSource(node);
 	sanitizeCsvSource(node);
 	sanitizeMarkdownTableSource(node);
+
+	// PR-4 R3 fix: data.json saved by a build predating the setApiSource/setCsvSource/
+	// setMarkdownTableSource/setFolderSource mutual-exclusion fix can have more than one source field
+	// set at once. Self-heal on load so a reload never shows more than one data source for a node the
+	// live setters can no longer produce.
+	//
+	// PR-1 R4 fix: when both apiSource and folderSource are present, prefer folderSource and drop
+	// apiSource (not the api > folder precedence the modal constructor uses for its own unrelated
+	// "which type is pre-selected" question). The only way legacy data.json reaches this state is the
+	// pre-fix bug where switching API -> Folder left the old apiSource in place alongside the new
+	// folderSource — so folderSource is the user's most recent, intended choice, and discarding it
+	// instead would lose its irreplaceable config (path, filters, removedRefs). Log the drop since
+	// apiSource's own fetch config (and, for a Basic/Bearer source, its device-local headers) is
+	// unrecoverable once this runs. csv/markdown-table still fall back to the folder > csv >
+	// markdown-table precedence below; a legacy node can only ever have one of those three plus,
+	// possibly, apiSource, since their own live setters have always been mutually exclusive.
+	if (node.folderSource) {
+		if (node.apiSource) {
+			console.warn(`[Atlas] Dropping a legacy apiSource on node "${node.id}" in favor of its folderSource (both were set in data.json).`);
+		}
+		node.apiSource = undefined;
+		node.csvSource = undefined;
+		node.markdownTableSource = undefined;
+	} else if (node.apiSource) {
+		node.csvSource = undefined;
+		node.markdownTableSource = undefined;
+	} else if (node.csvSource) {
+		node.markdownTableSource = undefined;
+	}
 
 	for (const child of node.children) sanitizeApiFields(child);
 }
@@ -528,9 +561,10 @@ interface FoundNode {
 	index: number;
 }
 
-/** A managed row found by `ViewsManager.collectManagedMatches`: its parent list, its slot there, and how
- * deep it sits in the view. */
-type ManagedMatch = { list: ViewNode[]; index: number; node: ViewNode; depth: number };
+/** A managed row found by `ViewsManager.collectManagedMatches`: its parent list, the `ViewNode` that
+ * list belongs to (`undefined` only when the row sits at the view's own top level, with no parent
+ * row to attach a placeholder to), its slot there, and how deep it sits in the view. */
+type ManagedMatch = { list: ViewNode[]; parent: ViewNode | undefined; index: number; node: ViewNode; depth: number };
 
 /**
  * F9 — views (named arrangements of units into a bucket tree) with storage/integrity. The bucket
@@ -541,7 +575,7 @@ type ManagedMatch = { list: ViewNode[]; index: number; node: ViewNode; depth: nu
 export class ViewsManager {
 	private views: View[];
 	private activeViewId: string;
-	private changeListeners = new Set<() => void>();
+	private changeListeners = new Set<(persisted: boolean) => void>();
 	/** PR-1.S1 (E10): false until `metadataCache` has resolved, seeded in the constructor (T1). */
 	private metadataResolved: boolean;
 	/** PR-1.F2 R2 fix: bumped on every change notification, so `getFolderSourceOwners`'s cache knows
@@ -559,21 +593,28 @@ export class ViewsManager {
 		this.metadataResolved = metadataCacheIdle(app);
 	}
 
-	onChange(cb: () => void): () => void {
+	/** PR-2 (R3): `persisted` is `true` only for a call that came through `save()` — a real,
+	 * persisted structural/sort change — and `false` for a bare `notifyChange()`, which just
+	 * nudges a re-render for something only visible on screen (a note edit's metadata resolve, a
+	 * no-op data-source refresh) without anything in the tree actually changing. A listener that
+	 * must fire only on "the tree changes" (G9's Modified-sort refresh gate) reads this flag
+	 * instead of treating every notification as a tree change. */
+	onChange(cb: (persisted: boolean) => void): () => void {
 		this.changeListeners.add(cb);
 		return () => this.changeListeners.delete(cb);
 	}
 
 	private save(): void {
 		this.persist();
-		this.notifyChange();
+		this.notifyChange(true);
 	}
 
 	/** Re-renders listeners without persisting anything — for a change that is only visible on screen
-	 * (e.g. an Outside-Vault source's unresolved/reconnected state), which `save` alone would skip. */
-	notifyChange(): void {
+	 * (e.g. an Outside-Vault source's unresolved/reconnected state), which `save` alone would skip.
+	 * `persisted` defaults to `false` here; only `save()` ever passes `true` (see `onChange`). */
+	notifyChange(persisted = false): void {
 		this.folderSourceOwnersVersion++;
-		for (const cb of this.changeListeners) cb();
+		for (const cb of this.changeListeners) cb(persisted);
 	}
 
 	/** PR-1.F2 R2 fix: one id→`FolderSourceConfig` map for `viewId`'s managed-row owners, built with a
@@ -801,8 +842,22 @@ export class ViewsManager {
 	 * PR-3.F1 (R2 review): returns the node that was actually moved or created, rather than leaving
 	 * the caller to re-find it via `getNodeIdForRef` — a second `findUnitNode` walk after a duplicated
 	 * ref (PR 13) has more than one placement can resolve to the *other* copy, not the one this call
-	 * just moved. */
-	placeUnit(viewId: string, ref: UnitRef, parentId: string | null): ViewNode | null {
+	 * just moved.
+	 *
+	 * PR-1 (G10/G15): also stamps `placedAt` — fresh on both branches, since placing a unit
+	 * always means "into its current parent right now," whether that's a brand-new node or one
+	 * moved here from wherever it was placed before (a drag-reorder within the same parent goes
+	 * through `moveNode` instead, which only restamps on an actual parent change).
+	 *
+	 * PR-3 (G1/E1 for the inbox): `position`, when given, is the index among `parentId`'s (or the
+	 * bucket root's) `children` this unit lands at — an inbox drop on a row's edge, not just its
+	 * middle. Omitted (the only way every pre-PR-3 caller still calls this), it appends, same as
+	 * before. Out of range, it clamps to the end rather than throwing or silently dropping the
+	 * unit. Unlike `moveNode`, this never needs the same-parent downward-index adjustment: a unit
+	 * coming from the inbox is by definition not already placed anywhere in this view, so the
+	 * "already placed" branch below only ever fires for a *different* prior parent, never this
+	 * same `targetChildren` array. */
+	placeUnit(viewId: string, ref: UnitRef, parentId: string | null, position?: number): ViewNode | null {
 		const view = this.getView(viewId);
 		if (!view) return null;
 		const existing = this.findUnitNode(view.root, ref);
@@ -810,13 +865,42 @@ export class ViewsManager {
 		const parent = parentId ? this.findNode(view.root, parentId) : null;
 		const targetChildren = parent ? parent.node.children : view.root;
 		let node: ViewNode;
+		const insert = (n: ViewNode): void => {
+			if (position === undefined) targetChildren.push(n);
+			else targetChildren.splice(Math.max(0, Math.min(position, targetChildren.length)), 0, n);
+		};
 		if (existing) {
 			[node] = existing.siblings.splice(existing.index, 1);
-			targetChildren.push(node);
+			node.placedAt = Date.now();
+			insert(node);
 		} else {
-			node = { id: generateNodeId(), type: "unit", ref, children: [] };
-			targetChildren.push(node);
+			node = { id: generateNodeId(), type: "unit", ref, children: [], placedAt: Date.now() };
+			insert(node);
 		}
+		this.save();
+		return node;
+	}
+
+	/** PR-3.F2 R1 fix: appends a brand-new node for `ref` under `parentId`, and never relocates an
+	 * existing placement of the same ref anywhere else in the view — unlike `placeUnit`, which
+	 * moves one in instead of creating a duplicate (the right call for "Place in view…" on a ref
+	 * the user picked deliberately). "Add under" kinds (File now, Module later) create a brand-new
+	 * file/folder on disk and must nest *that*, not silently relocate some unrelated existing node
+	 * that happens to share its freshly-typed name — including a greyed missing row whose file is
+	 * gone but whose node (and whatever subtree it still carries) lingers in the view (missing refs
+	 * are never auto-removed), or, worse, an existing node that is an *ancestor* of `parentId`:
+	 * `placeUnit` would splice that ancestor out of its current spot and push it into its own
+	 * descendant's children, creating a cycle and silently dropping the whole subtree out of
+	 * `view.root`. Always creating a fresh node here sidesteps both cases entirely — nothing is
+	 * ever spliced out of its current place. Returns the new node, or `null` only if the view
+	 * itself is gone (an unresolved `parentId` falls back to the view root, same as `placeUnit`). */
+	placeNewUnit(viewId: string, ref: UnitRef, parentId: string | null): ViewNode | null {
+		const view = this.getView(viewId);
+		if (!view) return null;
+		const parent = parentId ? this.findNode(view.root, parentId) : null;
+		const targetChildren = parent ? parent.node.children : view.root;
+		const node: ViewNode = { id: generateNodeId(), type: "unit", ref, children: [] };
+		targetChildren.push(node);
 		this.save();
 		return node;
 	}
@@ -1010,10 +1094,12 @@ export class ViewsManager {
 		return changed;
 	}
 
+	/** PR-1 (G10): a new Folder is "placed" into its parent (or the view root) the moment it's
+	 * created, so it's stamped the same as any other new node. */
 	addMetaFolder(viewId: string, parentId: string | null, label: string): ViewNode | null {
 		const view = this.getView(viewId);
 		if (!view) return null;
-		const node: ViewNode = { id: generateNodeId(), type: "meta", label: label.trim() || "New folder", children: [] };
+		const node: ViewNode = { id: generateNodeId(), type: "meta", label: label.trim() || "New folder", children: [], placedAt: Date.now() };
 		const parent = parentId ? this.findNode(view.root, parentId) : null;
 		(parent ? parent.node.children : view.root).push(node);
 		this.save();
@@ -1055,6 +1141,11 @@ export class ViewsManager {
 		const found = view && this.findNode(view.root, nodeId);
 		if (!found) return null;
 		const clone = this.cloneNode(found.node);
+		// PR-1 (G10/G16/E15): the clone's own root gets a fresh stamp (it's being newly placed as
+		// a sibling, right now); its cloned subtree keeps each node's original stamp unchanged —
+		// `cloneNode`'s `{ ...node }` spread already carried `placedAt` over for every descendant,
+		// so only this top-level override is needed.
+		clone.placedAt = Date.now();
 		found.siblings.splice(found.index + 1, 0, clone);
 		this.save();
 		return clone;
@@ -1126,7 +1217,23 @@ export class ViewsManager {
 	 * into its own descendant, or onto itself (Part 4 edge case / PR 12 — would disconnect the tree
 	 * or self-reference). PR 12: any node can now be a parent, not just meta folders — meta-nesting
 	 * via drop (issue 3) lets a module/file/block become an organizational parent the same way a
-	 * meta folder already could, without a real disk move. */
+	 * meta folder already could, without a real disk move.
+	 *
+	 * PR-1 (G10): also restamps `placedAt` — but only when the target parent container is actually
+	 * a *different* array from the one the node is moving out of (`samePParent`, captured before
+	 * either splice touches either array). A same-parent reorder (drag within one list) leaves the
+	 * stamp alone; moving to a different parent (including moving to/from the view root) always
+	 * counts as a fresh placement, same as `placeUnit`.
+	 *
+	 * PR-3 (G1/E1): `index` is always read against the array as it stood *before* this call removes
+	 * the node from it — the only state an edge-drop caller (`explorer-view.ts`'s `handleDrop`) can
+	 * ever see when it reads the target's position to build the index it passes in. For a
+	 * same-parent move, removing the node first closes a gap at its old slot; if that old slot sat
+	 * *before* the requested index, every later slot shifts left by one, so the index is adjusted by
+	 * one to compensate — otherwise a downward move lands one slot too far right (the bug the plan's
+	 * handoff notes call out by name). E1: when the adjusted index resolves back to the node's own
+	 * old slot (dropping on its own edge, or on the edge that already leaves it where it is), this
+	 * is a no-op — the node is spliced back into the exact slot it just vacated, with no save. */
 	moveNode(viewId: string, nodeId: string, newParentId: string | null, index: number): boolean {
 		const view = this.getView(viewId);
 		if (!view) return false;
@@ -1137,9 +1244,20 @@ export class ViewsManager {
 		const newParent = newParentId ? this.findNode(view.root, newParentId) : null;
 		if (newParentId && !newParent) return false;
 
-		found.siblings.splice(found.index, 1);
 		const targetChildren = newParent ? newParent.node.children : view.root;
-		targetChildren.splice(Math.max(0, Math.min(index, targetChildren.length)), 0, found.node);
+		const samePParent = targetChildren === found.siblings;
+		const oldIndex = found.index;
+		let targetIndex = index;
+		if (samePParent && oldIndex < targetIndex) targetIndex -= 1;
+
+		found.siblings.splice(oldIndex, 1);
+		const clampedIndex = Math.max(0, Math.min(targetIndex, targetChildren.length));
+		if (samePParent && clampedIndex === oldIndex) {
+			found.siblings.splice(oldIndex, 0, found.node); // E1: restores the exact pre-call array.
+			return true;
+		}
+		if (!samePParent) found.node.placedAt = Date.now();
+		targetChildren.splice(clampedIndex, 0, found.node);
 		this.save();
 		return true;
 	}
@@ -1151,10 +1269,13 @@ export class ViewsManager {
 	 * write"), while view mode reads that view's own set OR'd with the global set (so a Global-view
 	 * dismiss cascades here without this method needing to enumerate views itself). */
 	getInboxUnits(allUnits: Unit[], viewId: string, mode: "view" | "global", unitIndex?: UnitIndex): Unit[] {
-		const placed =
-			mode === "global"
-				? allUnits.filter((u) => !this.isPlacedAnywhere(unitToRef(u)))
-				: allUnits.filter((u) => !this.isPlaced(viewId, unitToRef(u)));
+		let placed: Unit[];
+		if (mode === "global") {
+			const placedKeys = this.placedRefKeys();
+			placed = allUnits.filter((u) => !placedKeys.has(unitRefKey(unitToRef(u))));
+		} else {
+			placed = allUnits.filter((u) => !this.isPlaced(viewId, unitToRef(u)));
+		}
 		if (!unitIndex) return placed;
 		return placed.filter((u) => {
 			const ref = unitToRef(u);
@@ -1169,10 +1290,13 @@ export class ViewsManager {
 	 * dismiss set; view reads that view's own set OR'd with global), so toggling never reveals a row
 	 * that `getInboxUnits` wouldn't otherwise have hidden for the same `(viewId, mode)`. */
 	getDismissedInboxUnits(allUnits: Unit[], viewId: string, mode: "view" | "global", unitIndex: UnitIndex): Unit[] {
-		const placed =
-			mode === "global"
-				? allUnits.filter((u) => !this.isPlacedAnywhere(unitToRef(u)))
-				: allUnits.filter((u) => !this.isPlaced(viewId, unitToRef(u)));
+		let placed: Unit[];
+		if (mode === "global") {
+			const placedKeys = this.placedRefKeys();
+			placed = allUnits.filter((u) => !placedKeys.has(unitRefKey(unitToRef(u))));
+		} else {
+			placed = allUnits.filter((u) => !this.isPlaced(viewId, unitToRef(u)));
+		}
 		return placed.filter((u) => {
 			const ref = unitToRef(u);
 			if (unitIndex.isLinkOnlyInNoAutoPromoteFolder(u)) return false;
@@ -1347,7 +1471,12 @@ export class ViewsManager {
 	 * R1 fix: `apiSource`, `csvSource`, and (PR-8) `markdownTableSource` share the same `apiCache`/
 	 * `apiAwaitingConfirmation` fields (all three produce the same kind of placeholder row), so setting
 	 * one live must clear the other two — otherwise they'd all keep refreshing into the same state and
-	 * stomp each other's rows. */
+	 * stomp each other's rows.
+	 *
+	 * PR-4 R3 fix: a live source is also mutually exclusive with `folderSource` — without this, a
+	 * Folder the user switches from "Folder" to "API" kept reconciling its old folderSource children
+	 * alongside the new API placeholder rows, and the modal's own `initial ? "api" : ...` precedence in
+	 * its constructor would misread the stale `apiSource` as still current on next open. */
 	setApiSource(viewId: string, nodeId: string, source: ApiSourceConfig | undefined): void {
 		const view = this.getView(viewId);
 		const found = view && this.findNode(view.root, nodeId);
@@ -1357,6 +1486,7 @@ export class ViewsManager {
 		if (source) {
 			found.node.csvSource = undefined;
 			found.node.markdownTableSource = undefined;
+			found.node.folderSource = undefined;
 		}
 		if (!source || hadOtherSource) {
 			found.node.apiCache = undefined;
@@ -1369,7 +1499,8 @@ export class ViewsManager {
 	 * exact mirror of `setApiSource`, since a CSV source produces the same kind of placeholder rows and
 	 * the same "removal keeps the rows as static, drops only cache/confirmation" rule applies.
 	 *
-	 * R1 fix: mirrors `setApiSource`'s clearing of the other source types — see its doc comment. */
+	 * R1 fix: mirrors `setApiSource`'s clearing of the other source types — see its doc comment.
+	 * PR-4 R3 fix: also mirrors its clearing of `folderSource` — see `setApiSource`'s doc comment. */
 	setCsvSource(viewId: string, nodeId: string, source: CsvSourceConfig | undefined): void {
 		const view = this.getView(viewId);
 		const found = view && this.findNode(view.root, nodeId);
@@ -1379,6 +1510,7 @@ export class ViewsManager {
 		if (source) {
 			found.node.apiSource = undefined;
 			found.node.markdownTableSource = undefined;
+			found.node.folderSource = undefined;
 		}
 		if (!source || hadOtherSource) {
 			found.node.apiCache = undefined;
@@ -1392,7 +1524,8 @@ export class ViewsManager {
 	 * produces the same kind of placeholder rows and the same "removal keeps the rows as static, drops
 	 * only cache/confirmation" rule applies.
 	 *
-	 * R1 fix: mirrors `setApiSource`'s clearing of the other source types — see its doc comment. */
+	 * R1 fix: mirrors `setApiSource`'s clearing of the other source types — see its doc comment.
+	 * PR-4 R3 fix: also mirrors its clearing of `folderSource` — see `setApiSource`'s doc comment. */
 	setMarkdownTableSource(viewId: string, nodeId: string, source: MarkdownTableSourceConfig | undefined): void {
 		const view = this.getView(viewId);
 		const found = view && this.findNode(view.root, nodeId);
@@ -1402,6 +1535,7 @@ export class ViewsManager {
 		if (source) {
 			found.node.apiSource = undefined;
 			found.node.csvSource = undefined;
+			found.node.folderSource = undefined;
 		}
 		if (!source || hadOtherSource) {
 			found.node.apiCache = undefined;
@@ -1414,7 +1548,13 @@ export class ViewsManager {
 	 * "Remove data source"). Unlike `setApiSource`, removal needs no special-case cleanup: Folder-
 	 * source children are ordinary real `ViewNode` units (not placeholder rows tied to a live source),
 	 * so they simply stop being managed/refreshed and stay exactly where they are, like any other
-	 * manually-placed unit. */
+	 * manually-placed unit.
+	 *
+	 * PR-4 R3 fix: mirrors `setApiSource`'s mutual exclusion the other direction — a live Folder source
+	 * clears `apiSource`/`csvSource`/`markdownTableSource` (and their shared cache/confirmation fields)
+	 * the same way setting one of those already clears `folderSource`. Without this, a Folder the user
+	 * switched from "API" to "Folder" kept fetching and rendering its old API placeholder rows next to
+	 * the new real children. */
 	setFolderSource(viewId: string, nodeId: string, source: FolderSourceConfig | undefined): void {
 		const view = this.getView(viewId);
 		const found = view && this.findNode(view.root, nodeId);
@@ -1422,7 +1562,22 @@ export class ViewsManager {
 		// PR-1.F2 (G4): only a change to the rules is a definition that flags rows. An unchanged save, or a
 		// mode change alone, leaves every flag as it was.
 		const rulesBefore = JSON.stringify(found.node.folderSource?.filters ?? null);
-		found.node.folderSource = source;
+		// PR-4 R11 fix: `removedRefs` keys only make sense within the target this source was pointed at
+		// when they were recorded — retargeting to a different folder, or switching Inside/Outside
+		// (an entirely different ref namespace, PR-4 R8), makes the old keys meaningless. Without this,
+		// a user who removed a row from one folder and later repoints the same source elsewhere would
+		// find rows silently missing there too, with no way back short of deleting and recreating the
+		// source.
+		const previous = found.node.folderSource;
+		const retargeted = !!previous && !!source && (previous.path !== source.path || previous.location !== source.location);
+		found.node.folderSource = retargeted ? { ...source, removedRefs: undefined } : source;
+		if (source) {
+			found.node.apiSource = undefined;
+			found.node.csvSource = undefined;
+			found.node.markdownTableSource = undefined;
+			found.node.apiCache = undefined;
+			found.node.apiAwaitingConfirmation = undefined;
+		}
 		if (view && rulesBefore !== JSON.stringify(source?.filters ?? null)) this.applyRulesToHiddenAtSave(view, nodeId, source);
 		this.save();
 	}
@@ -1467,6 +1622,9 @@ export class ViewsManager {
 				children: [],
 				folderSourceManaged: true,
 				folderSourceOwnerId: ownerId,
+				// PR-1 (G10/E15): a new Folder-source row is placed the moment it's discovered,
+				// same stamping rule as any other new node.
+				placedAt: Date.now(),
 			}),
 			{
 				sourceNodeId: ownerId,
@@ -1691,7 +1849,7 @@ export class ViewsManager {
 		const view = this.getView(viewId);
 		const found = view && this.findNode(view.root, nodeId);
 		const item = found?.node.apiItemState?.[itemId];
-		if (!item) return;
+		if (!item?.noteRef) return;
 		item.noteRef = undefined;
 		this.save();
 	}
@@ -1801,14 +1959,14 @@ export class ViewsManager {
 	}
 
 	/** G27: a vault `delete` event clears any placeholder row's `noteRef` that pointed at the
-	 * deleted path — additive alongside `unitIndex.onVaultDelete`/`graduation.handleDelete`
-	 * (`main.ts`), independent of `onVaultRename`'s path-rewrite logic above (rename rewrites;
-	 * delete clears, since there is no new path to rewrite to). Only the `noteRef` field is cleared;
-	 * the `apiItemState` entry itself survives untouched (E5: a path matching nothing is a no-op;
-	 * clears every matching entry across every node/view, not just the first). Exact-path match
-	 * only — a single deleted file, not a deleted folder's whole subtree — so a delete immediately
-	 * followed (same tick) by a recreate at the same path, where the `noteRef` was already rewritten
-	 * elsewhere to a different path, is never mistaken for this file's reference. */
+	 * deleted path (or a path under it, for a folder delete) — additive alongside
+	 * `unitIndex.onVaultDelete`/`graduation.handleDelete` (`main.ts`), independent of
+	 * `onVaultRename`'s path-rewrite logic above (rename rewrites; delete clears, since there is no
+	 * new path to rewrite to). Only the `noteRef` field is cleared; the `apiItemState` entry itself
+	 * survives untouched (E5: a path matching nothing is a no-op; clears every matching entry across
+	 * every node/view, not just the first). This runs synchronously on the vault's `delete` event, so
+	 * there is no race to guard against: a path deleted and then recreated is two separate events,
+	 * each handled as it arrives (this one clearing stale refs, a later `create` re-indexing). */
 	onVaultDelete(path: string): void {
 		let changed = false;
 		const nowIso = new Date().toISOString();
@@ -1879,14 +2037,14 @@ export class ViewsManager {
 	 * nested anywhere in the view. */
 	private collectManagedMatches(root: ViewNode[], isMatch: (node: ViewNode) => boolean): ManagedMatch[] {
 		const matches: ManagedMatch[] = [];
-		const collect = (list: ViewNode[], depth: number): void => {
+		const collect = (list: ViewNode[], parent: ViewNode | undefined, depth: number): void => {
 			for (let i = 0; i < list.length; i++) {
 				const node = list[i];
-				if (node.folderSourceManaged && isMatch(node)) matches.push({ list, index: i, node, depth });
-				collect(node.children, depth + 1);
+				if (node.folderSourceManaged && isMatch(node)) matches.push({ list, parent, index: i, node, depth });
+				collect(node.children, node, depth + 1);
 			}
 		};
-		collect(root, 0);
+		collect(root, undefined, 0);
 		return matches;
 	}
 
@@ -1907,7 +2065,7 @@ export class ViewsManager {
 	 * stale list, and no splice shifts another match's index. */
 	private demoteManagedMatches(matches: ManagedMatch[], byId: Map<string, ViewNode>, nowIso: string, deleted: boolean): void {
 		const ordered = [...matches].sort((a, b) => b.depth - a.depth || b.index - a.index);
-		for (const { list, index, node } of ordered) {
+		for (const { list, parent, index, node } of ordered) {
 			const owner = node.folderSourceOwnerId ? byId.get(node.folderSourceOwnerId) : undefined;
 			const ref = node.ref as UnitRef;
 			const mode = owner?.folderSource?.mode ?? "merge";
@@ -1915,19 +2073,29 @@ export class ViewsManager {
 			// the file still existed), rather than the raw last path segment — "a.md" showing where "a"
 			// used to be was the bug.
 			const label = basenameForDeletedRef(ref);
-			// R3 fix: `index` is this node's slot among `owner`'s real children right now, before the
-			// splice below removes it — `renderNodeList` uses it to put the resulting row back in
-			// (approximately) that same slot instead of always appending it after every real child.
+			// R3 fix: `index` is this node's slot in the list it's actually sitting in right now,
+			// before the splice below removes it — `renderNodeList` uses it to put the resulting row
+			// back in (approximately) that same slot instead of always appending it after every real
+			// child.
 			const base = { id: unitRefKey(ref), label, lastSeenAt: nowIso, explicitStatusId: node.explicitStatusId, position: index };
 			// A move-out is not a delete: the append placeholder gets no `noteRef` (nothing to clear), and
 			// the file's new location is never shown as a stale link.
 			const placeholder = reconcileFolderSourceChildDelete(mode, base, deleted ? ref : undefined);
 			list.splice(index, 1, ...node.children);
-			if (placeholder && owner) {
-				if (!owner.apiItemState) owner.apiItemState = {};
-				if (!owner.apiItemOrder) owner.apiItemOrder = [];
-				owner.apiItemState[placeholder.id] = placeholder;
-				if (!owner.apiItemOrder.includes(placeholder.id)) owner.apiItemOrder.push(placeholder.id);
+			// R6 fix: host the placeholder on the node the managed row is actually sitting under right
+			// now (`parent`), not always its Folder source's `owner`. A child the user renested
+			// elsewhere in the view (`managedElsewhere`, folder-source.ts) must stay in that list on
+			// delete too — attaching to `owner` instead would both jump the placeholder back under a
+			// node the user deliberately moved it out of, and record `position` against a list it was
+			// never a slot in. `parent` is only ever `undefined` for a row moved to the view's own top
+			// level, which has no `ViewNode` of its own to host a placeholder on — `owner` is the only
+			// reasonable fallback there, same as before this fix.
+			const host = parent ?? owner;
+			if (placeholder && host) {
+				if (!host.apiItemState) host.apiItemState = {};
+				if (!host.apiItemOrder) host.apiItemOrder = [];
+				host.apiItemState[placeholder.id] = placeholder;
+				if (!host.apiItemOrder.includes(placeholder.id)) host.apiItemOrder.push(placeholder.id);
 			}
 		}
 	}
@@ -1948,11 +2116,15 @@ export class ViewsManager {
 	}
 
 	private clearNoteRefsForPath(nodes: ViewNode[], path: string): boolean {
+		// PR-2 R1: Obsidian can fire a single `delete` for a folder rather than one per child file —
+		// match the same `${path}/` subtree prefix `unitIndex.onVaultDelete` already does, not only an
+		// exact path, or a noteRef to a file inside the deleted folder survives stale.
+		const prefix = `${path}/`;
 		let changed = false;
 		for (const node of nodes) {
 			if (node.apiItemState) {
 				for (const item of Object.values(node.apiItemState)) {
-					if (item.noteRef && item.noteRef.path === path) {
+					if (item.noteRef && (item.noteRef.path === path || item.noteRef.path.startsWith(prefix))) {
 						item.noteRef = undefined;
 						changed = true;
 					}

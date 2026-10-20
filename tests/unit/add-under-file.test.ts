@@ -1,0 +1,416 @@
+import { beforeEach, afterEach, describe, expect, it, vi } from "vitest";
+import { App, Notice } from "obsidian";
+import { DEFAULT_SETTINGS } from "../../src/settings";
+import { UnitIndex } from "../../src/unit-index";
+import { ViewsManager } from "../../src/views";
+import { UnitRef, ViewNode } from "../../src/types";
+import { AddUnderFileDeps, startAddUnderFile } from "../../src/add-under-file";
+import { file, meta, unit } from "../integration/create-from-meta-fixtures";
+import { seedRoot } from "../helpers";
+
+// PR-3.F2: `openNameDialog` is replaced by a controllable spy for most of this file — the dialog's
+// own validation, clash rule and real-DOM behaviour are already covered generically by
+// `name-dialog.test.ts`. One test (the "real dialog" clash case) leaves `dialogMock.impl` unset, so
+// the spy falls through to the real implementation (kept via `importOriginal`) — proving the exact
+// options this flow builds (confirmLabel "Add", poolFolder, excludedFolders) really drive a real
+// dialog's clash detection, not just that the spy was called with the right shape.
+const dialogMock = vi.hoisted(() => ({ impl: null as ((app: unknown, options: unknown) => Promise<string | null>) | null }));
+
+vi.mock("../../src/name-dialog", async (importOriginal) => {
+	const actual = await importOriginal<typeof import("../../src/name-dialog")>();
+	return {
+		...actual,
+		openNameDialog: vi.fn((app: unknown, options: unknown) => (dialogMock.impl ?? actual.openNameDialog)(app, options)),
+	};
+});
+
+// eslint-disable-next-line import/order
+import { openNameDialog } from "../../src/name-dialog";
+// eslint-disable-next-line import/order
+import { button, flush, inputEl, key, messageEl, modals, type } from "../helpers";
+
+const VIEW_ID = "v1";
+
+/** Folder "Projects" containing file row "quarry-drones" and a Folder "Docs", as the spec asks for. */
+function tree(): ViewNode[] {
+	return [meta("projects", "Projects", [unit("quarry-drones", file("quarry-drones.md")), meta("docs", "Docs")])];
+}
+
+function setup(root: ViewNode[] = tree(), extraRootFiles: string[] = []) {
+	const app = new App();
+	seedRoot(app, ["quarry-drones.md", ...extraRootFiles], []);
+	const vm = new ViewsManager(app as unknown as App, [{ id: VIEW_ID, name: "Default", inboxMode: "view", root }], VIEW_ID, () => {});
+	const index = new UnitIndex(app, { ...DEFAULT_SETTINGS, poolFolder: "_pool", excludedFolders: ["_pool"] }, []);
+	index.rebuild();
+	app.vault.on("create", (f) => index.onVaultCreate(f));
+	app.vault.on("delete", (f) => index.onVaultDelete(f.path));
+	const selection = new Set<string>();
+	const placeNewUnit = vi.fn((viewId: string, ref: UnitRef, parentId: string | null) => vm.placeNewUnit(viewId, ref, parentId));
+	const getParentLabel = vi.fn(async (viewId: string, parentId: string) => {
+		const node = vm.getNode(viewId, parentId);
+		if (!node) return "";
+		return node.type === "meta" ? node.label ?? "" : "quarry-drones";
+	});
+	const deps: AddUnderFileDeps = {
+		app: app as unknown as App,
+		getPoolFolder: () => "_pool",
+		getExcludedFolders: () => ["_pool"],
+		holdUnit: (path: string) => index.holdUnit(path),
+		getNode: (viewId, nodeId) => vm.getNode(viewId, nodeId),
+		getParentLabel: (viewId, parentId) => getParentLabel(viewId, parentId),
+		placeNewUnit: (viewId, ref, parentId) => placeNewUnit(viewId, ref, parentId),
+		expandParent: (viewId, parentId) => vm.setNodeCollapsed(viewId, parentId, false),
+		selectOnly: (nodeId) => {
+			selection.clear();
+			selection.add(nodeId);
+		},
+	};
+	return { app, vm, index, deps, selection, placeNewUnit, getParentLabel };
+}
+
+/** A lightweight `AddUnderFileDeps` for tests that only care about the dialog's own options (title
+ * label), not a real tree — the parent always "exists", nothing is ever placed. */
+function minimalDeps(overrides: Partial<AddUnderFileDeps> = {}): AddUnderFileDeps {
+	return {
+		app: new App() as unknown as App,
+		getPoolFolder: () => "_pool",
+		getExcludedFolders: () => [],
+		holdUnit: () => () => {},
+		getNode: () => ({ id: "p", type: "meta", children: [] }) as ViewNode,
+		getParentLabel: async () => "Parent",
+		placeNewUnit: () => null,
+		expandParent: () => {},
+		selectOnly: () => {},
+		...overrides,
+	};
+}
+
+beforeEach(() => {
+	dialogMock.impl = null;
+	Notice.reset();
+	vi.clearAllMocks();
+});
+
+// Defensive, not required by any one test: a thrown assertion inside the "real dialog" test (E2)
+// would otherwise leave that modal open and its parent lock held forever, silently failing every
+// later test that targets the same parent id with "already adding something here" instead of its
+// own real assertion — exactly the shape create-and-nest.test.ts already guards against.
+afterEach(async () => {
+	if (modals().length) key("Escape");
+	await flush();
+	document.body.innerHTML = "";
+});
+
+describe("startAddUnderFile — G2/GP3-GP5 happy path", () => {
+	it("dialog options, creates the file, nests as last child, expands, selects; not opened; not in the inbox", async () => {
+		const s = setup();
+		dialogMock.impl = async () => "Quarry Notes";
+
+		const created = await startAddUnderFile(s.deps, VIEW_ID, "quarry-drones");
+
+		expect(openNameDialog).toHaveBeenCalledWith(s.deps.app, {
+			title: "Add file under quarry-drones",
+			confirmLabel: "Add",
+			initialValue: "",
+			poolFolder: "_pool",
+			excludedFolders: ["_pool"],
+		});
+		expect(created).not.toBeNull();
+		expect(created!.type).toBe("unit");
+		const path = (created!.ref as UnitRef).path;
+		expect(path).toBe("Quarry Notes.md");
+		expect(s.app.vault.contents.get(path)).toBe("# Quarry Notes\n");
+
+		const parent = s.vm.getNode(VIEW_ID, "quarry-drones")!;
+		expect(parent.children.at(-1)!.id).toBe(created!.id);
+		expect(s.placeNewUnit).toHaveBeenCalledWith(VIEW_ID, { kind: "file", path }, "quarry-drones");
+		expect(parent.collapsed).toBe(false);
+		expect([...s.selection]).toEqual([created!.id]);
+
+		// E7: not left in the Inbox — it was held until nested, and the hold is released right after.
+		expect(s.index.heldCount(path)).toBe(0);
+		const inbox = s.vm.getInboxUnits(s.index.getUnits(), VIEW_ID, "view").map((u) => u.path);
+		expect(inbox).not.toContain(path);
+	});
+
+	it("works on a Folder row too, and at a deeper nesting depth", async () => {
+		const nested: ViewNode[] = [meta("outer", "Outer", [meta("mid", "Mid", [unit("c", file("C.md"))])])];
+		const s = setup(nested);
+
+		dialogMock.impl = async () => "Report";
+		const created = await startAddUnderFile(s.deps, VIEW_ID, "mid");
+
+		expect(created).not.toBeNull();
+		expect(s.vm.getNode(VIEW_ID, "mid")!.children.at(-1)!.id).toBe(created!.id);
+	});
+});
+
+describe("startAddUnderFile — G8/E1 cancel", () => {
+	it("dialog resolves null: zero vault writes, zero tree writes, lock released", async () => {
+		const s = setup();
+		const createSpy = vi.spyOn(s.app.vault, "create");
+		dialogMock.impl = async () => null;
+
+		const result = await startAddUnderFile(s.deps, VIEW_ID, "projects");
+
+		expect(result).toBeNull();
+		expect(createSpy).not.toHaveBeenCalled();
+		expect(s.placeNewUnit).not.toHaveBeenCalled();
+		expect(s.vm.getNode(VIEW_ID, "projects")!.children).toHaveLength(2);
+		expect(s.selection.size).toBe(0);
+		expect(Notice.instances).toHaveLength(0);
+
+		// Lock released: a second attempt on the same parent runs again right away.
+		dialogMock.impl = async () => "Fine";
+		const second = await startAddUnderFile(s.deps, VIEW_ID, "projects");
+		expect(second).not.toBeNull();
+	});
+});
+
+describe("startAddUnderFile — E2 name taken: the real dialog blocks it", () => {
+	it("a real dialog over a vault already containing \"Quarry Notes.md\": red state and message, no resolve on Enter", async () => {
+		const s = setup(tree(), ["Quarry Notes.md"]);
+		// dialogMock.impl stays null here, so the spy falls through to the real openNameDialog.
+		const promise = startAddUnderFile(s.deps, VIEW_ID, "quarry-drones");
+		await flush();
+		expect(modals()).toHaveLength(1);
+		expect(document.querySelector(".modal-title")!.textContent).toBe("Add file under quarry-drones");
+		expect(button("Add")).toBeTruthy();
+
+		type("Quarry Notes");
+		expect(inputEl().classList.contains("atlas-name-invalid")).toBe(true);
+		expect(messageEl().textContent).toBe("A note or folder called 'Quarry Notes' already exists at the vault root");
+		expect(button("Add").disabled).toBe(true);
+
+		key("Enter");
+		await flush();
+		expect(modals()).toHaveLength(1); // still open: Enter on an invalid name does nothing
+
+		key("Escape");
+		const result = await promise;
+		expect(result).toBeNull();
+		document.body.innerHTML = "";
+	});
+});
+
+describe("startAddUnderFile — F5 no moves, only one vault.create", () => {
+	it("never calls vault.rename, fileManager.renameFile, or any meta-replace path", async () => {
+		const s = setup();
+		const renameSpy = vi.spyOn(s.app.vault, "rename");
+		const fileManagerRenameSpy = vi.spyOn(s.app.fileManager, "renameFile");
+		const replaceSpy = vi.spyOn(s.vm, "replaceMetaNodeWithUnit");
+		dialogMock.impl = async () => "Quarry Notes";
+
+		const created = await startAddUnderFile(s.deps, VIEW_ID, "projects");
+
+		expect(created).not.toBeNull();
+		expect(renameSpy).not.toHaveBeenCalled();
+		expect(fileManagerRenameSpy).not.toHaveBeenCalled();
+		expect(replaceSpy).not.toHaveBeenCalled();
+		expect(s.app.vault.calls.filter((c) => c === "create")).toHaveLength(1);
+		expect(s.app.vault.calls).toEqual(["create"]);
+	});
+
+	it("the parent row's path, its vault file and every other note are untouched", async () => {
+		const s = setup();
+		const before = [...s.app.vault.getFiles().map((f) => f.path)].sort();
+		dialogMock.impl = async () => "Quarry Notes";
+
+		await startAddUnderFile(s.deps, VIEW_ID, "projects");
+
+		const after = s.app.vault.getFiles().map((f) => f.path).sort();
+		expect(after).toEqual([...before, "Quarry Notes.md"].sort());
+		expect(s.app.vault.getAbstractFileByPath("quarry-drones.md")).not.toBeNull();
+	});
+});
+
+describe("startAddUnderFile — R1 never relocates an existing node sharing the new ref", () => {
+	it("a missing row with children of its own, elsewhere in the view, stays exactly where it is; a fresh node is nested instead", async () => {
+		const missing = unit("quarry-missing", file("Quarry Notes.md"), { children: [unit("old", file("Old.md"))] });
+		const root: ViewNode[] = [meta("other", "Other", [missing]), unit("quarry-drones", file("quarry-drones.md"))];
+		const s = setup(root);
+		dialogMock.impl = async () => "Quarry Notes"; // same name as the missing row's own path
+
+		const created = await startAddUnderFile(s.deps, VIEW_ID, "quarry-drones");
+
+		expect(created).not.toBeNull();
+		expect(created!.id).not.toBe("quarry-missing");
+
+		// The missing row (and its own child "old") is untouched, still nested under "Other" —
+		// never spliced out and moved under quarry-drones just because its ref now exists on disk.
+		const other = s.vm.getNode(VIEW_ID, "other")!;
+		expect(other.children.map((c) => c.id)).toEqual(["quarry-missing"]);
+		expect(other.children[0].children.map((c) => c.id)).toEqual(["old"]);
+
+		// quarry-drones gets exactly the new node as its only child — "old" never arrives here.
+		const parent = s.vm.getNode(VIEW_ID, "quarry-drones")!;
+		expect(parent.children.map((c) => c.id)).toEqual([created!.id]);
+	});
+
+	it("a missing row that is an ancestor of the clicked row is never spliced into its own descendant (no cycle)", async () => {
+		const root: ViewNode[] = [
+			unit("ancestor-missing", file("Quarry Notes.md"), {
+				children: [meta("mid", "Mid", [unit("quarry-drones", file("quarry-drones.md"))])],
+			}),
+		];
+		const s = setup(root);
+		dialogMock.impl = async () => "Quarry Notes"; // same name as the ancestor's own path
+
+		const created = await startAddUnderFile(s.deps, VIEW_ID, "quarry-drones");
+
+		expect(created).not.toBeNull();
+
+		// The ancestor stays exactly where it was — at the view root, still containing "Mid" and
+		// "quarry-drones" — nothing was spliced out of its spot or re-nested into its own descendant.
+		const view = s.vm.getView(VIEW_ID)!;
+		expect(view.root.map((n) => n.id)).toEqual(["ancestor-missing"]);
+		expect(s.vm.getNode(VIEW_ID, "quarry-drones")).not.toBeNull();
+
+		const parent = s.vm.getNode(VIEW_ID, "quarry-drones")!;
+		expect(parent.children.map((c) => c.id)).toEqual([created!.id]);
+
+		// The tree is still a tree, not a cycle: serializes cleanly (a cyclic tree throws here).
+		expect(() => JSON.stringify(view.root)).not.toThrow();
+	});
+});
+
+describe("startAddUnderFile — E4 parent-exists checks", () => {
+	it("parent already gone before the dialog opens: Notice, no dialog, no node", async () => {
+		const s = setup();
+		const result = await startAddUnderFile(s.deps, VIEW_ID, "does-not-exist");
+		expect(result).toBeNull();
+		expect(openNameDialog).not.toHaveBeenCalled();
+		expect(Notice.instances).toHaveLength(1);
+		expect(Notice.instances[0].message).toContain("no longer exists");
+	});
+
+	it("parent removed while the dialog is open: on confirm, Notice, no node, nothing created", async () => {
+		const s = setup();
+		dialogMock.impl = async () => {
+			s.vm.deleteMetaFolder(VIEW_ID, "docs");
+			return "Archive";
+		};
+		const createSpy = vi.spyOn(s.app.vault, "create");
+
+		const result = await startAddUnderFile(s.deps, VIEW_ID, "docs");
+
+		expect(result).toBeNull();
+		expect(createSpy).not.toHaveBeenCalled();
+		expect(Notice.instances).toHaveLength(1);
+		expect(Notice.instances[0].message).toContain("no longer exists");
+	});
+
+	it("parent removed between create and nest: file rolled back, Notice, no node", async () => {
+		const s = setup();
+		const originalCreate = s.app.vault.create.bind(s.app.vault);
+		s.app.vault.create = async (path: string, data: string) => {
+			const f = await originalCreate(path, data);
+			s.vm.deleteMetaFolder(VIEW_ID, "projects");
+			return f;
+		};
+		dialogMock.impl = async () => "Quarry Notes";
+
+		const result = await startAddUnderFile(s.deps, VIEW_ID, "projects");
+
+		expect(result).toBeNull();
+		expect(s.app.vault.getAbstractFileByPath("Quarry Notes.md")).toBeNull();
+		expect(Notice.instances).toHaveLength(1);
+		expect(Notice.instances[0].message).toContain("no longer exists");
+	});
+});
+
+describe("startAddUnderFile — E6 the shared per-parent lock", () => {
+	it("a second File add on the same parent while one runs is ignored with a Notice", async () => {
+		const s = setup();
+		let resolveDialog: (v: string | null) => void = () => {};
+		dialogMock.impl = () => new Promise((resolve) => (resolveDialog = resolve));
+
+		const first = startAddUnderFile(s.deps, VIEW_ID, "projects");
+		const second = startAddUnderFile(s.deps, VIEW_ID, "projects");
+		await flush(); // lets `first`'s own await-chain reach the dialog call before we resolve it
+		resolveDialog("Quarry Notes");
+		const [firstResult, secondResult] = await Promise.all([first, second]);
+
+		expect(firstResult).not.toBeNull();
+		expect(secondResult).toBeNull();
+		expect(Notice.instances.some((n) => n.message.toLowerCase().includes("already adding"))).toBe(true);
+	});
+
+	it("a different parent still proceeds while the first lock is held", async () => {
+		const s = setup();
+		let resolveDialog: (v: string | null) => void = () => {};
+		// A single impl, keyed off each call's own `title` rather than a reassigned shared variable:
+		// "projects" and "docs" each reach `openNameDialog` on their own microtask tick, in an order
+		// this test doesn't control, so the dispatch has to happen inside the mock, at call time.
+		dialogMock.impl = async (_app: unknown, options: unknown) => {
+			const title = (options as { title: string }).title;
+			if (title === "Add file under Projects") return new Promise<string | null>((resolve) => (resolveDialog = resolve));
+			return "Notes";
+		};
+
+		const first = startAddUnderFile(s.deps, VIEW_ID, "projects");
+		const other = startAddUnderFile(s.deps, VIEW_ID, "docs");
+		await flush();
+		resolveDialog("Quarry Notes");
+		const [firstResult, otherResult] = await Promise.all([first, other]);
+
+		expect(firstResult).not.toBeNull();
+		expect(otherResult).not.toBeNull();
+	});
+});
+
+describe("startAddUnderFile — failure rolls back", () => {
+	it("vault.create rejects: Notice, no node, nothing left on disk, lock released", async () => {
+		const s = setup();
+		const originalCreate = s.app.vault.create.bind(s.app.vault);
+		let shouldFail = true;
+		s.app.vault.create = async (path: string, data: string) => {
+			if (shouldFail) throw new Error("disk full");
+			return originalCreate(path, data);
+		};
+		dialogMock.impl = async () => "Quarry Notes";
+
+		const result = await startAddUnderFile(s.deps, VIEW_ID, "projects");
+
+		expect(result).toBeNull();
+		expect(s.app.vault.getAbstractFileByPath("Quarry Notes.md")).toBeNull();
+		expect(Notice.instances).toHaveLength(1);
+		expect(Notice.instances[0].message).toContain("disk full");
+		expect(s.selection.size).toBe(0);
+
+		shouldFail = false;
+		const again = await startAddUnderFile(s.deps, VIEW_ID, "projects");
+		expect(again).not.toBeNull();
+	});
+
+	it("placeNewUnit returns null: file deleted, Notice, no node, selection unchanged", async () => {
+		const s = setup();
+		s.placeNewUnit.mockImplementation(() => null);
+		dialogMock.impl = async () => "Quarry Notes";
+
+		const result = await startAddUnderFile(s.deps, VIEW_ID, "projects");
+
+		expect(result).toBeNull();
+		expect(s.app.vault.getAbstractFileByPath("Quarry Notes.md")).toBeNull();
+		expect(Notice.instances).toHaveLength(1);
+		expect(Notice.instances[0].message).toContain("no longer exists");
+		expect(s.selection.size).toBe(0);
+	});
+});
+
+describe("startAddUnderFile — title label uses the parent's displayed label verbatim", () => {
+	it.each([
+		["a unit row's own displayed text", "quarry-drones"],
+		["a Folder row's label", "Projects"],
+		["a nested row", "Deeply Nested Label"],
+		["a label with quotes", 'Say "hi"'],
+		["a label with an emoji", "Rockets 🚀"],
+	])("%s: title is \"Add file under <label>\"", async (_desc, label) => {
+		dialogMock.impl = async () => null; // only the title matters here
+		const deps = minimalDeps({ getParentLabel: async () => label });
+
+		await startAddUnderFile(deps, "v", "p");
+
+		expect(openNameDialog).toHaveBeenCalledWith(deps.app, expect.objectContaining({ title: `Add file under ${label}` }));
+	});
+});

@@ -314,6 +314,26 @@
 	outline-offset: -2px;
 }
 
+/* PR-3 (G1): the single shared sibling-insert indicator line, shown as a sibling of whichever row
+ * the pointer is currently hovering an edge zone of (`AtlasExplorerView.showDropIndicator`) — not
+ * a child of the row, so it never participates in `.atlas-row-text`'s shared flex layout. */
+.atlas-drop-indicator {
+	height: 2px;
+	margin-block: -1px;
+	background: var(--interactive-accent);
+	border-radius: 1px;
+	pointer-events: none;
+}
+
+/* PR-4 (G5): outlines a sorted folder's own whole list (not a single row) while a drop from
+ * elsewhere is hovering an edge inside it (`AtlasExplorerView.showSortedDropOutline`) — no insert
+ * line is drawn alongside this, since the item will land in its sorted place, not at the hovered
+ * row's position. */
+.atlas-sorted-drop-outline {
+	outline: 2px dashed var(--interactive-accent);
+	outline-offset: -2px;
+}
+
 .atlas-chevron {
 	display: flex;
 	width: 14px;
@@ -602,6 +622,15 @@ input.atlas-yaml-key-invalid[type="text"]:not(:disabled) {
 
 .atlas-row-action:hover {
 	color: var(--text-normal);
+}
+
+/* PR-2 (G13): the sort indicator on a Folder row or the Bucket header — non-interactive (no
+ * hover/click target of its own), so no `:hover` rule the way `.atlas-row-action` has one. */
+.atlas-sort-indicator {
+	margin-left: auto;
+	display: flex;
+	flex-shrink: 0;
+	color: var(--text-faint);
 }
 
 .atlas-row-internal {

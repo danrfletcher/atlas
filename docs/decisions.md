@@ -16,6 +16,16 @@ Judgement calls made during the build, the alternative considered, and why. Newe
 
 **Decision:** the Port field (R7) commits on blur/Enter, not on every keystroke — typing a multi-digit port one character at a time would otherwise bind-then-rebind through every in-range prefix along the way, and briefly latch the server off if some prefix happened to already be taken. A commit restarts the server from the user's saved intent (`settings.mcpServerEnabled`), not from `isRunning()`, so a restart after a prior failed start (stale `isRunning()===false`) still comes back on rather than staying silently off.
 
+## PR-2: sort/reorder within a folder and the Bucket root
+
+**Decision:** G12's "Statuses modal toggle" is the pre-existing PR-22 "Sort children by status" toggle inside the Statuses modal — not the "Enable statuses" master toggle. Caught my own first-pass misread (briefly wired `sortMode` writes into "Enable statuses") before committing anything; reverted once I re-read the modal's actual layout and found the PR-22 toggle already satisfies G12/G19's on/off rules (toggle on always sets Status; toggle off is only reachable from an on state, which only happens when the mode is already Status, so "leaves any other mode alone" holds structurally). No production change was needed there at all.
+
+**Decision:** the spec's own suggested test location for G9/E4 (Modified-sort refresh timing), `tests/unit/refresh-modes.test.ts`, is entirely about API data-source refresh modes (append/merge/overwrite) and has nothing to do with explorer render-refresh triggers. Added a dedicated `tests/unit/sort-refresh-gate.test.ts` for the `SortRefreshGate` class itself, plus an integration-level case in `explorer-view-sort.test.ts` exercising the real `resolvedMtimeForSort` caching wrapper through the render path, instead of extending the mismatched file.
+
+**Decision:** "a duplicate in a sorted folder lands in its sorted place" (G21) needed no new code — a sort is purely a render-time transform over the full children array on every render (never mutating `ViewNode.children`), so a duplicate appended at the end by the existing Duplicate command sorts into place on the very next render for free. Verified with a regression test (`fence-checks.test.ts`'s F2 case) rather than building anything bespoke.
+
+**Decision:** `SortRefreshGate`'s dirty flag starts `true` (first render = "the view loads") and is marked dirty from exactly three more points — `viewsManager.onChange` (covers both "a sort changes" and "the tree changes," since both go through the same `save()`), the pane-regains-focus branch of `active-leaf-change`, and the internal Atlas view-switch branch inside `render()` — deliberately not from a plain vault `modify`/autosave event, matching E4's "moves at the next refresh, not at the save" wording literally.
+
 ## PR-3 T9/E7: "Folder converted by promotion" cannot be built or tested in this ticket
 
 **Decision:** E7 ("Folder converted by promotion: source, cache and mode carry over") stays unimplemented and unverified in PR-3, same call PR-2 already made for the identical finding (PR-2 T5, commit `b773e87`). Closing this out as a documented, permanent deviation rather than leaving it to be re-raised every review/test round.
@@ -29,6 +39,8 @@ Judgement calls made during the build, the alternative considered, and why. Newe
 ## Create from a meta folder (block, file or module): the menu, the body and the failure order
 
 **Decision:** "Create" sits in a meta folder's right-click menu after "Rename folder". Obsidian's public `Menu` has no submenu API (`minAppVersion` 1.5.0, public APIs only), so choosing it pops a second small menu (Block, File, Module) at the same spot. It is still two clicks. Nothing else was added: no command, palette entry or setting.
+
+**PR-1.F1 update:** the menu entry's label is renamed "Replace with…" (was "Create"), so it reads consistently alongside the later-added "Swap with…" entry right below it (plan G5/Q4). This is a label-only change — the operation described above (Block/File/Module chooser, dialog titles, body, failure order, replace-in-place) is unchanged, so "Create" below still refers to the operation and its dialogs, not the menu's wording.
 
 **Decision:** every file Create writes has the body `# <name>` plus one trailing newline (Block, File and the Module's note alike). The name is trimmed when the dialog returns it, and validated again against the live vault root at create time, because the dialog can stay open while other things change. Block only needs a non-empty name (its file is named by ID); File and Module use the full name rules.
 

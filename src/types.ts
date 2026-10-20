@@ -178,10 +178,23 @@ export interface StatusGovernance {
 	/** PR 22: ranks this governor's children ascending by their resolved status's own position
 	 * within the governing status set's `statuses[]` (index 0 = highest rank) instead of the
 	 * existing manual/drag-ordered arrangement. Absent (or `"manual"`) is today's default —
-	 * unaffected by this field entirely. */
-	sortMode?: "manual" | "status";
+	 * unaffected by this field entirely.
+	 *
+	 * PR-1: three more modes, each scoped to *this governor's own direct children only* — unlike
+	 * `"status"`, never inherited past them (F6; `findSortGovernor`'s ancestor walk is never
+	 * consulted for these). `"alphabetical"`: case-insensitive, natural-number order by each
+	 * child's displayed name. `"modified"`: newest file-modified-time first (a block/module uses
+	 * its backing file's/interface note's time). `"time-added"`: newest `ViewNode.placedAt` first.
+	 * Absent means "no setting" (follow an inherited status sort, if any, same as before this PR);
+	 * `"manual"` is an explicit value that overrides one (G19). A sort never rewrites the stored
+	 * `children` order (G14/F2) — it only changes render order. */
+	sortMode?: "manual" | "status" | "alphabetical" | "modified" | "time-added";
 	/** PR 22: reverses the rank order from `sortMode: "status"` — meaningless (and left unset/
-	 * ignored) while `sortMode` isn't `"status"`; not a general "flip manual order" toggle. */
+	 * ignored) while `sortMode` isn't `"status"`; not a general "flip manual order" toggle.
+	 * PR-1: same idea for `"alphabetical"`/`"modified"`/`"time-added"` — flips that mode's own
+	 * direction only. Still meaningless while `sortMode` is `"manual"` or absent (G11/F8): the menu
+	 * disables the control for Manual, and a stored `true` left over from a prior mode is ignored
+	 * by the comparator rather than acted on. */
 	sortReverse?: boolean;
 }
 
@@ -199,6 +212,19 @@ export interface ViewNode extends StatusGovernance {
 	 * `StatusGovernance`, above). Absent means "show the governing set's own default status," the
 	 * same as before this PR existed. */
 	explicitStatusId?: string;
+	/** PR-1 (G10/G16): epoch ms when this node was placed into its *current* parent (the view root
+	 * counts as a parent too — a top-level node is stamped the same way). Drives `sortMode:
+	 * "time-added"` (newest first). Moving a node to a different parent restamps it; reordering
+	 * within the same parent does not (`moveNode`'s own doc comment). A duplicate's own root gets a
+	 * fresh stamp; its cloned subtree keeps each node's original stamp unchanged (`cloneNode`'s
+	 * shallow spread already carries it over, since `duplicateNode` only overwrites the clone's own
+	 * top-level field afterwards). Children lifted one level by removing their parent keep their
+	 * stamps too — nothing rewrites this field on a lift, only on an actual place/move/duplicate.
+	 * Absent means "no stamp" — counts as oldest (sorts last, including under Reverse): a node
+	 * persisted before this field existed (E8), or one `reconcileManagedChildren`/`makeNode` forgot
+	 * to set (it doesn't — new Folder-source rows get a fresh stamp at creation, same as any other
+	 * new node). */
+	placedAt?: number;
 	/** PR-2 (API-backed Atlas Folders): request/mapping config for a "Folder" (meta node) whose rows
 	 * are pulled from a JSON API instead of (or alongside) manually placed children. Set on any bucket
 	 * node, meta or unit (PR-1), so a swapped-in spot keeps its source. Headers (including any bearer token) are deliberately absent from this

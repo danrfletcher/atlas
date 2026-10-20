@@ -175,6 +175,7 @@ function harness() {
 		viewsManager: vm,
 		apiHeadersStore,
 		folderSourcePathStore,
+		statusesManager: { findSortGovernor: () => null },
 		forgetDeviceLocalSourceState(nodeId: string): void {
 			apiHeadersStore.delete(nodeId);
 			folderSourcePathStore.delete(nodeId);

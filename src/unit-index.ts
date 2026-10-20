@@ -113,6 +113,16 @@ export class UnitIndex {
 		// PR-1.S1 (G8): the same terminal rule for folders — an added-folder suppresses any promoted-folder
 		// (link, Module Contents promote-and-place, or Folder source) with the same key, so the folder is
 		// always one row and keeps "added".
+		// PR-4 R12 fix: `promotedFiles`/`promotedFolders`/`promotedBlocks` key by a bare path (or
+		// `path#subpath`), while `folderSourceUnits` keys by `unitRefKey` (`setFolderSourceRefs`) — two
+		// different formats, so a ref that's both link-/manually-promoted and Folder-source-managed
+		// wouldn't collide in either Map and would otherwise survive into `base` twice. Compare by
+		// `unitRefKey` on the resolved ref instead of relying on either Map's own key shape.
+		const promotedRefKeys = new Set(
+			[...this.promotedFiles.values(), ...this.promotedFolders.values(), ...this.promotedBlocks.values()].map((unit) =>
+				unitRefKey(unitToRef(unit))
+			)
+		);
 		const base = [
 			...this.folderUnits.values(),
 			...this.baseFileUnits.values(),
@@ -120,7 +130,7 @@ export class UnitIndex {
 			...this.promotedFolders.values(),
 			...this.promotedBlocks.values(),
 			// Folder-source units sit in `base` so the R3 and R1 rules below treat them like any other promoted unit.
-			...this.folderSourceUnits.values(),
+			...Array.from(this.folderSourceUnits.values()).filter((unit) => !promotedRefKeys.has(unitRefKey(unitToRef(unit)))),
 		].filter((unit) => {
 			if (unit.type !== "promoted-file" && unit.type !== "promoted-folder") return true;
 			return !addedRefKeys.has(unitRefKey(unitToRef(unit)));
@@ -182,6 +192,14 @@ export class UnitIndex {
 			else this.held.delete(path);
 			this.notifyChange();
 		};
+	}
+
+	/** PR-1.S1: test-only visibility into the hold count for `path` (0 once every outstanding
+	 * `holdUnit` release for it has run). Lets create-and-nest tests assert the hold is balanced
+	 * after every outcome — ok, disk-create failure, parent-gone, and save failure — rather than
+	 * only inferring it indirectly from `getUnits()`. */
+	heldCount(path: string): number {
+		return this.held.get(path) ?? 0;
 	}
 
 	getManualPromotions(): UnitRef[] {
