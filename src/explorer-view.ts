@@ -821,7 +821,9 @@ export class AtlasExplorerView extends ItemView {
 	 * mid-await; the gate was already cleared, so without this the newer render would see "no
 	 * refresh pending" and serve stale cached mtimes for refs the superseded one never reached,
 	 * losing the trigger's re-sort until the next trigger. The next render inherits the allowance;
-	 * the first one that finishes as current clears it. */
+	 * the first one that finishes as current clears it. If a drag has started by then, the next
+	 * render instead puts the allowance back on the gate (`markDirty`) so the first render after
+	 * the drag takes it. */
 	private sortRefreshUnfinished = false;
 	/** PR-1 (PR-2 R5): true from a window-level `dragstart` until the drag is known to be over. A
 	 * render clears `dragPayload`/`inboxDragRowEl`/`bucketDragRowEl` (the dragged row is about to be
@@ -1837,7 +1839,10 @@ export class AtlasExplorerView extends ItemView {
 			// PR-2 (G9): consumed here, after the view-switch branch above has had its chance to
 			// `markDirty()` for this same render pass — see `dragInProgress`'s own comment for why.
 			// PR-1 (PR-2 R4): a superseded render that consumed the refresh hands it on (see
-			// `sortRefreshUnfinished`), except during a drag, where the refresh must keep waiting.
+			// `sortRefreshUnfinished`). During a drag the refresh must keep waiting, so an allowance
+			// the superseded render had already consumed (a drag that started after it) goes back
+			// onto the gate: the gate is what survives until the first render after the drag ends.
+			if (dragInProgress && this.sortRefreshUnfinished) this.sortRefreshGate.markDirty();
 			this.sortRefreshAllowedForThisRender = this.sortRefreshGate.consume(dragInProgress) || (this.sortRefreshUnfinished && !dragInProgress);
 			this.sortRefreshUnfinished = this.sortRefreshAllowedForThisRender;
 

@@ -176,6 +176,29 @@ describe("PR-2 R4 — a superseded render hands its pending Modified refresh to 
 		await ex.render();
 		expect(seen).toEqual([false, false, true]); // the gate stayed dirty until the drag was over
 	});
+
+	it("a drag that starts after the first render consumed the refresh keeps it for the first render after the drag", async () => {
+		ex = h.explorer as unknown as Internals;
+		const drag = ex as unknown as { nativeDragActive: boolean };
+		let release!: () => void;
+		const seen = recordAllowances(new Promise<void>((resolve) => (release = resolve)));
+
+		const first = ex.render(); // no drag: consumes the view-load trigger, then blocks mid-render
+		drag.nativeDragActive = true;
+		const second = ex.render(); // supersedes it during the drag; must not refresh nor lose the refresh
+		release();
+		await Promise.all([first, second]);
+		expect(seen).toEqual([true, false]);
+
+		await ex.render(); // still dragging
+		expect(seen).toEqual([true, false, false]);
+
+		drag.nativeDragActive = false;
+		await ex.render();
+		expect(seen).toEqual([true, false, false, true]); // the refresh survived the drag
+		await ex.render();
+		expect(seen).toEqual([true, false, false, true, false]); // and is spent once taken
+	});
 });
 
 describe("PR-2 R5 — every render during one native drag defers the refresh", () => {
