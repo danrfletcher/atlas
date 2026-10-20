@@ -1,7 +1,8 @@
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { App, Menu, Notice } from "obsidian";
 import { AtlasExplorerView } from "../../src/explorer-view";
-import { ApiItemState, View, ViewNode } from "../../src/types";
+import { ATLAS_SORT_AZ_ICON_ID } from "../../src/sort";
+import { ApiItemState, StatusGovernance, View, ViewNode } from "../../src/types";
 import { ViewsManager } from "../../src/views";
 import { flush } from "../helpers";
 import { meta } from "../integration/create-from-meta-fixtures";
@@ -684,5 +685,257 @@ describe("PR-3.F1 — Add under… > Block: real flow, wired through startAddUnd
 		} finally {
 			(globalThis as { CSS?: unknown }).CSS = originalCSS;
 		}
+	});
+});
+
+
+// PR-1 (G6/G7/G11/F8/G19): "Sort children…" submenu — same on a unit row, a Folder row and the
+// Bucket header, written through the generic updateStatusGovernance(viewId, nodeId, patch).
+describe("PR-1 G6/G7 — Sort children… menu", () => {
+	beforeEach(() => {
+		Menu.shownAtPosition = [];
+	});
+
+	function sortFake(statusGovernor: StatusGovernance | null = null) {
+		const vault = {
+			create: vi.fn(),
+			createFolder: vi.fn(),
+			createBinary: vi.fn(),
+			modify: vi.fn(),
+			modifyBinary: vi.fn(),
+			append: vi.fn(),
+			delete: vi.fn(),
+			trash: vi.fn(),
+			rename: vi.fn(),
+			copy: vi.fn(),
+		};
+		return {
+			plugin: {
+				app: { vault, fileManager: { renameFile: vi.fn() } },
+				unitIndex: { getUnits: () => [] },
+				viewsManager: { getNode: () => null, updateStatusGovernance: vi.fn() },
+				statusesManager: { findSortGovernor: vi.fn(() => statusGovernor) },
+			},
+		};
+	}
+
+	/** F1: none of a Vault's disk-write methods (nor `fileManager.renameFile`) were ever called. */
+	function expectNoVaultWrite(fake: ReturnType<typeof sortFake>): void {
+		const vault = fake.plugin.app.vault as unknown as Record<string, ReturnType<typeof vi.fn>>;
+		for (const name of ["create", "createFolder", "createBinary", "modify", "modifyBinary", "append", "delete", "trash", "rename", "copy"]) {
+			expect(vault[name]).not.toHaveBeenCalled();
+		}
+		expect(fake.plugin.app.fileManager.renameFile).not.toHaveBeenCalled();
+	}
+
+	function build(
+		method: "showMetaFolderMenu" | "showUnitMenu" | "showBucketHeaderMenu",
+		node?: ViewNode,
+		ref: { kind: "file"; path: string } = { kind: "file", path: "U.md" },
+		statusGovernor: StatusGovernance | null = null
+	) {
+		const fake = sortFake(statusGovernor);
+		let built: Menu | undefined;
+		const show = vi.spyOn(Menu.prototype, "showAtMouseEvent").mockImplementation(function (this: Menu) {
+			built = this;
+		});
+		const evt = new MouseEvent("contextmenu");
+		const args = method === "showUnitMenu" ? [evt, ref, view, node] : method === "showMetaFolderMenu" ? [evt, node, view] : [evt, view];
+		(AtlasExplorerView.prototype as unknown as Record<string, (...a: unknown[]) => void>)[method].call(fake, ...args);
+		show.mockRestore();
+		return { menu: built!, fake };
+	}
+
+	/** Opens the chooser popped by "Sort children…"'s own click handler. */
+	function openChooser(menu: Menu): Menu {
+		menu.items.find((i) => i.title === "Sort children…")!.clickHandler!();
+		return Menu.shownAtPosition[Menu.shownAtPosition.length - 1];
+	}
+
+	const unitNode = (over: Partial<ViewNode> = {}): ViewNode => ({ id: "u", type: "unit", ref: { kind: "file", path: "U.md" }, children: [], ...over });
+	const metaNode = (over: Partial<ViewNode> = {}): ViewNode => ({ id: "m", type: "meta", label: "Folder", children: [], ...over });
+
+	it("appears on a unit row, a Folder row and the Bucket header", () => {
+		expect(build("showUnitMenu", unitNode()).menu.titles()).toContain("Sort children…");
+		expect(build("showMetaFolderMenu", metaNode()).menu.titles()).toContain("Sort children…");
+		expect(build("showBucketHeaderMenu").menu.titles()).toContain("Sort children…");
+	});
+
+	// PR-2 (T12): the "Sort children…" item's own icon must resolve to Atlas's registered
+	// sort-az id, not a bare or lucide-prefixed Lucide string — neither ever rendered an <svg>
+	// through MenuItem.setIcon() in the real Obsidian build across three fix rounds (T5/T9/T12).
+	it("its own icon is Atlas's registered sort-az icon id", () => {
+		const { menu } = build("showUnitMenu", unitNode());
+		expect(menu.items.find((i) => i.title === "Sort children…")!.icon).toBe(ATLAS_SORT_AZ_ICON_ID);
+	});
+
+	it("its chooser lists exactly Manual, A-Z, Modified, Time added, then Reverse order", () => {
+		const chooser = openChooser(build("showUnitMenu", unitNode()).menu);
+		expect(chooser.titles()).toEqual(["Manual", "A-Z", "Modified", "Time added", "Reverse order"]);
+	});
+
+	it("ticks the node's current sortMode, defaulting to Manual when unset", () => {
+		const unset = openChooser(build("showUnitMenu", unitNode()).menu);
+		expect(unset.items.find((i) => i.title === "Manual")!.checked).toBe(true);
+
+		const alpha = openChooser(build("showUnitMenu", unitNode({ sortMode: "alphabetical" })).menu);
+		expect(alpha.items.find((i) => i.title === "A-Z")!.checked).toBe(true);
+		expect(alpha.items.find((i) => i.title === "Manual")!.checked).toBe(false);
+	});
+
+	it("Reverse order is disabled under Manual, and enabled (ticked per sortReverse) otherwise (G11/F8)", () => {
+		const manual = openChooser(build("showUnitMenu", unitNode()).menu);
+		const manualReverse = manual.items.find((i) => i.title === "Reverse order")!;
+		expect(manualReverse.disabled).toBe(true);
+		expect(manualReverse.checked).toBe(false);
+
+		const modifiedOn = openChooser(build("showUnitMenu", unitNode({ sortMode: "modified", sortReverse: true })).menu);
+		const modifiedReverse = modifiedOn.items.find((i) => i.title === "Reverse order")!;
+		expect(modifiedReverse.disabled).toBe(false);
+		expect(modifiedReverse.checked).toBe(true);
+	});
+
+	it("picking a mode writes sortMode and resets sortReverse to off (G19)", () => {
+		const node = unitNode({ sortMode: "modified", sortReverse: true });
+		const { menu, fake } = build("showUnitMenu", node);
+		const chooser = openChooser(menu);
+		chooser.items.find((i) => i.title === "A-Z")!.clickHandler!();
+		expect(fake.plugin.viewsManager.updateStatusGovernance).toHaveBeenCalledWith("v1", "u", { sortMode: "alphabetical", sortReverse: false });
+	});
+
+	it("clicking Reverse order only flips sortReverse, never the mode", () => {
+		const node = unitNode({ sortMode: "modified", sortReverse: false });
+		const { menu, fake } = build("showUnitMenu", node);
+		const chooser = openChooser(menu);
+		chooser.items.find((i) => i.title === "Reverse order")!.clickHandler!();
+		expect(fake.plugin.viewsManager.updateStatusGovernance).toHaveBeenCalledWith("v1", "u", { sortReverse: true });
+	});
+
+	it("a Folder row writes through the same mechanism, keyed by the Folder's own node id", () => {
+		const node = metaNode({ id: "f1" });
+		const { menu, fake } = build("showMetaFolderMenu", node);
+		const chooser = openChooser(menu);
+		chooser.items.find((i) => i.title === "Modified")!.clickHandler!();
+		expect(fake.plugin.viewsManager.updateStatusGovernance).toHaveBeenCalledWith("v1", "f1", { sortMode: "modified", sortReverse: false });
+	});
+
+	it("the Bucket header writes through the view itself (nodeId: null), per G7", () => {
+		const { menu, fake } = build("showBucketHeaderMenu");
+		const chooser = openChooser(menu);
+		chooser.items.find((i) => i.title === "Time added")!.clickHandler!();
+		expect(fake.plugin.viewsManager.updateStatusGovernance).toHaveBeenCalledWith("v1", null, { sortMode: "time-added", sortReverse: false });
+	});
+
+	it("F1: picking any sort mode or toggling Reverse never writes, renames or deletes a vault file — only data.json (via updateStatusGovernance) changes", () => {
+		const node = unitNode({ sortMode: "modified", sortReverse: true });
+		const { menu, fake } = build("showUnitMenu", node);
+
+		const chooser1 = openChooser(menu);
+		chooser1.items.find((i) => i.title === "A-Z")!.clickHandler!();
+		const chooser2 = openChooser(menu);
+		chooser2.items.find((i) => i.title === "Reverse order")!.clickHandler!();
+		const chooser3 = openChooser(menu);
+		chooser3.items.find((i) => i.title === "Manual")!.clickHandler!();
+
+		expect(fake.plugin.viewsManager.updateStatusGovernance).toHaveBeenCalledTimes(3);
+		expectNoVaultWrite(fake);
+	});
+
+	it("F1: the same holds for a Folder row and the Bucket header", () => {
+		const metaFake = build("showMetaFolderMenu", metaNode({ id: "f1" }));
+		openChooser(metaFake.menu)
+			.items.find((i) => i.title === "Modified")!
+			.clickHandler!();
+		expectNoVaultWrite(metaFake.fake);
+
+		const bucketFake = build("showBucketHeaderMenu");
+		openChooser(bucketFake.menu)
+			.items.find((i) => i.title === "Time added")!
+			.clickHandler!();
+		expectNoVaultWrite(bucketFake.fake);
+	});
+
+	// PR-2 (G12/G19/E5/F4): the "Status" item — present only on a governing row (or the Bucket
+	// root of a governing view), labeled "(inherited)" when the governor is an ancestor rather
+	// than this row itself, and ticked whenever `activeSortFor` resolves to "status".
+	describe("PR-2 G12/G19/E5/F4 — Status in the Sort children… menu", () => {
+		it("is absent from the menu on a row that does not govern a status set and has no inherited status sort", () => {
+			const chooser = openChooser(build("showUnitMenu", unitNode()).menu);
+			expect(chooser.titles()).not.toContain("Status");
+			expect(chooser.titles()).not.toContain("Status (inherited)");
+		});
+
+		it('labels it plain "Status" (not inherited) when this row is itself the governor', () => {
+			const node = metaNode({ id: "f1", statusEnabled: true, statusSetId: "S" });
+			const governor: StatusGovernance = { statusEnabled: true, statusSetId: "S" };
+			const chooser = openChooser(build("showMetaFolderMenu", node, undefined, governor).menu);
+			expect(chooser.titles()).toContain("Status");
+			expect(chooser.titles()).not.toContain("Status (inherited)");
+		});
+
+		it('labels it "Status (inherited)" when the governor is an ancestor, not this row itself (E5)', () => {
+			const node = metaNode({ id: "f1" }); // no statusEnabled/statusSetId of its own
+			const governor: StatusGovernance = { statusEnabled: true, statusSetId: "S" }; // an ancestor's
+			const chooser = openChooser(build("showMetaFolderMenu", node, undefined, governor).menu);
+			expect(chooser.titles()).toContain("Status (inherited)");
+			expect(chooser.titles()).not.toContain("Status");
+		});
+
+		it('ticks Status when this row\'s own setting is explicitly "status"', () => {
+			const node = metaNode({ id: "f1", statusEnabled: true, statusSetId: "S", sortMode: "status" });
+			const governor: StatusGovernance = { statusEnabled: true, statusSetId: "S", sortMode: "status" };
+			const chooser = openChooser(build("showMetaFolderMenu", node, undefined, governor).menu);
+			expect(chooser.items.find((i) => i.title === "Status")!.checked).toBe(true);
+		});
+
+		it("E5: ticks Status (inherited) when this row has no setting of its own, following an inherited status sort", () => {
+			const node = metaNode({ id: "f1" }); // absent own sortMode
+			const governor: StatusGovernance = { statusEnabled: true, statusSetId: "S", sortMode: "status" };
+			const chooser = openChooser(build("showMetaFolderMenu", node, undefined, governor).menu);
+			expect(chooser.items.find((i) => i.title === "Status (inherited)")!.checked).toBe(true);
+			// R1: the effective sort here is Status (inherited), not Manual — Manual must not also
+			// be ticked, which would claim two contradictory sorts are both active.
+			expect(chooser.items.find((i) => i.title === "Manual")!.checked).toBe(false);
+		});
+
+		it("does not tick Status (inherited) when this row's own setting explicitly overrides the inherited status sort with another mode", () => {
+			const node = metaNode({ id: "f1", sortMode: "alphabetical" });
+			const governor: StatusGovernance = { statusEnabled: true, statusSetId: "S", sortMode: "status" };
+			const chooser = openChooser(build("showMetaFolderMenu", node, undefined, governor).menu);
+			expect(chooser.items.find((i) => i.title === "Status (inherited)")!.checked).toBe(false);
+			expect(chooser.items.find((i) => i.title === "A-Z")!.checked).toBe(true);
+		});
+
+		it("E5: choosing Manual on a row currently following an inherited status sort stores an explicit Manual", () => {
+			const node = metaNode({ id: "f1" });
+			const governor: StatusGovernance = { statusEnabled: true, statusSetId: "S", sortMode: "status" };
+			const { menu, fake } = build("showMetaFolderMenu", node, undefined, governor);
+			const chooser = openChooser(menu);
+			chooser.items.find((i) => i.title === "Manual")!.clickHandler!();
+			expect(fake.plugin.viewsManager.updateStatusGovernance).toHaveBeenCalledWith("v1", "f1", { sortMode: "manual", sortReverse: false });
+		});
+
+		it('clicking Status stores an explicit sortMode: "status" with sortReverse reset off', () => {
+			const node = metaNode({ id: "f1", sortMode: "modified", sortReverse: true });
+			const governor: StatusGovernance = { statusEnabled: true, statusSetId: "S" };
+			const { menu, fake } = build("showMetaFolderMenu", node, undefined, governor);
+			const chooser = openChooser(menu);
+			chooser.items.find((i) => i.title === "Status (inherited)")!.clickHandler!();
+			expect(fake.plugin.viewsManager.updateStatusGovernance).toHaveBeenCalledWith("v1", "f1", { sortMode: "status", sortReverse: false });
+		});
+
+		it("the Bucket root offers Status (plain, not inherited) when the view itself governs a status set", () => {
+			const governingView: View = { id: "v2", name: "Governed", inboxMode: "view", root: [], statusEnabled: true, statusSetId: "S" };
+			const fake = sortFake({ statusEnabled: true, statusSetId: "S" });
+			let built: Menu | undefined;
+			const show = vi.spyOn(Menu.prototype, "showAtMouseEvent").mockImplementation(function (this: Menu) {
+				built = this;
+			});
+			(AtlasExplorerView.prototype as unknown as { showBucketHeaderMenu: (...a: unknown[]) => void }).showBucketHeaderMenu.call(fake, new MouseEvent("contextmenu"), governingView);
+			show.mockRestore();
+			const chooser = openChooser(built!);
+			expect(chooser.titles()).toContain("Status");
+			expect(chooser.titles()).not.toContain("Status (inherited)");
+		});
 	});
 });

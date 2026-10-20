@@ -126,9 +126,9 @@ describe("UT-11 the menu builders", () => {
 		// PR-2.F1: "Add under…" now also sits between Rename folder and Replace with…, but that's a
 		// different PR's own addition — this test still only pins the old Create/Replace with… order.
 		const empty = metaMenu(meta("m", "Empty"));
-		expect(empty.menu.titles()).toEqual(["Duplicate (Meta)", "Rename folder", "Add under…", "Replace with…", "Swap with…", "Data source…", "Delete folder"]);
+		expect(empty.menu.titles()).toEqual(["Duplicate (Meta)", "Rename folder", "Add under…", "Replace with…", "Swap with…", "Sort children…", "Data source…", "Delete folder"]);
 		const full = metaMenu(meta("m", "Full", [unit("u", file("Existing.md"))]));
-		expect(full.menu.titles()).toEqual(["Duplicate (Meta)", "Rename folder", "Add under…", "Replace with…", "Swap with…", "Statuses", "Data source…", "Delete folder"]);
+		expect(full.menu.titles()).toEqual(["Duplicate (Meta)", "Rename folder", "Add under…", "Replace with…", "Swap with…", "Sort children…", "Statuses", "Data source…", "Delete folder"]);
 	});
 
 	it("choosing Block, File or Module in the chooser starts that flow for this folder", () => {

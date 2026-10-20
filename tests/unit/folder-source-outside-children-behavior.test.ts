@@ -2,10 +2,12 @@ import { describe, expect, it, vi } from "vitest";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { Notice } from "obsidian";
 import { AtlasExplorerView } from "../../src/explorer-view";
 import { View, ViewNode } from "../../src/types";
 import { file, folder, meta, unit } from "../integration/create-from-meta-fixtures";
 import { callRenderNodeList, folderGovernor, makeFakeExplorer, makeStatusesManager, realNode, view as baseView } from "./explorer-view-sort-truncate-helpers";
+import { dragOverAt, folderNode, makeDropFake, makeRow, makeVm, node } from "./explorer-view-drop-helpers";
 
 const proto = AtlasExplorerView.prototype as unknown as Record<string, (...args: unknown[]) => unknown>;
 
@@ -46,7 +48,7 @@ function makeFakeExplorerForRenderNode(overrides: Record<string, unknown> = {}) 
 	};
 }
 
-async function renderUnitRow(node: ViewNode, fakeOverrides: Record<string, unknown> = {}) {
+export async function renderUnitRow(node: ViewNode, fakeOverrides: Record<string, unknown> = {}) {
 	const container = document.createElement("div");
 	const fake = makeFakeExplorerForRenderNode(fakeOverrides);
 	await proto.renderNode.call(fake, node, container, view, 0, []);
@@ -113,7 +115,28 @@ describe("G8/F7 — nest-disabled rule: an Outside-Vault-managed row is never ma
 		const node = unit("c2", file("Notes/a.md"));
 		const { fake } = await renderUnitRow(node);
 
-		expect((fake as { makeDropZone: ReturnType<typeof vi.fn> }).makeDropZone).toHaveBeenCalledWith(expect.anything(), { kind: "node", nodeId: "c2", viewId: "v1" });
+		// PR-3: makeDropZone now also carries a third `hasBottomZone` argument.
+		expect((fake as { makeDropZone: ReturnType<typeof vi.fn> }).makeDropZone).toHaveBeenCalledWith(
+			expect.anything(),
+			{ kind: "node", nodeId: "c2", viewId: "v1" },
+			expect.anything()
+		);
+	});
+
+	// PR-4 (T1/T5/C30 fix): G20 — makeDropZone staying uncalled is exactly what makes the new
+	// sorted-drop gating (which lives entirely inside makeDropZone's own closures) irrelevant to
+	// an Outside-Vault-managed row -- true whether or not its owning folder is explicitly sorted.
+	it("makeDropZone is still never called for an Outside-Vault-managed row when its owning folder is explicitly sorted", async () => {
+		const owner = meta("owner", "Folder", [], {
+			folderSource: { location: "outside", path: "", showFiles: true, showFolders: true },
+			sortMode: "alphabetical",
+		});
+		const node = unit("c1", file("/Volumes/External/Notes/a.md"), { folderSourceManaged: true, folderSourceOwnerId: "owner" });
+
+		const { row, fake } = await renderUnitRow(node, { ownerNode: owner });
+
+		expect(row.getAttribute("draggable")).toBe("false");
+		expect((fake as { makeDropZone: ReturnType<typeof vi.fn> }).makeDropZone).not.toHaveBeenCalled();
 	});
 });
 
@@ -319,5 +342,40 @@ describe("R9(c) — clicking or pressing Enter on an Outside-Vault-managed row n
 		proto.handleRowKeydown.call(fake, evt, node, view);
 
 		expect(fake.openRef).toHaveBeenCalledWith({ kind: "file", path: "Notes/a.md" });
+	});
+});
+
+// PR-4 (T1/T5/C30 fix): G20/G22 — when the sorted-drop gating's *target* is itself an
+// Outside-Vault source folder, the gating is bypassed outright (`isOutsideSourceFolder`), so a
+// drop from elsewhere lands exactly as it did before this PR: no outline, no Notice, plain
+// sibling insert -- regardless of any sortMode configured on it. Mirrors explorer-view.test.ts's
+// own G22 coverage, driven here too since this is the spec's own named test file for
+// Outside-Vault source behaviour.
+describe("PR-4 G22 — an Outside-Vault source folder's own row ignores the new sorted-drop gating entirely", () => {
+	it("an edge drop onto one of its real rows shows no outline and no Notice, and lands as a plain sibling insert, even though the folder is explicitly sorted", () => {
+		const m = node("m", "M.md");
+		const n2 = node("n", "N.md");
+		const outside = folderNode("outside", "Outside", [m, n2], {
+			sortMode: "alphabetical",
+			folderSource: { location: "outside", path: "", showFiles: true, showFolders: true },
+		});
+		const vm = makeVm([outside]);
+		const sm = makeStatusesManager();
+		const fake = makeDropFake(vm, sm);
+		fake.dragPayload = { kind: "node", nodeIds: ["n"], viewId: "v1" };
+		Notice.reset();
+
+		const container = document.createElement("div");
+		const row = makeRow();
+		container.appendChild(row);
+		fake.makeDropZone(row, { kind: "node", nodeId: "m", viewId: "v1" }, true);
+
+		dragOverAt(row, 10); // top edge of "m" -- today's plain reorder line, sort ignored for this list
+		expect(container.querySelectorAll(".atlas-drop-indicator")).toHaveLength(1);
+		expect(container.querySelectorAll(".atlas-sorted-drop-outline")).toHaveLength(0);
+
+		row.dispatchEvent(new Event("drop", { bubbles: true }));
+		expect(Notice.instances).toHaveLength(0);
+		expect(vm.getViews()[0].root[0].children.map((child) => child.id)).toEqual(["n", "m"]);
 	});
 });

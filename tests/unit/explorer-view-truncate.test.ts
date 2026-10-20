@@ -1,6 +1,6 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { ApiItemState } from "../../src/types";
-import { callRenderNodeList, folderGovernor, makeFakeExplorer, makeStatusesManager, realNode, rowOrder, view } from "./explorer-view-sort-truncate-helpers";
+import { callRenderNodeList, folderGovernor, makeFakeExplorer, makeStatusesManager, proto, realNode, rowOrder, view } from "./explorer-view-sort-truncate-helpers";
 
 function apiItem(id: string, explicitStatusId?: string): ApiItemState {
 	return { id, label: id, explicitStatusId };
@@ -167,5 +167,94 @@ describe("PR-2.F3 (G10) regression — a node folded into a truncated group has 
 
 		expect(container.querySelector('[data-id="real-2"]')).toBeNull();
 		expect(rowOrder(container)).toEqual(["group:node:folder:todo"]);
+	});
+});
+
+
+// PR-1 (R1 fix, G17): A-Z/Modified/Time added run before hide and truncate, so a truncation
+// placeholder lands at its first member's SORTED position, not its build-order position, and a
+// filter match keeps following the sort even while it bypasses hide/truncate outright.
+describe("PR-1 G17 — the direct sort modes (alphabetical/modified/time-added) run before hide and truncate", () => {
+	it("the truncation placeholder lands at its first member's sorted position, not its build position", async () => {
+		const sm = makeStatusesManager();
+		const folder = folderGovernor({ sortMode: "alphabetical", truncatedStatuses: { todo: { enabled: true } } });
+		// Build order: zebra, mango, apple. Alphabetical order: apple, mango, zebra.
+		const zebra = realNode("zebra", { ref: { kind: "file", path: "Z.md" }, explicitStatusId: "todo" });
+		const mango = realNode("mango", { ref: { kind: "file", path: "M.md" }, explicitStatusId: "done" });
+		const apple = realNode("apple", { ref: { kind: "file", path: "A.md" }, explicitStatusId: "todo" });
+
+		const fake = makeFakeExplorer(sm, {
+			resolveRef: vi.fn(async (ref: { path: string }) => ({
+				text: ref.path === "Z.md" ? "Zebra" : ref.path === "M.md" ? "Mango" : "Apple",
+				icon: "file",
+				promoted: false,
+				added: false,
+				missing: false,
+			})),
+		});
+		const container = document.createElement("div");
+		await callRenderNodeList(fake, [zebra, mango, apple], container, view, 1, [folder]);
+
+		// Sorted order is apple(todo), mango(done), zebra(todo). apple and zebra share "todo"
+		// (truncated, count 2); apple is first in the SORTED iteration, so the group header renders
+		// at apple's slot (before mango) — if truncate ran before sort (or on build order), the
+		// group would instead land at zebra's build-order slot, after mango.
+		expect(rowOrder(container)).toEqual(["group:node:folder:todo", "mango"]);
+	});
+
+	it("a filter match still follows the folder's sort order, not its build order, even while bypassing truncate", async () => {
+		const sm = makeStatusesManager();
+		const folder = folderGovernor({ sortMode: "alphabetical" });
+		// Build order: zebra, apple — both carry "a" so both bypass the filter.
+		const zebra = realNode("zebra", { ref: { kind: "file", path: "Z.md" } });
+		const apple = realNode("apple", { ref: { kind: "file", path: "A.md" } });
+
+		const fake = makeFakeExplorer(sm, {
+			resolveRef: vi.fn(async (ref: { path: string }) => ({
+				text: ref.path === "Z.md" ? "Zebra" : "Apple",
+				icon: "file",
+				promoted: false,
+				added: false,
+				missing: false,
+			})),
+		});
+		fake.filterText = "a"; // matches both "Zebra" and "Apple"
+		const container = document.createElement("div");
+		await callRenderNodeList(fake, [zebra, apple], container, view, 1, [folder]);
+
+		// Both rows bypass hide/truncate (filter match), but still render in sorted order, not the
+		// zebra-then-apple build order.
+		expect(rowOrder(container)).toEqual(["apple", "zebra"]);
+	});
+});
+
+// PR-4 (T1/T5/C30 fix): G20 — a truncation-group placeholder row has no edge zone at all; the
+// new sorted-drop gating lives entirely inside `makeDropZone`'s own dragover/drop closures
+// (explorer-view.ts), which `renderTruncationGroupHeader` never calls, sorted folder or not.
+// Drives the real (unstubbed) group header through the real merged sort/truncate pass and
+// confirms a dragover at the row produces today's result: nothing at all (no line, no outline,
+// not draggable).
+describe("PR-4 G20 — a truncation-group placeholder row takes no edge drops, whether or not its owning folder is sorted", () => {
+	it("a real group header rendered under a sorted (A-Z) folder is never draggable and ignores a dragover at its own top/bottom edge", async () => {
+		const sm = makeStatusesManager();
+		const folder = folderGovernor({ sortMode: "alphabetical", truncatedStatuses: { todo: { enabled: true } } });
+		const real1 = realNode("real-1", { explicitStatusId: "todo" });
+		const real2 = realNode("real-2", { explicitStatusId: "todo" });
+
+		const fake = makeFakeExplorer(sm, { renderTruncationGroupHeader: vi.fn(proto.renderTruncationGroupHeader as (...a: unknown[]) => void) });
+		const container = document.createElement("div");
+		await callRenderNodeList(fake, [real1, real2], container, view, 1, [folder]);
+
+		const row = container.querySelector(".atlas-truncation-row") as HTMLElement;
+		expect(row).toBeTruthy();
+		expect(row.getAttribute("draggable")).toBeNull(); // never made draggable, unaffected by sort
+
+		for (const clientY of [5, 50, 95]) {
+			row.dispatchEvent(new MouseEvent("dragover", { bubbles: true, cancelable: true, clientY }));
+		}
+		row.dispatchEvent(new Event("drop", { bubbles: true }));
+		expect(container.querySelectorAll(".atlas-drop-indicator")).toHaveLength(0);
+		expect(container.classList.contains("atlas-sorted-drop-outline")).toBe(false);
+		expect(row.classList.contains("atlas-drop-target")).toBe(false);
 	});
 });
