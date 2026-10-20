@@ -349,6 +349,8 @@ export class ItemView {}
 export class MenuItem {
 	title = "";
 	icon = "";
+	checked = false;
+	disabled = false;
 	clickHandler: (() => void) | null = null;
 	setTitle(title: string): this {
 		this.title = title;
@@ -356,6 +358,14 @@ export class MenuItem {
 	}
 	setIcon(icon: string): this {
 		this.icon = icon;
+		return this;
+	}
+	setChecked(checked: boolean): this {
+		this.checked = checked;
+		return this;
+	}
+	setDisabled(disabled: boolean): this {
+		this.disabled = disabled;
 		return this;
 	}
 	onClick(cb: () => void): this {

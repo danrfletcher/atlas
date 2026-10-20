@@ -1,6 +1,6 @@
-import { describe, expect, it } from "vitest";
-import { ApiItemState } from "../../src/types";
-import { callRenderNodeList, folderGovernor, makeFakeExplorer, makeStatusesManager, realNode, rowOrder, view } from "./explorer-view-sort-truncate-helpers";
+import { describe, expect, it, vi } from "vitest";
+import { ApiItemState, StatusGovernance, View, ViewNode } from "../../src/types";
+import { callRenderNodeList, folderGovernor, makeFakeExplorer, makeStatusesManager, proto, realNode, rowOrder, view } from "./explorer-view-sort-truncate-helpers";
 
 function apiItem(id: string, explicitStatusId?: string): ApiItemState {
 	return { id, label: id, explicitStatusId };
@@ -117,5 +117,349 @@ describe("G25 — sort: API item rows share the one sort pass real units get", (
 		await expect(callRenderNodeList(fake, [], container, view, 1, [folder], folder)).resolves.toBeUndefined();
 
 		expect(rowOrder(container)).toEqual(["api-1"]);
+	});
+});
+
+// PR-1 (G6-G21): A-Z / Modified / Time added — read straight off the list's own direct governor
+// (`ancestors[0]`), never inherited past it (unlike sortMode: "status" above).
+describe("PR-1 — sort children: alphabetical / modified / time-added", () => {
+	it("alphabetical sorts by the resolved display name, case-insensitively", async () => {
+		const sm = makeStatusesManager();
+		const folder = folderGovernor({ sortMode: "alphabetical" });
+		const a = realNode("a", { ref: { kind: "file", path: "A.md" } });
+		const b = realNode("b", { ref: { kind: "file", path: "B.md" } });
+
+		const fake = makeFakeExplorer(sm, {
+			resolveRef: vi.fn(async (ref: { path: string }) => ({
+				text: ref.path === "A.md" ? "zebra" : "Apple",
+				icon: "file",
+				promoted: false,
+				added: false,
+				missing: false,
+			})),
+		});
+		const container = document.createElement("div");
+		await callRenderNodeList(fake, [a, b], container, view, 1, [folder]);
+
+		// "Apple" (b's resolved text) sorts before "zebra" (a's) regardless of original build order.
+		expect(rowOrder(container)).toEqual(["b", "a"]);
+	});
+
+	it("alphabetical + Reverse flips the direction", async () => {
+		const sm = makeStatusesManager();
+		const folder = folderGovernor({ sortMode: "alphabetical", sortReverse: true });
+		const a = realNode("a", { ref: { kind: "file", path: "A.md" } });
+		const b = realNode("b", { ref: { kind: "file", path: "B.md" } });
+
+		const fake = makeFakeExplorer(sm, {
+			resolveRef: vi.fn(async (ref: { path: string }) => ({
+				text: ref.path === "A.md" ? "Apple" : "Banana",
+				icon: "file",
+				promoted: false,
+				added: false,
+				missing: false,
+			})),
+		});
+		const container = document.createElement("div");
+		await callRenderNodeList(fake, [a, b], container, view, 1, [folder]);
+
+		expect(rowOrder(container)).toEqual(["b", "a"]);
+	});
+
+	it("modified sorts newest file-modified-time first, via the row's own modifiedTimeForRef", async () => {
+		const sm = makeStatusesManager();
+		const folder = folderGovernor({ sortMode: "modified" });
+		const older = realNode("older", { ref: { kind: "file", path: "Old.md" } });
+		const newer = realNode("newer", { ref: { kind: "file", path: "New.md" } });
+
+		const fake = makeFakeExplorer(sm, {
+			modifiedTimeForRef: vi.fn((ref: { path: string }) => (ref.path === "Old.md" ? 100 : 200)),
+		});
+		const container = document.createElement("div");
+		await callRenderNodeList(fake, [older, newer], container, view, 1, [folder]);
+
+		expect(rowOrder(container)).toEqual(["newer", "older"]);
+		// G9: "modified" never resolves display text — only mtime is needed.
+		expect(fake.resolveRef).not.toHaveBeenCalled();
+	});
+
+	it("modified: a row with no time (e.g. a meta Folder, G9) sorts last, even under Reverse", async () => {
+		const sm = makeStatusesManager();
+		const folder = folderGovernor({ sortMode: "modified", sortReverse: true });
+		const timed = realNode("timed", { ref: { kind: "file", path: "T.md" } });
+		const metaChild: ViewNode = { id: "meta-child", type: "meta", label: "Sub", children: [] };
+
+		const fake = makeFakeExplorer(sm, { modifiedTimeForRef: vi.fn(() => 500) });
+		const container = document.createElement("div");
+		await callRenderNodeList(fake, [metaChild, timed], container, view, 1, [folder]);
+
+		// Even reversed, the no-time meta folder stays last, not first.
+		expect(rowOrder(container)).toEqual(["timed", "meta-child"]);
+	});
+
+	it("time-added sorts newest placedAt first and never calls resolveRef or modifiedTimeForRef", async () => {
+		const sm = makeStatusesManager();
+		const folder = folderGovernor({ sortMode: "time-added" });
+		const older = realNode("older", { placedAt: 100 });
+		const newer = realNode("newer", { placedAt: 200 });
+
+		const fake = makeFakeExplorer(sm);
+		const container = document.createElement("div");
+		await callRenderNodeList(fake, [older, newer], container, view, 1, [folder]);
+
+		expect(rowOrder(container)).toEqual(["newer", "older"]);
+		expect(fake.resolveRef).not.toHaveBeenCalled();
+		expect(fake.modifiedTimeForRef).not.toHaveBeenCalled();
+	});
+
+	it("time-added: a node with no placedAt (e.g. loaded from a pre-feature data.json, E8) sorts last under Reverse too", async () => {
+		const sm = makeStatusesManager();
+		const folder = folderGovernor({ sortMode: "time-added", sortReverse: true });
+		const stamped = realNode("stamped", { placedAt: 500 });
+		const unstamped = realNode("unstamped"); // no placedAt at all
+
+		const fake = makeFakeExplorer(sm);
+		const container = document.createElement("div");
+		await callRenderNodeList(fake, [stamped, unstamped], container, view, 1, [folder]);
+
+		expect(rowOrder(container)).toEqual(["stamped", "unstamped"]);
+	});
+
+	it("ties keep their existing (manual) relative order and are not flipped by Reverse (stable sort)", async () => {
+		const sm = makeStatusesManager();
+		const folder = folderGovernor({ sortMode: "time-added", sortReverse: true });
+		const first = realNode("first", { placedAt: 100 });
+		const second = realNode("second", { placedAt: 100 });
+
+		const fake = makeFakeExplorer(sm);
+		const container = document.createElement("div");
+		await callRenderNodeList(fake, [first, second], container, view, 1, [folder]);
+
+		expect(rowOrder(container)).toEqual(["first", "second"]);
+	});
+
+	it("API rows sort alphabetically by label, and count as no time for modified/time-added (G18)", async () => {
+		const sm = makeStatusesManager();
+		const folder = folderGovernor({ sortMode: "alphabetical" });
+		folder.apiItemState = { "api-1": apiItem("api-1"), "api-2": apiItem("api-2") };
+		folder.apiItemOrder = ["api-1", "api-2"];
+		// Override the labels directly rather than relying on apiItem()'s id-as-label default.
+		folder.apiItemState["api-1"].label = "Zeta";
+		folder.apiItemState["api-2"].label = "Alpha";
+
+		const fake = makeFakeExplorer(sm);
+		const container = document.createElement("div");
+		await callRenderNodeList(fake, [], container, view, 1, [folder], folder);
+
+		expect(rowOrder(container)).toEqual(["api-2", "api-1"]);
+	});
+
+	it("never inherited past the direct parent (F6) — a sort mode set on a grandparent governor has no effect here", async () => {
+		const sm = makeStatusesManager();
+		// The immediate parent (ancestors[0]) sets nothing; a further ancestor sets alphabetical.
+		const directParent = folderGovernor({ id: "direct", sortMode: undefined });
+		const grandparent = folderGovernor({ id: "grand", sortMode: "alphabetical" });
+		const a = realNode("a", { ref: { kind: "file", path: "A.md" } });
+		const b = realNode("b", { ref: { kind: "file", path: "B.md" } });
+
+		const fake = makeFakeExplorer(sm, {
+			resolveRef: vi.fn(async (ref: { path: string }) => ({
+				text: ref.path === "A.md" ? "zebra" : "Apple",
+				icon: "file",
+				promoted: false,
+				added: false,
+				missing: false,
+			})),
+		});
+		const container = document.createElement("div");
+		await callRenderNodeList(fake, [a, b], container, view, 2, [directParent, grandparent]);
+
+		// Build order preserved, not alphabetical — the grandparent's setting never reaches here.
+		expect(rowOrder(container)).toEqual(["a", "b"]);
+	});
+
+	it("sortMode manual is a no-op even with sortReverse left set from a prior mode", async () => {
+		const sm = makeStatusesManager();
+		const folder = folderGovernor({ sortMode: "manual", sortReverse: true });
+		const a = realNode("a", { placedAt: 100 });
+		const b = realNode("b", { placedAt: 200 });
+
+		const fake = makeFakeExplorer(sm);
+		const container = document.createElement("div");
+		await callRenderNodeList(fake, [a, b], container, view, 1, [folder]);
+
+		expect(rowOrder(container)).toEqual(["a", "b"]);
+	});
+});
+
+// PR-1 (R1 fix) — E9: a renamed file re-sorts under A-Z after the rename. The render pass always
+// re-resolves display text live (via resolveRef), so a rename's effect on A-Z order is already
+// correct the very next time renderNodeList runs — no separate "re-sort on rename" logic exists.
+describe("PR-1 E9 — a renamed file re-sorts under A-Z after the rename", () => {
+	it("the same two nodes render in a different order once the renamed one's resolved name changes", async () => {
+		const sm = makeStatusesManager();
+		const folder = folderGovernor({ sortMode: "alphabetical" });
+		const renamed = realNode("renamed", { ref: { kind: "file", path: "Renamed.md" } });
+		const fixed = realNode("fixed", { ref: { kind: "file", path: "Fixed.md" } });
+
+		// Before the rename: the renamed file's display name is "Zebra" — sorts after "Mango".
+		const before = makeFakeExplorer(sm, {
+			resolveRef: vi.fn(async (ref: { path: string }) => ({
+				text: ref.path === "Renamed.md" ? "Zebra" : "Mango",
+				icon: "file",
+				promoted: false,
+				added: false,
+				missing: false,
+			})),
+		});
+		const beforeContainer = document.createElement("div");
+		await callRenderNodeList(before, [renamed, fixed], beforeContainer, view, 1, [folder]);
+		expect(rowOrder(beforeContainer)).toEqual(["fixed", "renamed"]);
+
+		// After the rename (same node, same ref.path — only its resolved display text changed, the
+		// way a real on-disk rename would change what resolveRef returns for it): "Apple" now sorts
+		// before "Mango".
+		const after = makeFakeExplorer(sm, {
+			resolveRef: vi.fn(async (ref: { path: string }) => ({
+				text: ref.path === "Renamed.md" ? "Apple" : "Mango",
+				icon: "file",
+				promoted: false,
+				added: false,
+				missing: false,
+			})),
+		});
+		const afterContainer = document.createElement("div");
+		await callRenderNodeList(after, [renamed, fixed], afterContainer, view, 1, [folder]);
+		expect(rowOrder(afterContainer)).toEqual(["renamed", "fixed"]);
+	});
+});
+
+// PR-1 (R1 fix) — E12: missing (greyed) rows sort as "no time" under Modified/Time added, and by
+// their last known name under A-Z. `resolveRef`'s own fallback (the missing ref's last-known name)
+// is exactly the "name" sortKeyFor reads for A-Z — covered here at the render-pass level, not just
+// via sort.ts's displayNameFor (sort.test.ts) or the comparator (explorer-view-sort.test.ts's own
+// modified/time-added "no time" cases above).
+describe("PR-1 E12 — missing rows sort by last-known name under A-Z, and as no-time under Modified/Time added", () => {
+	it("A-Z: a missing row sorts by the name resolveRef falls back to, alongside present rows", async () => {
+		const sm = makeStatusesManager();
+		const folder = folderGovernor({ sortMode: "alphabetical" });
+		const missing = realNode("missing", { ref: { kind: "file", path: "Gone.md" } });
+		const present = realNode("present", { ref: { kind: "file", path: "Here.md" } });
+
+		const fake = makeFakeExplorer(sm, {
+			resolveRef: vi.fn(async (ref: { path: string }) =>
+				ref.path === "Gone.md"
+					? { text: "Alpha (missing)", icon: "file", promoted: false, added: false, missing: true }
+					: { text: "Zulu", icon: "file", promoted: false, added: false, missing: false }
+			),
+		});
+		const container = document.createElement("div");
+		await callRenderNodeList(fake, [present, missing], container, view, 1, [folder]);
+
+		// "Alpha (missing)" sorts before "Zulu" — the missing row's last-known name, not its build order.
+		expect(rowOrder(container)).toEqual(["missing", "present"]);
+	});
+
+	it("Modified: a missing row (no mtime) sorts last, even under Reverse — same as any other no-time row", async () => {
+		const sm = makeStatusesManager();
+		const folder = folderGovernor({ sortMode: "modified", sortReverse: true });
+		const missing = realNode("missing", { ref: { kind: "file", path: "Gone.md" } });
+		const present = realNode("present", { ref: { kind: "file", path: "Here.md" } });
+
+		const fake = makeFakeExplorer(sm, {
+			modifiedTimeForRef: vi.fn((ref: { path: string }) => (ref.path === "Gone.md" ? null : 500)),
+		});
+		const container = document.createElement("div");
+		await callRenderNodeList(fake, [missing, present], container, view, 1, [folder]);
+
+		expect(rowOrder(container)).toEqual(["present", "missing"]);
+	});
+
+	it("Time added: a missing row (no placedAt) sorts last, even under Reverse — same as any other unstamped row", async () => {
+		const sm = makeStatusesManager();
+		const folder = folderGovernor({ sortMode: "time-added", sortReverse: true });
+		const missing = realNode("missing", { ref: { kind: "file", path: "Gone.md" } }); // no placedAt
+		const present = realNode("present", { ref: { kind: "file", path: "Here.md" }, placedAt: 500 });
+
+		const fake = makeFakeExplorer(sm);
+		const container = document.createElement("div");
+		await callRenderNodeList(fake, [missing, present], container, view, 1, [folder]);
+
+		expect(rowOrder(container)).toEqual(["present", "missing"]);
+	});
+});
+
+// PR-1 (R1 fix) — E11 (render-pass level; the model-level round trip is in sort-setting.test.ts):
+// the Bucket root sorts per view, and switching views keeps each root's own setting. `View`
+// extends `StatusGovernance`, so ancestors[0] being the view itself (the top-level render call's
+// own `[view]` ancestors list) is exactly how a real top-level render reaches this.
+describe("PR-1 E11 — the Bucket root sorts per view, independently of any other view", () => {
+	it("the same two nodes render in a different order under two different views' own root sort settings", async () => {
+		const sm = makeStatusesManager();
+		const viewA: View = { ...view, id: "vA", sortMode: "alphabetical" };
+		const viewB: View = { ...view, id: "vB", sortMode: "time-added" };
+		const a = realNode("a", { ref: { kind: "file", path: "Z.md" }, placedAt: 200 }); // "zebra", newer
+		const b = realNode("b", { ref: { kind: "file", path: "A.md" }, placedAt: 100 }); // "apple", older
+
+		const fake = makeFakeExplorer(sm, {
+			resolveRef: vi.fn(async (ref: { path: string }) => ({
+				text: ref.path === "Z.md" ? "zebra" : "apple",
+				icon: "file",
+				promoted: false,
+				added: false,
+				missing: false,
+			})),
+		});
+
+		const containerA = document.createElement("div");
+		await callRenderNodeList(fake, [a, b], containerA, viewA, 0, [viewA]);
+		expect(rowOrder(containerA)).toEqual(["b", "a"]); // alphabetical: apple before zebra
+
+		const containerB = document.createElement("div");
+		await callRenderNodeList(fake, [a, b], containerB, viewB, 0, [viewB]);
+		expect(rowOrder(containerB)).toEqual(["a", "b"]); // time-added, newest first: a (200) before b (100)
+	});
+});
+
+// PR-1 (R1 fix) — E6: a sort changed while the folder is collapsed is saved, and applies on
+// expand. `renderFoldableChildren` always renders (and therefore always sorts) its children
+// regardless of `node.collapsed` — only the wrapper's CSS class hides them — so a sort set while
+// collapsed is already correctly ordered underneath, ready to show the moment it's expanded.
+describe("PR-1 E6 — a sort set while the folder is collapsed is applied, ready for when it expands", () => {
+	it("a collapsed folder's children render already sorted inside its (CSS-)hidden wrapper", async () => {
+		const sm = makeStatusesManager();
+		const folder: ViewNode = { id: "folder", type: "meta", label: "Folder", children: [], sortMode: "alphabetical", collapsed: true };
+		const zebra: ViewNode = { id: "zebra", type: "unit", ref: { kind: "file", path: "Z.md" }, children: [] };
+		const apple: ViewNode = { id: "apple", type: "unit", ref: { kind: "file", path: "A.md" }, children: [] };
+		folder.children = [zebra, apple];
+
+		const base = makeFakeExplorer(sm, {
+			resolveRef: vi.fn(async (ref: { path: string }) => ({
+				text: ref.path === "Z.md" ? "Zebra" : "Apple",
+				icon: "file",
+				promoted: false,
+				added: false,
+				missing: false,
+			})),
+		});
+		const fake = base as unknown as Record<string, unknown>;
+		fake.renderNodeList = proto.renderNodeList; // the real sort + render pass, not a stub
+
+		const container = document.createElement("div");
+		const chevron = document.createElement("div");
+		const method = proto.renderFoldableChildren as unknown as (
+			node: ViewNode,
+			chevron: HTMLElement,
+			container: HTMLElement,
+			view: View,
+			depth: number,
+			ancestors: StatusGovernance[]
+		) => Promise<void>;
+		await method.call(fake, folder, chevron, container, view, 1, [folder]);
+
+		const wrap = container.querySelector(".atlas-meta-children") as HTMLElement;
+		expect(wrap.classList.contains("is-collapsed")).toBe(true); // still visually collapsed
+		const inner = wrap.querySelector(".atlas-meta-children-inner") as HTMLElement;
+		expect(rowOrder(inner)).toEqual(["apple", "zebra"]); // already sorted underneath
 	});
 });

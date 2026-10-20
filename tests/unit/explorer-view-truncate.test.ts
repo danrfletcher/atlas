@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { ApiItemState } from "../../src/types";
 import { callRenderNodeList, folderGovernor, makeFakeExplorer, makeStatusesManager, realNode, rowOrder, view } from "./explorer-view-sort-truncate-helpers";
 
@@ -146,5 +146,62 @@ describe("G25 — truncate: API item rows share the one truncation-group count r
 
 		expect(rowOrder(container)).toEqual(["group:node:folder:todo"]);
 		expect(fake.renderTruncationGroupHeader.mock.calls[0][5]).toBe(2);
+	});
+});
+
+// PR-1 (R1 fix, G17): A-Z/Modified/Time added run before hide and truncate, so a truncation
+// placeholder lands at its first member's SORTED position, not its build-order position, and a
+// filter match keeps following the sort even while it bypasses hide/truncate outright.
+describe("PR-1 G17 — the direct sort modes (alphabetical/modified/time-added) run before hide and truncate", () => {
+	it("the truncation placeholder lands at its first member's sorted position, not its build position", async () => {
+		const sm = makeStatusesManager();
+		const folder = folderGovernor({ sortMode: "alphabetical", truncatedStatuses: { todo: { enabled: true } } });
+		// Build order: zebra, mango, apple. Alphabetical order: apple, mango, zebra.
+		const zebra = realNode("zebra", { ref: { kind: "file", path: "Z.md" }, explicitStatusId: "todo" });
+		const mango = realNode("mango", { ref: { kind: "file", path: "M.md" }, explicitStatusId: "done" });
+		const apple = realNode("apple", { ref: { kind: "file", path: "A.md" }, explicitStatusId: "todo" });
+
+		const fake = makeFakeExplorer(sm, {
+			resolveRef: vi.fn(async (ref: { path: string }) => ({
+				text: ref.path === "Z.md" ? "Zebra" : ref.path === "M.md" ? "Mango" : "Apple",
+				icon: "file",
+				promoted: false,
+				added: false,
+				missing: false,
+			})),
+		});
+		const container = document.createElement("div");
+		await callRenderNodeList(fake, [zebra, mango, apple], container, view, 1, [folder]);
+
+		// Sorted order is apple(todo), mango(done), zebra(todo). apple and zebra share "todo"
+		// (truncated, count 2); apple is first in the SORTED iteration, so the group header renders
+		// at apple's slot (before mango) — if truncate ran before sort (or on build order), the
+		// group would instead land at zebra's build-order slot, after mango.
+		expect(rowOrder(container)).toEqual(["group:node:folder:todo", "mango"]);
+	});
+
+	it("a filter match still follows the folder's sort order, not its build order, even while bypassing truncate", async () => {
+		const sm = makeStatusesManager();
+		const folder = folderGovernor({ sortMode: "alphabetical" });
+		// Build order: zebra, apple — both carry "a" so both bypass the filter.
+		const zebra = realNode("zebra", { ref: { kind: "file", path: "Z.md" } });
+		const apple = realNode("apple", { ref: { kind: "file", path: "A.md" } });
+
+		const fake = makeFakeExplorer(sm, {
+			resolveRef: vi.fn(async (ref: { path: string }) => ({
+				text: ref.path === "Z.md" ? "Zebra" : "Apple",
+				icon: "file",
+				promoted: false,
+				added: false,
+				missing: false,
+			})),
+		});
+		fake.filterText = "a"; // matches both "Zebra" and "Apple"
+		const container = document.createElement("div");
+		await callRenderNodeList(fake, [zebra, apple], container, view, 1, [folder]);
+
+		// Both rows bypass hide/truncate (filter match), but still render in sorted order, not the
+		// zebra-then-apple build order.
+		expect(rowOrder(container)).toEqual(["apple", "zebra"]);
 	});
 });

@@ -30,6 +30,7 @@ import { apiItemMatchesFilter, formatLocalDateFromIso } from "./api-mapping";
 import { MIN_REFRESH_MINUTES, RefreshEveryTimers } from "./api-refresh-timer";
 import { executeApiCommand } from "./api-command-runner";
 import { resolveArgv, tokenizeCommand } from "./command-argv";
+import { SortKey, compareSortKeys, currentSortMode, isDirectSortMode, SORT_MODE_CHOICES } from "./sort";
 
 export const ATLAS_VIEW_TYPE = "atlas-explorer";
 
@@ -455,6 +456,44 @@ function addSwapItems(menu: Menu, host: SwapMenuHost, view: View, node: ViewNode
 				.onClick(() => host.openSwapForFolder(view, node, displayName))
 		);
 	}
+}
+
+/** PR-1 (G6/G7): the "Sort children…" item + its submenu — same two-click shim as "Place in
+ * view ▸" above (`placeInViewFlow`'s own comment: Obsidian's public Menu API has no real
+ * submenu). Shared by the Atlas-folder menu, the unit menu and the Bucket header's own menu
+ * (`showBucketHeaderMenu`), so the four choices, their order, the ticked current mode and the
+ * Reverse-disabled-for-Manual rule (G11/F8) can't drift between call sites. `governance` is read
+ * live, right when the submenu opens (not captured once at the outer menu's build time), so the
+ * ticked mode and Reverse's checked/disabled state can never go stale between the two clicks.
+ * G19: picking any mode here always resets Reverse to off; the Reverse item itself only ever
+ * flips `sortReverse`, never the mode. Adds no separator — the caller owns it. */
+function addSortMenuItem(
+	menu: Menu,
+	evt: Pick<MouseEvent, "clientX" | "clientY">,
+	governance: Pick<StatusGovernance, "sortMode" | "sortReverse">,
+	onChange: (patch: Partial<StatusGovernance>) => void
+): void {
+	menu.addItem((item) =>
+		item
+			.setTitle("Sort children…")
+			.setIcon("arrow-down-a-z")
+			.onClick(() => {
+				const chooser = new Menu();
+				const mode = currentSortMode(governance);
+				for (const { mode: choice, label } of SORT_MODE_CHOICES) {
+					chooser.addItem((entry) => entry.setTitle(label).setChecked(mode === choice).onClick(() => onChange({ sortMode: choice, sortReverse: false })));
+				}
+				chooser.addSeparator();
+				chooser.addItem((entry) =>
+					entry
+						.setTitle("Reverse order")
+						.setChecked(mode !== "manual" && !!governance.sortReverse)
+						.setDisabled(mode === "manual")
+						.onClick(() => onChange({ sortReverse: !governance.sortReverse }))
+				);
+				chooser.showAtPosition({ x: evt.clientX, y: evt.clientY });
+			})
+	);
 }
 
 /** PR-1 (G11e): the Statuses, Data source…, Refresh now and Remove data source items, shared by the
@@ -1346,6 +1385,22 @@ export class AtlasExplorerView extends ItemView {
 
 	// --- ref resolution (shared by bucket + inbox rendering) -------------------------------------
 
+	/** PR-1 (G9): a file/block's own file mtime; a module's *interface note's* mtime, since a bare
+	 * folder has no meaningful modified time of its own in Obsidian; `null` ("no time" — sorts
+	 * last under `"modified"`, G9) for a folder with no interface note yet, or any ref that no
+	 * longer resolves to a real vault file. Synchronous — `TFile.stat` is already in memory via
+	 * the vault index; no disk read needed, unlike `resolveRef`'s free-block text lookups. */
+	private modifiedTimeForRef(ref: UnitRef): number | null {
+		if (ref.kind === "folder") {
+			const folder = this.plugin.app.vault.getAbstractFileByPath(ref.path);
+			if (!(folder instanceof TFolder)) return null;
+			const note = findInterfaceNote(this.plugin.app, folder, this.plugin.settings);
+			return note ? note.stat.mtime : null;
+		}
+		const file = this.plugin.app.vault.getAbstractFileByPath(ref.path);
+		return file instanceof TFile ? file.stat.mtime : null;
+	}
+
 	private async resolveRef(ref: UnitRef): Promise<RowInfo> {
 		const unit = this.unitsByRefKey.get(unitRefKey(ref));
 		if (unit) {
@@ -1901,6 +1956,19 @@ export class AtlasExplorerView extends ItemView {
 		const parts: SectionParts = { section: container, wrap: sectionWrap, chevron };
 		chevron.addEventListener("click", () => this.onSectionChevronClick("bucket", parts));
 		title.addEventListener("click", () => this.onSectionTitleClick("bucket", parts));
+		// PR-1 (G7): right-clicking the Bucket header offers the same "Sort children…" submenu as
+		// any row, writing through the view itself (nodeId: null) — the same root-governor
+		// mechanism the top-level render call just above already resolves status against.
+		header.addEventListener("contextmenu", (evt) => {
+			evt.preventDefault();
+			this.showBucketHeaderMenu(evt, view);
+		});
+	}
+
+	private showBucketHeaderMenu(evt: MouseEvent, view: View): void {
+		const menu = new Menu();
+		addSortMenuItem(menu, evt, view, (patch) => this.plugin.viewsManager.updateStatusGovernance(view.id, null, patch));
+		menu.showAtMouseEvent(evt);
 	}
 
 	/** PR 19: wires PR 17's hide-completed/hide-cancelled/truncate-statuses settings (captured but
@@ -2028,6 +2096,31 @@ export class AtlasExplorerView extends ItemView {
 			resolved.sort((a, b) =>
 				sortGovernor.sortReverse ? compareRank(rankOf(b), rankOf(a)) : compareRank(rankOf(a), rankOf(b))
 			);
+		}
+
+		// PR-1 (G6/F6): A-Z/Modified/Time added are read straight off *this list's own direct
+		// parent* (ancestors[0] — the view root itself at the top level), never inherited past it
+		// the way `"status"` above is — `findSortGovernor`'s ancestor walk is never consulted for
+		// these three. Running before hide/truncate, same as the status sort above, is what makes a
+		// truncated group's placeholder land at its first member's sorted position for these modes
+		// too, with no separate positioning logic.
+		const directGovernor = ancestors[0];
+		const directMode = currentSortMode(directGovernor ?? {});
+		if (isDirectSortMode(directMode)) {
+			const sortKeyFor = async (r: Resolved): Promise<SortKey> => {
+				if (r.apiItem) return { name: r.apiItem.label, mtime: null, placedAt: null };
+				const { node } = r;
+				const placedAt = node.placedAt ?? null;
+				if (node.type === "meta" || !node.ref) return { name: node.label ?? "", mtime: null, placedAt };
+				if (directMode === "time-added") return { name: "", mtime: null, placedAt };
+				const mtime = directMode === "modified" ? this.modifiedTimeForRef(node.ref) : null;
+				const name = directMode === "alphabetical" ? (await this.resolveRef(node.ref)).text : "";
+				return { name, mtime, placedAt };
+			};
+			const keyed = await Promise.all(resolved.map(async (r) => ({ r, key: await sortKeyFor(r) })));
+			keyed.sort((a, b) => compareSortKeys(directMode, !!directGovernor?.sortReverse, a.key, b.key));
+			resolved.length = 0;
+			resolved.push(...keyed.map((k) => k.r));
 		}
 
 		const isHidden = (status: StatusDefinition, governor: StatusGovernance): boolean =>
@@ -3124,6 +3217,9 @@ export class AtlasExplorerView extends ItemView {
 		// entirely rather than offered and doing nothing when toggled.
 		// PR-1 (G11e): same Statuses / Data source… / Refresh now / Remove data source items as an Atlas folder.
 		// The separator above is already in place, so tell the helper not to double it up.
+		// PR-1 (G6): "Sort children…" on every bucket row that can hold children — a unit row too,
+		// not just a Folder, since any row can be nested under (F6).
+		addSortMenuItem(menu, evt, node, (patch) => this.plugin.viewsManager.updateStatusGovernance(view.id, node.id, patch));
 		addSourceAndStatusItems(menu, this.plugin, this, view, node, true);
 		menu.addSeparator();
 		// PR 13: clones this row (and its whole meta-nested subtree, if it has one) as a new sibling
@@ -3428,6 +3524,8 @@ export class AtlasExplorerView extends ItemView {
 		addCreateItem(menu, evt, (kind) => this.startCreateFromMeta(kind, view, node));
 		// PR-2 (G3): on an Atlas folder, right after "Create". Only "Swap with…" applies here (G4).
 		addSwapItems(menu, this, view, node, node.label ?? "");
+		// PR-1 (G6): "Sort children…" on every Folder, any depth, whether it has children yet or not.
+		addSortMenuItem(menu, evt, node, (patch) => this.plugin.viewsManager.updateStatusGovernance(view.id, node.id, patch));
 		addSourceAndStatusItems(menu, this.plugin, this, view, node);
 		menu.addSeparator();
 		menu.addItem((item) =>
