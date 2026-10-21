@@ -115,7 +115,7 @@ Modified-sort's file-time snapshot only refreshes when the explorer actually has
 
 **Reordering by drag.** Drop on a row's top or bottom quarter to place the dragged item next to that row, in the same list; drop on the middle to nest it inside the row, as before. A row that's expanded and already showing its children has no bottom quarter (that quarter nests instead) — drop on the next row's top edge to place something after it.
 
-- **Manual list:** a line shows where the item will land, and it lands there.
+- **Manual list:** a line shows where the item will land, and it lands there. If you drag several rows and the row you drop on is one of them, the selection still lands together beside that row, in the order you dragged it (dropping on the middle nests the others into it and leaves that row where it is).
 - **Sorted list (anything but Manual):** dragging an item that is already in that list onto one of its edges is refused with a notice ("<Folder> is sorted A-Z. Set it to Manual to reorder."), since the sort would only undo the move. Dragging in an item from anywhere else — the Inbox, another folder, a deeper sub-folder — is allowed: the whole list is outlined (no line), the item is stored at the slot you dropped on, and it displays in its sorted place. Switching the list back to Manual shows the stored slot.
 - API rows, truncation placeholders and Outside-Vault children have no edge zones and can't be dropped on this way. A manually-added child of an Outside-Vault Folder still reorders, whatever sort the Folder has.
 - Arranging never touches disk; "Place in…" onto the folder an item is already in leaves its Time added stamp alone.

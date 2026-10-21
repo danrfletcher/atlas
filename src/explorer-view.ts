@@ -2867,7 +2867,7 @@ export class AtlasExplorerView extends ItemView {
 		});
 	}
 
-	/** PR-2 (G13): a small icon + tooltip on a Folder row (or the Bucket header, via
+	/** PR-2 (G13): a small icon + tooltip on a Folder or unit row (or the Bucket header, via
 	 * `renderBucketSection`) whose own children are actually sorted by something other than
 	 * Manual. Built on `activeSortFor` — the same helper the render pass's own status-sort
 	 * activation and the "Sort children…" menu's Status tick use — so this can never show an
@@ -2998,6 +2998,10 @@ export class AtlasExplorerView extends ItemView {
 		// PR-1 R4: a unit (not just a meta folder) can hold a data source after Create or Swap, and
 		// needs the same ok/failed/awaiting-confirmation signal.
 		this.renderConnectionDots(row, node);
+		// PR-2 R7 (G13): a unit row (a module, or any unit holding children) gets the same "Sort
+		// children…" menu as a Folder (G6), so it shows the same icon + tooltip when its own children
+		// are sorted. Same `[node, ...ancestors]` convention `renderNodeList` uses to recurse.
+		this.renderSortIndicator(row, node, this.plugin.statusesManager?.findSortGovernor([node, ...ancestors]) ?? null);
 		if (info.secondary) row.createSpan({ cls: "atlas-row-secondary", text: info.secondary });
 		if (info.missing) row.createSpan({ cls: "atlas-row-secondary", text: "(missing)" });
 		// PR-1.F2 (G5/G7): "filtered out" takes the place of "last seen". Remove works the same way as on a
@@ -3373,7 +3377,8 @@ export class AtlasExplorerView extends ItemView {
 			// E2: a target inside the dragged node's own subtree can never accept an edge drop (its
 			// own parent is itself inside that subtree, so `moveNode`'s cycle guard would refuse it
 			// anyway) — fall back to the plain, pre-PR-3 nest highlight rather than show a line that
-			// promises a move the drop will silently refuse.
+			// promises a move the drop will silently refuse. A target that is itself in the batch is
+			// not covered here (PR-3 R2): it takes the normal edge/nest path below.
 			if (this.isCycleDrop(target.viewId, target.nodeId)) {
 				zone = "nest";
 				this.clearDropIndicator();
@@ -3436,18 +3441,23 @@ export class AtlasExplorerView extends ItemView {
 		this.dropIndicatorEl = null;
 	}
 
-	/** PR-3 (E2): true when any node in the currently-dragged payload is `nodeId` itself, or an
-	 * ancestor of it — i.e. dropping on `nodeId` (or any edge of it) would require reparenting a
-	 * node into its own descendant, which `moveNode`'s own cycle guard already refuses
-	 * unconditionally. Used only to decide the *visual* feedback during `dragover`; the actual
-	 * refusal happens in `moveNode` regardless of whether this check runs at all. */
+	/** PR-3 (E2): true when `nodeId` sits strictly inside the subtree of a node in the currently-dragged
+	 * payload — i.e. dropping on `nodeId` (or any edge of it) would require reparenting a node into its
+	 * own descendant, which `moveNode`'s own cycle guard already refuses unconditionally. Used only to
+	 * decide the *visual* feedback during `dragover`; the actual refusal happens in `moveNode`
+	 * regardless of whether this check runs at all.
+	 *
+	 * PR-3 R2: a target that is itself one of the dragged nodes is *not* a cycle for edge purposes.
+	 * It is part of the batch: an edge drop lands the whole batch together at the slot beside it, in
+	 * drag order, and the target's own move is the usual no-op (E1) or a harmless reorder. Only the
+	 * nest zone onto the dragged row itself is refused, by `moveNode`'s cycle guard. */
 	private isCycleDrop(viewId: string, nodeId: string): boolean {
 		const payload = this.dragPayload;
 		if (!payload || payload.kind !== "node" || payload.viewId !== viewId) return false;
 		const view = this.plugin.viewsManager.getView(viewId);
 		if (!view) return false;
 		return payload.nodeIds.some((draggedId) => {
-			if (draggedId === nodeId) return true;
+			if (draggedId === nodeId) return false;
 			const dragged = this.findNodeAnywhere(view.root, draggedId);
 			return !!dragged && this.nodeContainsDescendant(dragged.node, nodeId);
 		});

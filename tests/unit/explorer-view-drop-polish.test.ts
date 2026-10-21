@@ -46,45 +46,104 @@ describe("PR-3 R3 — golden path from the spec's real starting state: a same-pa
 	});
 });
 
-describe("PR-3 R2 — a selection that includes the drop target (pinned current behaviour)", () => {
+describe("PR-3 R2 — a selection that includes the drop target is part of the batch", () => {
 	// The spec says the target "is treated as part of the batch and the cycle guard and no-op rules
-	// still hold". `isCycleDrop` is true whenever the target is in the dragged set, so dragover forces
-	// the nest zone — the highlight the user sees — and the drop nests the *other* selected rows into
-	// the target while the cycle guard refuses only the target itself. This test pins that, so any
-	// change to it is deliberate; whether "B lands before D" or "no change" is wanted instead is an
-	// open question for Dan (see the PR summary).
-	it("select B and D, drop on D's top edge: shows the nest highlight (no line), nests B into D, D itself stays put", () => {
-		const b = node("b", "B.md");
-		const c = node("c", "C.md");
-		const d = node("d", "D.md");
-		const vm = makeVm([b, c, d]);
+	// still hold". An edge drop therefore lands the whole batch together at the slot beside the
+	// target, in drag order (the target's own move is the E1 no-op or a harmless reorder); only the
+	// nest zone onto a dragged row itself is refused, by the cycle guard. Provisional reading, pending
+	// Dan's confirmation (docs/decisions.md).
+	function setup(ids: string[], dragged: string[]) {
+		const nodes = ids.map((id) => node(id, `${id.toUpperCase()}.md`));
+		const vm = makeVm(nodes);
 		const fake = makeDropFake(vm);
-		fake.dragPayload = { kind: "node", nodeIds: ["b", "d"], viewId: "v1" };
+		fake.dragPayload = { kind: "node", nodeIds: dragged, viewId: "v1" };
+		return { vm, fake };
+	}
+	const rootIds = (vm: ReturnType<typeof makeVm>) => vm.getViews()[0].root.map((n) => n.id);
 
+	it("select B and D, drop on D's top edge: shows a line before D and B lands before D (nothing nests)", () => {
+		const { vm, fake } = setup(["b", "c", "d"], ["b", "d"]);
 		const { container, row } = mountZone(fake, "d");
 		dragOverAt(row, 5);
-		expect(container.querySelectorAll(".atlas-drop-indicator")).toHaveLength(0);
-		expect(row.classList.contains("atlas-drop-target")).toBe(true);
+		expect(container.querySelectorAll(".atlas-drop-indicator")).toHaveLength(1);
+		expect(Array.from(container.children)).toEqual([fake.dropIndicatorEl, row]);
+		expect(row.classList.contains("atlas-drop-target")).toBe(false);
 
+		drop(row);
+		expect(rootIds(vm)).toEqual(["c", "b", "d"]);
+		expect(vm.getViews()[0].root.every((n) => n.children.length === 0)).toBe(true);
+	});
+
+	it("select B and D, drop on D's bottom edge: the batch lands together after the target's slot, in drag order", () => {
+		const { vm, fake } = setup(["b", "c", "d", "e"], ["b", "d"]);
+		const { row } = mountZone(fake, "d");
+		dragOverAt(row, 95);
+		drop(row);
+		expect(rootIds(vm)).toEqual(["c", "b", "d", "e"]);
+	});
+
+	it("select B and D, drop on D's middle: nests B into D; D itself stays put (cycle guard)", () => {
+		const { vm, fake } = setup(["b", "c", "d"], ["b", "d"]);
+		const { row } = mountZone(fake, "d");
+		dragOverAt(row, 50);
+		expect(row.classList.contains("atlas-drop-target")).toBe(true);
 		drop(row);
 		const root = vm.getViews()[0].root;
 		expect(root.map((n) => n.id)).toEqual(["c", "d"]);
 		expect(root[1].children.map((n) => n.id)).toEqual(["b"]);
 	});
 
-	it("a lone drop on the dragged row itself is a no-op (the cycle guard refuses it)", () => {
-		const a = node("a", "A.md");
-		const b = node("b", "B.md");
-		const vm = makeVm([a, b]);
-		const fake = makeDropFake(vm);
-		fake.dragPayload = { kind: "node", nodeIds: ["a"], viewId: "v1" };
-
-		const { row } = mountZone(fake, "a");
+	it("a lone drag onto its own top edge is the E1 no-op: a line shows, the order is unchanged", () => {
+		const { vm, fake } = setup(["a", "b"], ["a"]);
+		const { container, row } = mountZone(fake, "a");
 		dragOverAt(row, 5);
+		expect(container.querySelectorAll(".atlas-drop-indicator")).toHaveLength(1);
 		drop(row);
-		const root = vm.getViews()[0].root;
-		expect(root.map((n) => n.id)).toEqual(["a", "b"]);
-		expect(root[0].children).toEqual([]);
+		expect(rootIds(vm)).toEqual(["a", "b"]);
+		expect(vm.getViews()[0].root[0].children).toEqual([]);
+	});
+
+	it("a lone drag onto its own middle is a no-op (the cycle guard refuses the nest)", () => {
+		const { vm, fake } = setup(["a", "b"], ["a"]);
+		const { row } = mountZone(fake, "a");
+		dragOverAt(row, 50);
+		drop(row);
+		expect(rootIds(vm)).toEqual(["a", "b"]);
+		expect(vm.getViews()[0].root[0].children).toEqual([]);
+	});
+
+	it("in a sorted folder the whole drop is refused with the Notice, target in the batch or not", async () => {
+		const a = node("a", "a.md");
+		const b = node("b", "b.md");
+		const c = node("c", "c.md");
+		const grand = folderNode("grand", "Grand", [a, b, c], { sortMode: "alphabetical" });
+		const vm = makeVm([grand]);
+		const fake = makeDropFake(vm, makeStatusesManager());
+		fake.dragPayload = { kind: "node", nodeIds: ["a", "c"], viewId: "v1" };
+		Notice.reset();
+		const { container, row } = mountZone(fake, "c");
+		dragOverAt(row, 5);
+		expect(container.querySelectorAll(".atlas-drop-indicator")).toHaveLength(0); // no line in a sorted list
+		drop(row);
+		await flushNoticeMicrotasks();
+		expect(Notice.instances.map((n) => n.message)).toEqual(["Grand is sorted A-Z. Set it to Manual to reorder."]);
+		expect(vm.getViews()[0].root[0].children.map((n) => n.id)).toEqual(["a", "b", "c"]);
+	});
+
+	it("a target inside a dragged node's subtree still falls back to the nest highlight and refuses the drop", () => {
+		const child = node("child", "Child.md");
+		const parent = node("parent", "Parent.md", [child]);
+		const other = node("other", "Other.md");
+		const vm = makeVm([parent, other]);
+		const fake = makeDropFake(vm);
+		fake.dragPayload = { kind: "node", nodeIds: ["parent", "child"], viewId: "v1" };
+		const { container, row } = mountZone(fake, "child");
+		dragOverAt(row, 5);
+		expect(container.querySelectorAll(".atlas-drop-indicator")).toHaveLength(0);
+		expect(row.classList.contains("atlas-drop-target")).toBe(true);
+		drop(row);
+		expect(rootIds(vm)).toEqual(["parent", "other"]);
+		expect(vm.getViews()[0].root[0].children.map((n) => n.id)).toEqual(["child"]);
 	});
 });
 
@@ -261,6 +320,49 @@ describe("PR-4 R2 — folder-source hoisted rows and lifting out of a sub-folder
 		await flushNoticeMicrotasks();
 		expect(Notice.instances.map((n) => n.message)).toEqual(["Grand is sorted A-Z. Set it to Manual to reorder."]);
 		expect(vm.getViews()[0].root[0].children.map((n) => n.id)).toEqual(["a", "z"]);
+	});
+});
+
+describe("PR-2 R7 — the G13 sort indicator on a unit row", () => {
+	async function unitRow(n: ViewNode, governor: unknown = null): Promise<HTMLElement> {
+		const base: Record<string, unknown> = {
+			plugin: { statusesManager: { findSortGovernor: vi.fn(() => governor) }, settings: {}, viewsManager: { managedRowFilterState: vi.fn(() => "shown"), getNode: vi.fn() }, folderSourcePathStore: { get: vi.fn(() => "") } },
+			selectedBucketNodeIds: new Set<string>(),
+			filterText: "",
+			isOutsideManagedUnit: proto.isOutsideManagedUnit,
+			matchesFilter: proto.matchesFilter,
+			renderConnectionDots: proto.renderConnectionDots,
+			renderSortIndicator: proto.renderSortIndicator,
+			bucketVisibleOrder: vi.fn(() => []),
+			handleSelectionClick: vi.fn(() => false),
+			resolveRef: vi.fn(async () => ({ text: "t", icon: "file", promoted: false, added: false, missing: false })),
+			computeEffectiveCollapsed: vi.fn(async () => false),
+		};
+		const fake = new Proxy(base, {
+			get(target, prop: string) {
+				if (!(prop in target)) target[prop] = vi.fn();
+				return target[prop];
+			},
+		});
+		const container = document.createElement("div");
+		await proto.renderNode.call(fake, n, container, baseView, 0, []);
+		return container.querySelector(".atlas-row-unit") as HTMLElement;
+	}
+
+	it("a unit row whose own children are sorted shows the icon and the tooltip", async () => {
+		const row = await unitRow({ ...node("u", "u.md"), sortMode: "alphabetical", sortReverse: true });
+		expect(row.querySelector(".atlas-sort-indicator")).toBeTruthy();
+	});
+
+	it("a Manual unit row shows none", async () => {
+		expect((await unitRow(node("u", "u.md"))).querySelector(".atlas-sort-indicator")).toBeNull();
+		expect((await unitRow({ ...node("u", "u.md"), sortMode: "manual" })).querySelector(".atlas-sort-indicator")).toBeNull();
+	});
+
+	it("a unit row under a governor that sorts by status shows the status indicator", async () => {
+		const governor = { statusSetId: "s1", sortMode: "status", sortReverse: false, inheritToSubfolders: true };
+		const row = await unitRow(node("u", "u.md"), governor);
+		expect(row.querySelector(".atlas-sort-indicator")).toBeTruthy();
 	});
 });
 
