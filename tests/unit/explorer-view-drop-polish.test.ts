@@ -359,9 +359,20 @@ describe("PR-2 R7 — the G13 sort indicator on a unit row", () => {
 		expect((await unitRow({ ...node("u", "u.md"), sortMode: "manual" })).querySelector(".atlas-sort-indicator")).toBeNull();
 	});
 
-	it("a unit row under a governor that sorts by status shows the status indicator", async () => {
-		const governor = { statusSetId: "s1", sortMode: "status", sortReverse: false, inheritToSubfolders: true };
+	const governor = { statusSetId: "s1", sortMode: "status", sortReverse: false, inheritToSubfolders: true };
+
+	it("a unit row with children under a governor that sorts by status shows the status indicator", async () => {
+		const row = await unitRow({ ...node("u", "u.md"), children: [node("k", "k.md")] }, governor);
+		expect(row.querySelector(".atlas-sort-indicator")).toBeTruthy();
+	});
+
+	it("a childless leaf under a governor that sorts by status shows no indicator", async () => {
 		const row = await unitRow(node("u", "u.md"), governor);
+		expect(row.querySelector(".atlas-sort-indicator")).toBeNull();
+	});
+
+	it("a childless unit with its own explicit non-Manual mode still shows the indicator", async () => {
+		const row = await unitRow({ ...node("u", "u.md"), sortMode: "alphabetical" });
 		expect(row.querySelector(".atlas-sort-indicator")).toBeTruthy();
 	});
 });

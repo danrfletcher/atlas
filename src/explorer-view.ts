@@ -3001,7 +3001,12 @@ export class AtlasExplorerView extends ItemView {
 		// PR-2 R7 (G13): a unit row (a module, or any unit holding children) gets the same "Sort
 		// children…" menu as a Folder (G6), so it shows the same icon + tooltip when its own children
 		// are sorted. Same `[node, ...ancestors]` convention `renderNodeList` uses to recurse.
-		this.renderSortIndicator(row, node, this.plugin.statusesManager?.findSortGovernor([node, ...ancestors]) ?? null);
+		// A row with no children has nothing to sort, so the status sort it would only inherit from
+		// a governor above is not shown (that would put an icon on every leaf in a sorted list); an
+		// explicitly set own mode still shows.
+		if (node.children.length > 0 || node.sortMode !== undefined) {
+			this.renderSortIndicator(row, node, this.plugin.statusesManager?.findSortGovernor([node, ...ancestors]) ?? null);
+		}
 		if (info.secondary) row.createSpan({ cls: "atlas-row-secondary", text: info.secondary });
 		if (info.missing) row.createSpan({ cls: "atlas-row-secondary", text: "(missing)" });
 		// PR-1.F2 (G5/G7): "filtered out" takes the place of "last seen". Remove works the same way as on a
