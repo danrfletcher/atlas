@@ -18,6 +18,7 @@ import { TextPromptModal, ConfirmModal, ConfirmDeleteRowsModal, StatusesModal } 
 import { StatusDefinition, pluralizeStatusLabel } from "./statuses";
 import { openStatusPickerPopup } from "./status-popup";
 import { createInterfaceNote, findInterfaceNote } from "./interface-notes";
+import { refTargetExists, suppressMiddleButtonAutoscroll, wireMiddleClickOpen } from "./middle-click-open";
 import { addBlock } from "./commands";
 import { addCreateModuleItem, startCreateModule, unitForRef } from "./create-module";
 import { CreateKind, addCreateItem, startCreateFromMeta } from "./create-from-meta";
@@ -1474,6 +1475,8 @@ export class AtlasExplorerView extends ItemView {
 		}
 
 		// G9/G9b: click opens attachment or runs terminal command per source clickAction config
+		// Middle-click on an API item row does nothing, but must not start browser autoscroll.
+		row.addEventListener("mousedown", suppressMiddleButtonAutoscroll);
 		row.addEventListener("click", () => {
 			void this.handleApiItemClick(folderNode, item);
 		});
@@ -2417,6 +2420,7 @@ export class AtlasExplorerView extends ItemView {
 			const label = config.label?.trim() || pluralizeStatusLabel(status.label);
 			row.createSpan({ cls: "atlas-row-text", text: `${count} ${label}` });
 		}
+		row.addEventListener("mousedown", suppressMiddleButtonAutoscroll);
 		row.addEventListener("click", () => {
 			if (expanded) this.expandedTruncationGroups.delete(key);
 			else this.expandedTruncationGroups.add(key);
@@ -2808,6 +2812,8 @@ export class AtlasExplorerView extends ItemView {
 			// to bind unconditionally, since the previous behavior ("nothing happens") is preserved
 			// exactly for a plain click; only shift/cmd-click gain new meaning.
 			row.addEventListener("click", (evt) => this.handleSelectionClick(evt, node.id, "bucket", this.bucketVisibleOrder()));
+			// Middle-click on a Folder row opens nothing, but it still must not start browser autoscroll.
+			row.addEventListener("mousedown", suppressMiddleButtonAutoscroll);
 			row.addEventListener("dragstart", () => {
 				this.dragPayload = this.buildNodeDragPayload(node.id, view.id);
 				this.bucketDragRowEl = row;
@@ -2908,6 +2914,7 @@ export class AtlasExplorerView extends ItemView {
 			// instead of doing nothing, which is what clicking an Outside row is supposed to do.
 			if (!consumed && !outsideManaged) void this.openRef(ref);
 		});
+		wireMiddleClickOpen(row, { ref, missing: info.missing, outsideManaged }, () => refTargetExists(this.plugin.app, this.plugin.settings, ref), (r, newTab) => void this.openRef(r, newTab));
 		// PR-1 (G11c): a unit holding a data source draws its rows even with an empty `children` array.
 		const hasFoldableChildren = node.children.length > 0 || nodeHasApiRows(node);
 		// PR-3 (G1/Q7): only bothers computing the real fold state (an async filter-reveal check)
@@ -3104,6 +3111,8 @@ export class AtlasExplorerView extends ItemView {
 			const consumed = this.handleSelectionClick(evt, key, "inbox", this.inboxSelectOrder);
 			if (!consumed && !missingAdded) void this.openRef(ref);
 		});
+		// Middle-click is stricter than plain click: any missing inbox row does nothing, not just a missing added one.
+		wireMiddleClickOpen(row, { ref, missing: info.missing, outsideManaged: false }, () => refTargetExists(this.plugin.app, this.plugin.settings, ref), (r, newTab) => void this.openRef(r, newTab));
 		row.addEventListener("dragstart", () => {
 			this.dragPayload = this.buildInboxDragPayload(ref);
 			this.inboxDragRowEl = row;
