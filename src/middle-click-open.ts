@@ -80,7 +80,9 @@ export function wireMiddleClickOpen(
 	rowEl.addEventListener("auxclick", (evt) => {
 		// Cheap rules first so the vault lookup only runs for a click that could actually open.
 		if (!shouldOpenOnMiddleClick(evt, rowEl, { ...row, targetExists: true })) return;
-		openOnMiddleClick(evt, rowEl, { ...row, targetExists: targetExists() }, openRef);
+		// The rules above already passed (with targetExists assumed true), so only the live check is left.
+		if (!targetExists()) return;
+		void openRef(row.ref, true);
 	});
 }
 
