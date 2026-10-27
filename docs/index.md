@@ -6,7 +6,7 @@ title: Atlas Explorer
 
 A replacement file explorer for Obsidian that shows every meaningful unit in your vault (blocks, files, folders) as one flat list, and lets you arrange those units into as many hierarchies as you like, without ever moving anything on disk.
 
-![The Atlas explorer: a bucket (arranged tree) above an inbox (everything not yet arranged)](images/explorer.png)
+<img src="images/explorer.png" alt="The Atlas explorer: a bucket (arranged tree) above an inbox (everything not yet arranged)" width="340">
 
 **Version 0.10.0.** Available in Obsidian's community plugins: open **Settings → Community plugins → Browse**, search for **Atlas Explorer**, then install and enable it. It needs Obsidian 1.13.1 or later. It is built to work on mobile too, but has not been tested on a device, and a few features are desktop only (the pages say which). The source is at [github.com/danrfletcher/atlas-explorer](https://github.com/danrfletcher/atlas-explorer).
 

@@ -6,9 +6,9 @@ title: Settings and commands
 
 # Settings and commands
 
-![Atlas settings tab](images/settings.png)
+<img src="images/settings.png" alt="The Basic tab of the Atlas Explorer settings" width="860">
 
-Open **Settings → Atlas Explorer**. The panel has two tabs, **Basic** and **Status**. (The screenshot above may not show every setting added since it was taken.)
+Open **Settings → Atlas Explorer**. The panel has two tabs, **Basic** and **Status**. The screenshot shows the top of the Basic tab.
 
 ## Basic
 

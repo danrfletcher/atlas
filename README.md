@@ -2,7 +2,7 @@
 
 A replacement file explorer for Obsidian that shows every meaningful unit in your vault (blocks, files, folders) as one flat list, and lets you arrange those units into as many hierarchies as you like, without ever moving anything on disk.
 
-![The Atlas explorer: a bucket (arranged tree) above an inbox (everything not yet arranged)](docs/images/explorer.png)
+<img src="docs/images/explorer.png" alt="The Atlas explorer: a bucket (arranged tree) above an inbox (everything not yet arranged)" width="340">
 
 ## Install
 
@@ -73,7 +73,7 @@ Every folder is a unit: a **module** whose **interface** is a note saying what t
 
 Under **Settings → Atlas Explorer**, with two tabs, **Basic** and **Status**. Every setting is described on [Settings and commands](docs/settings.md).
 
-![Atlas settings tab](docs/images/settings.png)
+<img src="docs/images/settings.png" alt="The Basic tab of the Atlas Explorer settings" width="860">
 
 | Basic setting | Default |
 |---|---|
