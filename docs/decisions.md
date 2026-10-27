@@ -2,6 +2,20 @@
 
 Judgement calls made during the build, the alternative considered, and why. Newest first.
 
+## Middle-click on a bucket or inbox row opens its note in a new tab — the settled edge cases
+
+**Decision:** a middle-click (`auxclick`, button 1) on a bucket or inbox unit row's label opens that row's note in a new, focused tab through the same `openRef(ref, true)` the right-click "Open in new tab" uses. Every qualifying click opens its own tab (no debounce), and it never changes the selection. All the rules live in `shouldOpenOnMiddleClick` (`src/middle-click-open.ts`); `explorer-view.ts` only gathers each row's state.
+
+**Decision:** a missing inbox row is refused on middle-click, for every kind of missing row — even though a plain click still opens a missing row that isn't an added one. Plain click on such a row is a deliberate, selection-aware gesture that Atlas already had; middle-click is a new, one-shot gesture with no confirmation step, and opening a missing target risks `openLinkText` creating a note that was never there. So middle-click takes the stricter reading (`RowInfo.missing` blocks it) rather than copying plain click's looser one. `refTargetExists` re-checks the vault at click time too, so a row whose file was deleted after the last render still does nothing.
+
+**Decision:** a module's icon is reserved. A middle-click on it does nothing, so the icon stays free for a later meaning. The same goes for the other controls inside a row (chevron, status dot, row actions, pills, API connection dot, sort indicator, "N Done" truncation rows). Folder (meta) rows, API item rows, Outside-Vault children and modules with no interface note also open nothing.
+
+**Decision:** middle-click with Shift, Cmd, Ctrl or Alt held is ignored. Cmd/Ctrl-click and Shift-click are already selection gestures on these rows, so a modifier plus middle-click is left unclaimed rather than given a second meaning.
+
+**Decision:** the rows that do nothing on middle-click still swallow the `mousedown` for button 1 (`suppressMiddleButtonAutoscroll`), so the browser's middle-button autoscroll never starts. Buttons 0 and 2 are left alone so focus and the context menu behave as before.
+
+**Why:** these were settled while building the feature, and each is a case where the obvious alternative (mirror plain click, open on the icon, let modifiers combine) either risks creating a note by accident or collides with an existing gesture.
+
 ## PR-1.S1: MCP server — transport shape, mobile gating, and JSON-RPC error semantics
 
 **Decision:** the JSON-RPC method the server recognises for the tool call itself is `tools/call` with `params: { name, arguments }` (the MCP convention), not a bespoke per-tool method name. A later PR's tool just adds an entry to the same `tools` map passed into `McpServer`; the transport and dispatch (`src/mcp-protocol.ts`) never change. No `@modelcontextprotocol/sdk` (or any new runtime dependency) was added — the ticket-plan's constraint is "Node's own http and crypto modules; no new runtime dependencies." R2 added the rest of the handshake a standard MCP client needs: `initialize` (returns `protocolVersion`, `capabilities.tools`, `serverInfo`), `tools/list` (built from the same registry), and `notifications/initialized` (202, no body, per JSON-RPC's own notification semantics for a request with no `id`). `tools/call` results are wrapped in MCP's `{ content: [...] }` shape rather than returned as bare objects.

@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { App, Platform } from "obsidian";
 import { McpServer, shouldAutoStartMcpServer } from "../../src/mcp-server";
 import { McpTool } from "../../src/mcp-protocol";
+import { McpTokenStore } from "../../src/mcp-token-store";
 import AtlasPlugin from "../../src/main";
 import { DEFAULT_SETTINGS } from "../../src/settings";
 
@@ -652,12 +653,17 @@ describe("AtlasPlugin's own MCP lifecycle gating (R4) — driven through the rea
 		Platform.isMobile = false;
 		const plugin = makePlugin();
 		plugin.settings = { ...DEFAULT_SETTINGS, mcpServerEnabled: true };
+		// Seed the device-local credentials with a free port so this never binds DEFAULT_MCP_PORT,
+		// which a running Obsidian with Atlas installed on the host may already hold.
+		const freePort = await getFreePort();
+		new McpTokenStore((plugin.app as App)).set({ port: freePort, token: "test-token" });
 
 		await (plugin as unknown as { initMcpServer(): Promise<void> }).initMcpServer();
 
 		expect(plugin.mcpServer).not.toBeNull();
 		const server = plugin.mcpServer as McpServer;
 		expect(server.isRunning()).toBe(true);
+		expect(server.getBoundAddress()?.port).toBe(freePort);
 		track(server);
 
 		const stopSpy = vi.spyOn(server, "stop");
